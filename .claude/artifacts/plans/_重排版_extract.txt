@@ -1,0 +1,102 @@
+项目实施技能组合
+与操作步骤建议
+Private Agent 项目实施指南 · 技能组合与操作流程
+
+版本: v1.0  |  适用阶段: M0-M4  |  ��式: 分阶段 + TDD + 并行子代理
+
+一、项目复杂度评估
+
+二、推荐技能组合（分层）
+核心开发工作流（贯穿 M0-M4 全程）
+
+前端开发（M0 框架 + M3 场景化 UI）
+• frontend-design — UI 组件设计与交互定义
+• vercel-react-best-practices — React 最佳实践
+• 浅色蓝-紫-粉渐变色磨砂玻璃主题 + 有机液体质感动画（用户偏好）
+后端开发（M0 骨架 + M1 编排 + M2 能力层）
+• test-driven-development — 后端 TDD 实现
+• systematic-debugging — 排错时启用
+• PostgreSQL 优先（已在蓝图中锁定）
+测试与验证（M4 + 每阶段收尾）
+• smoke-testing — 生成冒烟测试套件
+• dogfood — M3 完成后系统化探索三场景
+• ponytail-review — 审查过度工程
+• security-best-practices — 安全审查（M0/M2 重点）
+代码质量守护
+• dev-code-review — 提交前审查
+• ponytail-review — 检查过度工程
+• security-best-practices — 安全检查
+辅助工具
+• codebase-memory (MCP) — 跨会话保持代码图谱
+• dispatching-parallel-agents — M2/M3 阶段并行处理
+• dev-grill-docs / writing-plans — 补充计划生成
+
+三、是否独立对话窗口
+强烈建议：各阶段单开对话窗口
+理由如下：
+
+推荐的对话拆分策略
+每个新对话的开场模板：
+读取 d:\Private agent\private-agent-blueprint.md 的第 X 章、
+9.4(MX 阶段)、9.6(对应步骤)、9.13(相关配置段)、
+9.14(相关表), 启动 MX 阶段实施。使用 dev-auto 串联流程。
+
+四、推荐操作步骤（M0-M4 单阶段内部流程）
+每个阶段内部推荐遵循以下流程：
+Step 1: 阶段启动（需求确认）
+使用 dev-grill-docs 或直接读取蓝图文档对应章节
+确认本阶段的实施范围、Done Criteria、前置依赖
+如有偏离设计的地方，先 brainstorming
+Step 2: 生成实施计划
+使用 dev-plan 基于 9.4 生成 RALPLAN 详细计划
+或使用 writing-plans（Superpowers 版）
+计划应包含：任务分解、依赖关系、验证点
+Step 3: TDD 开发循环
+dev-tdd: 先写失败测试 → 实现 → 验证红绿红
+前端模块: 配合 frontend-design + vercel-react-best-practices
+后端模块: 配合 test-driven-development + systematic-debugging
+Step 4: 并行处理（如适用）
+M2/M3 阶段使用 dispatching-parallel-agents 并行处理独立模块
+例如 M2: 一个子代理做 RAG，一个做工具层，一个做沙箱
+Step 5: 阶段验证
+dev-verify: 对照 9.4 的 Done Criteria 逐项验证
+smoke-testing: 生成冒烟测试套件
+M3 完成后: dogfood 系统化探索三场景
+Step 6: 代码审查与提交
+dev-code-review: 提交前审查
+ponytail-review: 审查过度工程
+security-best-practices: 安全审查（M0/M2 重点）
+dev-commit-writer: 生成 commit message
+Step 7: 跨会话交接
+使用 codebase-memory（MCP）建立代码图谱
+在对话末尾总结本阶段完成情况，为下一阶段对话提供交接信息
+
+五、关键注意事项
+1. 避免过度工程
+用户明确「可落地为先」，配合 ponytail-review 严格审视：
+• 不为 V2 接口写具体实现（仅 Protocol/空实现）
+• 不引入未在 9.2 清单中的模块
+• 三层简单代码优于过早抽象
+2. 三大约束的验证
+每阶段完成后，对照 9.8 三大约束检查表验证：
+
+3. 架构变更守护
+任何偏离蓝图的设计变更，必须按 9.11 的 10 项检查清单执行，避免架构漂移。
+4. 用户偏好的贯彻
+
+5. 不推荐使用的技能
+以下技能与本项目（桌面应用）无关，应避免使用：
+
+
+六、总结
+最佳组合（精简版）
+
+操作建议
+1. 重开新对话，以「M0 基础骨架」为开端
+2. 新对话第一句：读取蓝图文档 + 调用 dev-auto 串联 M0 流程
+3. 按 M0 → M1 → M2 → M3 → M4 顺序推进，每阶段一个对话
+4. 每阶段内部遵循：dev-plan → dev-tdd → dev-verify → dev-code-review → dev-commit-writer
+5. M2/M3 阶段积极使用 dispatching-parallel-agents 并行加速
+
+— End —
+本文档由 Private Agent 实施指南整理生成
