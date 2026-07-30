@@ -1,0 +1,216 @@
+# ==============================================================================
+# 私有化 Agent 开发方案 - 全局配置文件 (蓝图 §9.13)
+# 对应章节:2.12 配置分层管理
+# 规则:静态 yaml 默认值 + config_runtime 运行时覆盖(标注 [runtime] 的项支持)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. 系统基础配置(2.1、2.2)
+# ------------------------------------------------------------------------------
+system:
+  app_name: "Private Agent"
+  version: "0.1.0"
+  workspace_root: "${WORKSPACE}"           # 工作区根目录
+  sidecar:
+    memory_limit_mb: 1536                  # Python Sidecar 内存上限 [runtime]
+    log_level: "INFO"                      # 日志级别 [runtime]
+  worker:
+    pool_size: 2                           # Worker 进程池大小
+    memory_limit_mb: 512                   # 单 Worker 内存上限
+
+# ------------------------------------------------------------------------------
+# 2. 通信协议配置(2.3)
+# ------------------------------------------------------------------------------
+server:
+  http:
+    host: "127.0.0.1"
+    port: 8765                             # HTTP 控制面端口
+  websocket:
+    port: 8766                             # WS 数据面端口
+    reconnect_interval_sec: 3              # 重连间隔
+    event_buffer_size: 100                 # 事件缓冲区大小
+
+# ------------------------------------------------------------------------------
+# 3. 模型配置(2.7、2.9、2.12)
+# ------------------------------------------------------------------------------
+models:
+  providers:
+    glm:
+      base_url: "https://open.bigmodel.cn/api/paas/v4"
+      model_name: "glm-4"
+      enabled: true  # [runtime]
+    deepseek:
+      base_url: "https://api.deepseek.com/v1"
+      model_name: "deepseek-chat"
+      enabled: true  # [runtime]
+    agnes:
+      base_url: "待确认"
+      model_name: "待确认"
+      enabled: false  # [runtime]
+    kimi:
+      base_url: "https://api.moonshot.cn/v1"
+      model_name: "moonshot-v1-8k"
+      enabled: true  # [runtime]
+
+  router:
+    type: "manual"                         # MVP: manual / V2: tag_based [runtime]
+    fallback_chain: ["glm", "deepseek", "kimi"]
+
+  compress_model: "glm-4-flash"            # [runtime]
+
+# ------------------------------------------------------------------------------
+# 4. 上下文工程配置(3.5、3.7、3.9、3.10、3.13)
+# ------------------------------------------------------------------------------
+context:
+  status_bar:
+    enabled: true  # [runtime]
+    inject_per_turn: true  # [runtime]
+  template:
+    kb_replace_mode: false  # [runtime]
+  compression:
+    active_zone_token_limit: 4000  # [runtime]
+    stable_zone_size_limit: 20  # [runtime]
+    aggressive_mode: false  # [runtime]
+    kb_chunks_merge_threshold: 20  # [runtime]
+  billing:
+    currency: "CNY"  # [runtime]
+    price_snapshot_enabled: true  # [runtime]
+
+# ------------------------------------------------------------------------------
+# 5. 记忆配置(4.2、4.4、4.5)
+# ------------------------------------------------------------------------------
+memory:
+  extract_interval_turns: 8  # [runtime]
+  inject_limit: 10  # [runtime]
+  eviction:  # [runtime]
+    max_active_count: 200
+    min_importance_threshold: 0.3
+    expire_days: 30
+
+# ------------------------------------------------------------------------------
+# 6. 知识库配置(4.9、4.10、4.11、4.13)
+# ------------------------------------------------------------------------------
+kb:
+  chunk:
+    markdown:
+      chunk_size: 512
+      chunk_overlap: 64
+    code:
+      chunk_size: 256
+      chunk_overlap: 32
+    pdf:
+      chunk_size: 512
+      chunk_overlap: 64
+    plain:
+      chunk_size: 400
+      chunk_overlap: 50
+  embedding:
+    local_default: "BAAI/bge-m3"
+    local_light: "BAAI/bge-small-zh-v1.5"  # [runtime]
+    fallback_cloud: "glm-embedding"
+    auto_switch_memory_gb: 6  # [runtime]
+    lru_cache_size: 512
+  hnsw:
+    m: 16
+    ef_construction: 128
+    ef_search: 64  # [runtime]
+  retrieval:
+    rrf_k: 60
+    vector_top_k: 20
+    keyword_top_k: 20
+    final_top_k: 5
+
+# ------------------------------------------------------------------------------
+# 7. 工具层配置(5.4、5.12、5.13、5.15)
+# ------------------------------------------------------------------------------
+tools:
+  mcp:
+    config_source: "hybrid"  # [runtime]
+    probe_interval_sec: 60  # [runtime]
+    # MCP 2026-07-28 协议版本协商(MVP 锁定旧协议,V2 启用新协议)
+    protocol_version: "2025-11-25"  # [runtime] MVP 仅支持 2025-11-25;loader 对 2026-07-28 抛 ConfigNotSupportedInMVP
+    cache_ttl_ms: 30000  # [runtime] V2 启用
+    enable_server_discover: false  # [runtime] V2 启用
+  permission:
+    cache_ttl_sec: 3600  # [runtime]
+    elevated_require_ws_confirm: true  # [runtime]
+  timeout:
+    default_sec: 30  # [runtime]
+    categories:  # [runtime]
+      file_ops: 30
+      http_request: 60
+      web_search: 30
+      code_execution: 300
+      search_knowledge: 10
+    max_retries: 3
+    backoff_base_sec: 1
+  artifact:
+    truncate_threshold_tokens: 4000
+    sandbox_truncate_threshold_tokens: 2000
+
+# ------------------------------------------------------------------------------
+# 8. 沙箱配置(6.7、6.14)
+# ------------------------------------------------------------------------------
+sandbox:
+  enabled: true  # [runtime]
+  workspace_root: "${WORKSPACE}/.sandbox"
+  retention_days: 7  # [runtime]
+  languages:
+    python:
+      command: "python"
+      script_extension: ".py"
+      min_version: "3.10"
+    javascript:
+      command: "node"
+      script_extension: ".js"
+      min_version: "18.0"
+  limits:  # [runtime]
+    cpu_timeout_sec: 300
+    memory_limit_mb: 512
+    disk_limit_mb: 100
+    network_enabled: false
+  security:
+    code_scan_enabled: true  # [runtime]
+    env_sanitization_enabled: true  # [runtime]
+    dangerous_patterns:
+      - "os\\.system"
+      - "subprocess\\.Popen"
+      - "pty\\.spawn"
+      - "os\\.fork"
+
+# ------------------------------------------------------------------------------
+# 9. Skills 配置(7.2、7.6)
+# ------------------------------------------------------------------------------
+skills:
+  storage:
+    dev_dir: "./skills"
+    runtime_source: "db_first"  # [runtime]
+  defaults:
+    max_frozen_token: 4000  # [runtime]
+    examples_count: 3
+
+# ------------------------------------------------------------------------------
+# 10. 评估配置(8.8、8.9)
+# ------------------------------------------------------------------------------
+eval:
+  judge_model: "glm-4-flash"  # [runtime]
+  judge_prompt_dir: "./config/judge_prompts"
+  datasets_per_scenario: 20  # [runtime]
+  regression_subset: 5  # [runtime]
+  auto_trigger_on_version_change: true  # [runtime]
+
+# ------------------------------------------------------------------------------
+# 11. 可观测性配置(2.10、2.13)
+# ------------------------------------------------------------------------------
+observability:
+  logging:
+    level: "INFO"  # [runtime]
+    file_path: "${WORKSPACE}/logs/agent.log"
+    stdout_enabled: true  # [runtime]
+    trace_id_enabled: true
+  disk:
+    warning_gb: 1.5  # [runtime]
+    block_new_session_gb: 2.0  # [runtime]
+    force_cleanup_gb: 3.0  # [runtime]
+    react_events_retention_days: 7  # [runtime]
+    vacuum_schedule: "0 3 * * 0"
