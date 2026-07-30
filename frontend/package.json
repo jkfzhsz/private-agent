@@ -1,0 +1,11 @@
+{
+  "name": "private-agent-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private Agent Electron + React frontend (蓝图 §2.15)",
+  "main": "main/index.ts",
+  "scripts": {
+    "start": "echo \"TODO B2.1: electron .\"",
+    "test": "echo \"TODO: frontend tests\""
+  }
+}
