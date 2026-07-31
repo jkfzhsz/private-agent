@@ -19,6 +19,17 @@ system:
     memory_limit_mb: 512                   # 单 Worker 内存上限
 
 # ------------------------------------------------------------------------------
+# 1b. 数据库配置(2.10、9.13)
+# ------------------------------------------------------------------------------
+database:
+  host: "127.0.0.1"
+  port: 5432
+  name: "private_agent"
+  user: "postgres"
+  password_env: "PA_DB_PASSWORD"           # 密码从环境变量读取,不入 yaml
+  pool_size: 10                            # asyncpg 连接池大小(蓝图 §2.10)
+
+# ------------------------------------------------------------------------------
 # 2. 通信协议配置(2.3)
 # ------------------------------------------------------------------------------
 server:
@@ -212,5 +223,7 @@ observability:
     warning_gb: 1.5  # [runtime]
     block_new_session_gb: 2.0  # [runtime]
     force_cleanup_gb: 3.0  # [runtime]
-    react_events_retention_days: 7  # [runtime]
+    react_events_retention_days: 30  # [runtime] 默认 30 天(蓝图 §2.10 第 2 条);3GB 强制清理时收紧为 7 天
+    react_events_retention_days_force: 7  # 3GB 强制清理时收紧值(蓝图 §2.10 第 6 条)
+    messages_archive_retention_days: 90  # 蓝图 §2.10 第 3 条:会话关闭 90 天后归档
     vacuum_schedule: "0 3 * * 0"
