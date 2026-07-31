@@ -61,7 +61,10 @@ def build_fallback_chain(cfg: dict) -> FallbackChain:
 
 
 class ManualRouter:
-    """蓝图 §2.9 manual router(MVP 简化版:按名直选,不走 tag 协商)。"""
+    """蓝图 §2.9 manual router(MVP 简化版:按名直选,不走 tag 协商)。
+
+    M2 扩展:select_by_tag 支持基于 MCP Server 标签的筛选。
+    """
 
     def __init__(self, cfg: dict):
         self._cfg = cfg
@@ -73,6 +76,23 @@ class ManualRouter:
             KeyError: provider_name 未注册或 cfg 中缺失。
         """
         return get_adapter(provider_name, self._cfg)
+
+    def select_by_tag(self, tag_name: str, mcp_clients: list) -> list:
+        """AC-5: 基于 MCP Server 标签筛选候选客户端。
+
+        返回 tags 列表包含指定 tag_name 的 MCPClient 实例列表。
+        仅支持单标签精确匹配(方案 B:用户标签路由)。
+
+        Args:
+            tag_name: 要匹配的标签名称。
+            mcp_clients: MCPClient 实例列表。
+
+        Returns:
+            匹配标签的 MCPClient 实例列表。
+        """
+        if not tag_name:
+            return []
+        return [c for c in mcp_clients if tag_name in c.config.tags]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

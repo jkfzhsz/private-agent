@@ -6,6 +6,7 @@ Source: spec/m1-react-loop AC-3 + Solution `core/context_manager.py`
 - build_initial: 启动构建,持久化 Frozen Zone(system_prompt + 工具定义)到 messages 表
 - build_per_turn / append_*_message: 每轮构建,Active Zone 追加用户/助手/工具消息
 - get_messages: 返回 Frozen + Stable + Active 合并消息列表
+- build_messages: get_messages 的 async 别名,供 run_turn 调用
 - spec Out of scope: 三区构建不含压缩;启动时 Stable/Active 为空
 - spec Assumptions: hash 字段预留,本次只存字段不做校验
 """
@@ -259,6 +260,13 @@ class ContextManager:
             *self.stable_zone.messages,
             *self.active_zone.messages,
         ]
+
+    async def build_messages(self) -> list[dict]:
+        """返回 Frozen + Stable + Active 三区合并后的消息列表（供 adapter.chat 使用）。
+
+        与 get_messages 功能相同,但为 async 方法,适配 run_turn 中的 await 调用。
+        """
+        return self.get_messages()
 
     async def build_per_turn(
         self,
