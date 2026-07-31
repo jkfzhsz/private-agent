@@ -28,8 +28,15 @@ def _build_adapter(cfg):
 
 
 def _get_tools(cfg):
-    """获取工具列表(M1 默认空,测试可 monkeypatch)。"""
-    return []
+    """获取工具列表(M2:从 ToolRegistry 注册所有内置工具,测试可 monkeypatch)。
+
+    MCP 工具发现由 startup 阶段异步完成,此处仅返回内置工具。
+    """
+    from private_agent.tools.builtins import register_all_builtins
+    from private_agent.tools.registry import ToolRegistry
+    registry = ToolRegistry()
+    register_all_builtins(registry)
+    return registry.list_tools()
 
 
 def _get_system_prompt(cfg):

@@ -138,6 +138,7 @@ tools:
   mcp:
     config_source: "hybrid"  # [runtime]
     probe_interval_sec: 60  # [runtime]
+    servers: []  # MCP 服务声明列表:每项含 id/type/command/args/tags/timeout
     # MCP 2026-07-28 协议版本协商(MVP 锁定旧协议,V2 启用新协议)
     protocol_version: "2025-11-25"  # [runtime] MVP 仅支持 2025-11-25;loader 对 2026-07-28 抛 ConfigNotSupportedInMVP
     cache_ttl_ms: 30000  # [runtime] V2 启用
@@ -227,3 +228,4 @@ observability:
     react_events_retention_days_force: 7  # 3GB 强制清理时收紧值(蓝图 §2.10 第 6 条)
     messages_archive_retention_days: 90  # 蓝图 §2.10 第 3 条:会话关闭 90 天后归档
     vacuum_schedule: "0 3 * * 0"
+

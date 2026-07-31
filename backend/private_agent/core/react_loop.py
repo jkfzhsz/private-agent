@@ -8,6 +8,16 @@ Source: spec/m1-react-loop AC-1 + Solution `core/react_loop.py`
 - spec AC-1: thinking→tool_call→tool_result→final 四类 event 顺序正确
 - spec Edge cases: max_iterations 防死循环(默认 10)
 - spec Failure modes: 模型全 fail / 未知工具 → 产出 error event,state=ERROR
+- M2 P2 fix: tool_def.handler(args) 包 try/except,产出标准化 error event
+
+Event 格式(推送到 event_queue):
+    {
+        "type": "react_event",
+        "event_type": "thinking" | "tool_call" | "tool_result" | "final" | "error",
+        "session_id": int,
+        "turn": int,
+        "payload": {...},
+    }
 """
 from __future__ import annotations
 
@@ -28,12 +38,8 @@ if TYPE_CHECKING:
 
 __all__ = ["ReactLoopState", "ReactLoop"]
 
-_logger = setup_logger(__name__)
-
 
 class ReactLoopState(Enum):
-    """蓝图 §2.4 ReAct 状态机五态。"""
-
     IDLE = "idle"
     THINKING = "thinking"
     ACTING = "acting"
@@ -42,235 +48,251 @@ class ReactLoopState(Enum):
 
 
 class ReactLoop:
-    """蓝图 §2.4/§2.6 ReAct 循环状态机。
+    """ReAct 循环状态机(蓝图 §2.4/§2.6)。
 
-    单轮流程:
-    1. IDLE → THINKING: 收到 user_message,build_per_turn 构造上下文
-    2. THINKING: adapter.chat() 产出 LLM 回复,产出 thinking event(仅首次迭代)
-    3. 若有 tool_calls → ACTING: 执行工具,产出 tool_call/tool_result events → OBSERVING
-    4. OBSERVING → THINKING: 追加 tool_result,再次调用 adapter(循环)
-    5. 无 tool_calls → 产出 final event → IDLE
-    6. 达到 max_iterations 或模型全失败 → 产出 error event → ERROR
-
-    每步 react_events 入库,turn 递增。
+    管理单轮对话的思考-行动-观察循环,产出结构化事件流。
     """
 
     def __init__(
         self,
         session_id: int,
-        context_manager: "ContextManager",
+        context_manager: ContextManager,
         adapter: ModelAdapter,
         tools: list[ToolDef],
-        conn: "asyncpg.Connection",
+        conn: asyncpg.Connection,
         max_iterations: int = 10,
     ) -> None:
-        self.session_id = session_id
-        self.context_manager = context_manager
-        self.adapter = adapter
-        self.tools = list(tools)
-        self.conn = conn
-        self.max_iterations = max_iterations
-        self.state = ReactLoopState.IDLE
-        self.event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._session_id = session_id
+        self._context_manager = context_manager
+        self._adapter = adapter
+        self._tools = tools
+        self._conn = conn
+        self._max_iterations = max_iterations
         self._turn = 0
+        self._state = ReactLoopState.IDLE
+        self._iteration = 0
+        self.event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._logger = setup_logger("private_agent.react_loop")
 
-    def _transition(self, new_state: ReactLoopState) -> None:
-        """状态转换(记录日志)。"""
-        _logger.debug(
-            "react_loop state transition",
-            extra={
-                "session_id": self.session_id,
-                "from": self.state.value,
-                "to": new_state.value,
-            },
-        )
-        self.state = new_state
+    # ──────────────────────────────────────────────────────────────────────────
+    # State machine
+    # ──────────────────────────────────────────────────────────────────────────
 
-    async def _emit_event(
-        self,
-        event_type: str,
-        payload: dict[str, Any],
-    ) -> None:
-        """产出 react_event:入 event_queue + 持久化到 react_events 表。
+    async def _emit_event(self, event_type: str, *, payload: dict | None = None) -> None:
+        """构造并写入 react_event(同步入库 + 异步推送)。
 
         Args:
-            event_type: thinking/tool_call/tool_result/final/error/checkpoint
-            payload: 事件负载
+            event_type: 事件类型(thinking/tool_call/tool_result/error/final)。
+            payload: 事件负载(可选)。
         """
-        event = {
+        event: dict[str, Any] = {
             "type": "react_event",
-            "session_id": self.session_id,
-            "turn": self._turn,
             "event_type": event_type,
-            "payload": payload,
+            "session_id": self._session_id,
+            "turn": self._turn,
+            "payload": payload or {},
         }
-        await self.event_queue.put(event)
+
+        # 持久化到 DB
         await insert_react_event(
-            self.conn,
-            session_id=self.session_id,
+            self._conn,
+            session_id=self._session_id,
             turn=self._turn,
             event_type=event_type,
-            payload=payload,
+            payload=payload or {},
         )
 
-    def _find_tool(self, name: str) -> ToolDef | None:
-        """按名称查找 ToolDef。"""
-        for t in self.tools:
-            if t.name == name:
-                return t
-        return None
+        # 推送到队列(WS 消费)
+        await self.event_queue.put(event)
 
-    async def run_turn(self, user_content: str) -> None:
-        """执行一轮 ReAct 循环(蓝图 §2.4)。
+    @property
+    def state(self) -> ReactLoopState:
+        """返回当前状态。"""
+        return self._state
 
-        流程:
-        1. IDLE → THINKING
-        2. build_per_turn 构造上下文
-        3. 循环调用 adapter.chat:
-           - 首次产出 thinking event
-           - 有 tool_calls → ACTING → 执行工具 → OBSERVING → THINKING(循环)
-           - 无 tool_calls → 产出 final event → IDLE
-        4. 达到 max_iterations 或模型失败 → error event → ERROR
+    def _transition(self, new_state: ReactLoopState) -> None:
+        """状态转移。"""
+        self._state = new_state
+
+    @property
+    def max_iterations(self) -> int:
+        """返回最大迭代次数。"""
+        return self._max_iterations
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def run_turn(self, user_message: str) -> None:
+        """执行一轮 ReAct 循环。
 
         Args:
-            user_content: 用户输入文本。
+            user_message: 用户消息文本。
         """
         self._turn += 1
+        self._iteration = 0
         self._transition(ReactLoopState.THINKING)
 
-        # 构造上下文(frozen + stable + active + 本次 user)
-        messages = await self.context_manager.build_per_turn(
-            self.conn,
-            turn=self._turn,
-            user_content=user_content,
+        # 追加 user_message 到上下文
+        await self._context_manager.append_user_message(
+            self._conn, turn=self._turn, content=user_message,
         )
-        tools_schema = [t.to_openai_schema() for t in self.tools] if self.tools else None
 
-        iteration = 0
-        while True:
-            iteration += 1
-            if iteration > self.max_iterations:
+        # thinking event 仅触发一次(首次模型调用后)
+        has_emitted_thinking = False
+
+        while self._iteration < self._max_iterations:
+            self._iteration += 1
+            self._transition(ReactLoopState.ACTING)
+
+            # 构建消息列表
+            messages = await self._context_manager.build_messages()
+
+            # 调用模型
+            try:
+                result: ChatResult = await self._adapter.chat(messages, self._tools)
+            except AllProvidersFailedError as e:
                 await self._emit_event(
                     "error",
                     payload={
-                        "message": f"max_iterations({self.max_iterations}) exceeded",
-                        "iteration": iteration,
+                        "message": str(e),
+                        "stage": "model_chat",
                     },
                 )
                 self._transition(ReactLoopState.ERROR)
                 return
 
-            # 调用模型
-            try:
-                result: ChatResult = await self.adapter.chat(messages, tools_schema)
-            except AllProvidersFailedError as e:
-                await self._emit_event(
-                    "error",
-                    payload={"message": str(e), "stage": "model_chat"},
-                )
-                self._transition(ReactLoopState.ERROR)
-                return
-
-            # 首次迭代产出 thinking event(蓝图 §2.4 THINKING 态)
-            if iteration == 1:
+            # 首次模型调用后产出 thinking event
+            if not has_emitted_thinking:
                 await self._emit_event(
                     "thinking",
                     payload={
                         "content": result.content,
-                        "tool_calls": result.tool_calls,
-                        "used_provider": result.used_provider,
-                        "failed_providers": result.failed_providers,
+                        "turn": self._turn,
                     },
                 )
+                has_emitted_thinking = True
 
-            if not result.tool_calls:
-                # 无工具调用:产出 final → IDLE
-                await self.context_manager.append_assistant_message(
-                    self.conn,
+            if result.tool_calls:
+                # 持久化 assistant 消息(含 tool_calls)
+                await self._context_manager.append_assistant_message(
+                    self._conn,
                     turn=self._turn,
                     content=result.content,
+                    tool_calls=result.tool_calls,
+                )
+                for tc in result.tool_calls:
+                    # OpenAI 格式: tc.function.name / tc.function.arguments
+                    func = tc.get("function", tc)
+                    tool_name = func["name"]
+                    args_raw = func.get("arguments", "{}")
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                    tool_call_id = tc.get("id", f"call_{self._iteration}")
+
+                    # 产出 tool_call event
+                    await self._emit_event(
+                        "tool_call",
+                        payload={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "arguments": args,
+                        },
+                    )
+
+                    # 查找工具定义
+                    tool_def = self._find_tool(tool_name)
+                    if tool_def is None:
+                        await self._emit_event(
+                            "error",
+                            payload={
+                                "message": f"unknown tool: {tool_name}",
+                                "tool_call_id": tool_call_id,
+                                "stage": "tool_lookup",
+                            },
+                        )
+                        self._transition(ReactLoopState.ERROR)
+                        return
+
+                    # 执行工具(P2 fix: 包 try/except 防 handler 异常崩溃)
+                    try:
+                        tool_result = await tool_def.handler(args)
+                    except Exception as e:
+                        self._logger.exception(
+                            "Tool handler failed: tool=%s args=%s", tool_name, args
+                        )
+                        await self._emit_event(
+                            "error",
+                            payload={
+                                "message": f"tool handler error: {type(e).__name__}: {e}",
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "stage": "tool_execution",
+                            },
+                        )
+                        self._transition(ReactLoopState.ERROR)
+                        return
+
+                    # 产出 tool_result event
+                    await self._emit_event(
+                        "tool_result",
+                        payload={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "output": tool_result.output,
+                            "error": tool_result.error,
+                        },
+                    )
+
+                    # 持久化 tool message
+                    await self._context_manager.append_tool_message(
+                        self._conn,
+                        turn=self._turn,
+                        tool_call_id=tool_call_id,
+                        content=tool_result.output,
+                        name=tool_name,
+                    )
+
+                # OBSERVING → 继续循环
+                self._transition(ReactLoopState.OBSERVING)
+            else:
+                # 无 tool_calls → final response
+                await self._context_manager.append_assistant_message(
+                    self._conn, turn=self._turn, content=result.content,
                 )
                 await self._emit_event(
                     "final",
                     payload={
+                        "turn": self._turn,
                         "content": result.content,
-                        "used_provider": result.used_provider,
                     },
                 )
                 self._transition(ReactLoopState.IDLE)
                 return
 
-            # 有 tool_calls:THINKING → ACTING
-            self._transition(ReactLoopState.ACTING)
+        # 超出 max_iterations
+        await self._emit_event(
+            "error",
+            payload={
+                "message": f"max_iterations ({self._max_iterations}) reached",
+                "stage": "iteration_limit",
+            },
+        )
+        self._transition(ReactLoopState.ERROR)
 
-            # 持久化 assistant message(含 tool_calls)
-            await self.context_manager.append_assistant_message(
-                self.conn,
-                turn=self._turn,
-                content=result.content,
-                tool_calls=result.tool_calls,
-            )
+    # ──────────────────────────────────────────────────────────────────────────
+    # Internal helpers
+    # ──────────────────────────────────────────────────────────────────────────
 
-            # 遍历执行 tool_calls
-            for tc in result.tool_calls:
-                tool_name = tc["function"]["name"]
-                tool_call_id = tc["id"]
-                args_str = tc["function"].get("arguments", "{}")
-                try:
-                    args = json.loads(args_str) if args_str else {}
-                except json.JSONDecodeError:
-                    args = {}
+    def _find_tool(self, name: str) -> ToolDef | None:
+        """按名查找工具定义。
 
-                # 产出 tool_call event
-                await self._emit_event(
-                    "tool_call",
-                    payload={
-                        "tool_name": tool_name,
-                        "tool_call_id": tool_call_id,
-                        "arguments": args,
-                    },
-                )
+        Args:
+            name: 工具名称。
 
-                # 查找工具定义
-                tool_def = self._find_tool(tool_name)
-                if tool_def is None:
-                    await self._emit_event(
-                        "error",
-                        payload={
-                            "message": f"unknown tool: {tool_name}",
-                            "tool_call_id": tool_call_id,
-                            "stage": "tool_lookup",
-                        },
-                    )
-                    self._transition(ReactLoopState.ERROR)
-                    return
-
-                # 执行工具
-                tool_result = await tool_def.handler(args)
-
-                # 产出 tool_result event
-                await self._emit_event(
-                    "tool_result",
-                    payload={
-                        "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,
-                        "output": tool_result.output,
-                        "error": tool_result.error,
-                    },
-                )
-
-                # 持久化 tool message
-                await self.context_manager.append_tool_message(
-                    self.conn,
-                    turn=self._turn,
-                    tool_call_id=tool_call_id,
-                    content=tool_result.output,
-                    name=tool_name,
-                )
-
-            # ACTING → OBSERVING → THINKING(循环)
-            self._transition(ReactLoopState.OBSERVING)
-            self._transition(ReactLoopState.THINKING)
-
-            # 更新 messages 用于下一次 adapter 调用
-            messages = self.context_manager.get_messages()
+        Returns:
+            匹配的 ToolDef,未找到时返回 None。
+        """
+        for td in self._tools:
+            if td.name == name:
+                return td
+        return None

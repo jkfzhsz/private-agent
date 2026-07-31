@@ -15,7 +15,7 @@ from private_agent.storage import migrations, react_events
 
 TEST_DSN = os.environ.get(
     "PA_TEST_DSN",
-    "postgresql://postgres:postgres@localhost:5432/private_agent_test",
+    "postgresql://postgres:123123@localhost:5432/private_agent_test",
 )
 
 
