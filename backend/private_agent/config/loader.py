@@ -4,6 +4,7 @@ B5.1:加载 config.yaml 静态配置。
 B5.4:对 MVP 不支持的 mcp.protocol_version 抛 ConfigNotSupportedInMVP。
 B5.2:合并 config_runtime 表运行时覆盖(蓝图 §2.12 优先级:runtime > yaml)。
 AC-11:校验 mcp.servers[] 配置合法性。
+AC-13:校验 sandbox 配置段合法性。
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
 
     Raises:
         ConfigNotSupportedInMVP: 当 tools.mcp.protocol_version 不在 MVP 支持列表时。
-        ValueError: 当 mcp.servers[] 配置不合法时。
+        ValueError: 当 mcp.servers[] 或 sandbox 配置不合法时。
     """
     path = config_path if config_path is not None else CONFIG_FILE
     with path.open("r", encoding="utf-8") as f:
@@ -65,7 +66,7 @@ async def load_config_with_overrides(
 
     Raises:
         ConfigNotSupportedInMVP: 合并后的 protocol_version 不在 MVP 支持列表时。
-        ValueError: 当 mcp.servers[] 配置不合法时。
+        ValueError: 当 mcp.servers[] 或 sandbox 配置不合法时。
     """
     cfg = load_config(config_path)
     overrides = await _get_runtime_overrides(conn)
@@ -107,9 +108,11 @@ def _validate_mvp_constraints(cfg: dict[str, Any]) -> None:
     蓝图 §9.13:loader 对 mcp.protocol_version='2026-07-28' 抛 ConfigNotSupportedInMVP,
     防止 UI 误改导致静默失败。
     AC-11:校验 mcp.servers[] 配置合法性。
+    AC-13:校验 sandbox 配置段(蓝图 §6.14)合法性。
     """
     _validate_mcp_protocol_version(cfg)
     _validate_mcp_servers_config(cfg)
+    _validate_sandbox_config(cfg)
 
 
 def _validate_mcp_protocol_version(cfg: dict[str, Any]) -> None:
@@ -157,3 +160,48 @@ def _validate_mcp_servers_config(cfg: dict[str, Any]) -> None:
             raise ValueError(
                 f"mcp.servers[{i}] type='stdio' requires 'command' field"
             )
+
+
+def _validate_sandbox_config(cfg: dict[str, Any]) -> None:
+    """校验 sandbox 配置段合法性(AC-13, 蓝图 §6.14)。
+
+    Raises:
+        ValueError: 当配置不合法时。
+    """
+    sandbox = cfg.get("sandbox")
+    if sandbox is None:
+        return  # sandbox 段可选,缺失时跳过校验
+
+    if not isinstance(sandbox, dict):
+        raise ValueError("sandbox config must be a dict")
+
+    # enabled 可选,默认为 bool
+    if "enabled" in sandbox and not isinstance(sandbox["enabled"], bool):
+        raise ValueError("sandbox.enabled must be a boolean")
+
+    # languages.python.command 校验
+    python_cfg = sandbox.get("languages", {}).get("python", {})
+    if python_cfg and "command" in python_cfg:
+        if not isinstance(python_cfg["command"], str) or not python_cfg["command"]:
+            raise ValueError("sandbox.languages.python.command must be a non-empty string")
+
+    # limits 校验
+    limits = sandbox.get("limits", {})
+    if limits:
+        for key in ("cpu_timeout_sec", "memory_limit_mb", "disk_limit_mb"):
+            if key in limits and (not isinstance(limits[key], (int, float)) or limits[key] <= 0):
+                raise ValueError(f"sandbox.limits.{key} must be a positive number")
+
+    # security.code_scan_enabled 和 env_sanitization_enabled 校验
+    security = sandbox.get("security", {})
+    if security:
+        for key in ("code_scan_enabled", "env_sanitization_enabled"):
+            if key in security and not isinstance(security[key], bool):
+                raise ValueError(f"sandbox.security.{key} must be a boolean")
+
+    # output.*_threshold 校验
+    output = sandbox.get("output", {})
+    if output:
+        for key in ("stdout_artifact_threshold", "code_artifact_threshold"):
+            if key in output and (not isinstance(output[key], int) or output[key] < 0):
+                raise ValueError(f"sandbox.output.{key} must be a non-negative integer")

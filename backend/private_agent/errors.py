@@ -26,3 +26,17 @@ class McpHttpStubNotImplementedError(PrivateAgentError):
     MVP 仅支持 stdio 模式通信;HTTP 模式仅保留类型定义和配置解析 stub,
     调用 connect/discover/call 时抛此异常。
     """
+
+
+class SandboxTimeoutError(PrivateAgentError):
+    """沙箱执行超时(蓝图 6.7 / spec m2-sandbox AC-2)。
+
+    子进程执行超过 cpu_timeout_sec 时抛出,process.terminate() 后触发。
+    """
+
+
+class SandboxResourceError(PrivateAgentError):
+    """沙箱资源超限(蓝图 6.7 / spec m2-sandbox)。
+
+    磁盘超限/内存超限(Windows 无 setrlimit 时兜底)时抛出。
+    """

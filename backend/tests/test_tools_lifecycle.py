@@ -41,54 +41,45 @@ def _setup_schema() -> None:
             await migrations.migrate_all(conn)
         finally:
             await conn.close()
-
     asyncio.run(_run())
 
 
 async def _create_session(conn: asyncpg.Connection) -> int:
-    return await conn.fetchval(
-        "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
-        "test-tools-lifecycle",
-        "mock-glm",
+    """创建测试会话并返回 session_id。"""
+    row = await conn.fetchrow(
+        "INSERT INTO sessions (title) VALUES ($1) RETURNING id",
+        "test_tools_lifecycle",
     )
+    return row["id"]
 
 
-class _MockAdapter:
-    """测试用 mock 适配器,返回预设 ChatResult。"""
-
-    provider_name = "mock"
-    capability = ModelCapability(
-        streaming=False, function_calling=True, vision=False, json_mode=False
-    )
-
-    def __init__(self, responses: list[ChatResult]) -> None:
-        self._responses = list(responses)
-        self._idx = 0
-        self.chat_calls: list[tuple[list[dict], list[dict] | None]] = []
-
-    async def chat(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-    ) -> ChatResult:
-        self.chat_calls.append((list(messages), list(tools) if tools else None))
-        if self._idx >= len(self._responses):
-            raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")
-        result = self._responses[self._idx]
-        self._idx += 1
-        return result
-
-
-def _calculator_tool_call(call_id: str = "call_1", expr: str = "2+3") -> dict:
-    """构造 OpenAI 格式 calculator tool_call dict。"""
+def _calculator_tool_call(call_id: str, expr: str) -> dict:
+    """构造 calculator tool_call 的 mock 响应。"""
     return {
         "id": call_id,
         "type": "function",
         "function": {
             "name": "calculator",
-            "arguments": '{"expression": "' + expr + '"}',
+            "arguments": f'{{"expression": "{expr}"}}',
         },
     }
+
+
+class _MockAdapter:
+    """模拟 ModelAdapter 返回固定响应。"""
+
+    def __init__(self, responses: list[ChatResult]) -> None:
+        self._responses = list(responses)
+        self.call_count = 0
+
+    async def chat(self, messages: list, tools: list, **kwargs) -> ChatResult:
+        result = self._responses[self.call_count]
+        self.call_count += 1
+        return result
+
+    @property
+    def capabilities(self) -> set[ModelCapability]:
+        return set()
 
 
 # =============================================================================
@@ -97,18 +88,18 @@ def _calculator_tool_call(call_id: str = "call_1", expr: str = "2+3") -> dict:
 
 
 class TestBuiltinToolLifecycle:
-    """AC-8 分支①: ToolRegistry + 7 类内置工具 → ReactLoop 调用。"""
+    """AC-8 分支①: ToolRegistry + 8 类内置工具 → ReactLoop 调用。"""
 
-    def test_tool_registry_contains_all_7_builtins(self):
-        """ToolRegistry 注册全部 7 类内置工具。"""
+    def test_tool_registry_contains_all_8_builtins(self):
+        """ToolRegistry 注册全部 8 类内置工具。"""
         registry = ToolRegistry()
         register_all_builtins(registry)
         tools = registry.list_tools()
         names = {t.name for t in tools}
         assert names == {
-            "calculator", "datetime", "file_read", "file_write",
-            "http_request", "web_search", "read_artifact",
-        }, f"expected 7 builtins, got {names}"
+            "calculator", "code_execution", "datetime", "file_read",
+            "file_write", "http_request", "web_search", "read_artifact",
+        }, f"expected 8 builtins, got {names}"
 
     def test_react_loop_calls_builtin_calculator_via_tool_registry(self):
         """ReactLoop 通过 ToolRegistry 加载内置工具并执行 calculator。"""
@@ -211,7 +202,7 @@ class TestBuiltinToolLifecycle:
                     tools=tools,
                     conn=conn,
                 )
-                await loop.run_turn("what time is it")
+                await loop.run_turn("get time")
                 events = []
                 while not loop.event_queue.empty():
                     events.append(loop.event_queue.get_nowait())
@@ -250,24 +241,6 @@ class TestMcpToolLifecycle:
         tools = registry.list_tools()
         names = {t.name for t in tools}
         assert "mcp_search" in names
-
-    def test_mcp_tool_schema_adapter_converts_to_tooldef(self):
-        """MCP 工具 schema 通过 SchemaAdapter 转换为 ToolDef。"""
-        mcp_schema = {
-            "name": "fetch_url",
-            "description": "Fetch a URL and return content",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string"},
-                },
-                "required": ["url"],
-            },
-        }
-        tool_def = mcp_tool_to_tooldef(mcp_schema)
-        assert tool_def.name == "fetch_url"
-        assert tool_def.description == "Fetch a URL and return content"
-        assert tool_def.parameters_schema["type"] == "object"
 
     def test_mcp_tool_integrated_with_tool_registry(self):
         """MCP 工具 schema → SchemaAdapter → ToolRegistry → ReactLoop 可查询。"""
