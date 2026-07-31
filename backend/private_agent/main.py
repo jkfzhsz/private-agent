@@ -6,11 +6,35 @@ from __future__ import annotations
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from private_agent.api import admin
 from private_agent.config import loader
+from private_agent.core.context_manager import ContextManager
+from private_agent.core.react_loop import ReactLoop
 from private_agent.observability.logging import setup_logger
 from private_agent.storage import db, ws_offset
 
 app = FastAPI(title="Private Agent Sidecar", version="0.1.0")
+app.include_router(admin.router)
+
+_logger = setup_logger("private_agent.main")
+
+_scheduler = None  # APScheduler 单例(startup 创建,shutdown 停止)
+
+
+def _build_adapter(cfg):
+    """构造模型适配器(默认 FallbackChain,测试可 monkeypatch)。"""
+    from private_agent.models.registry import build_fallback_chain
+    return build_fallback_chain(cfg)
+
+
+def _get_tools(cfg):
+    """获取工具列表(M1 默认空,测试可 monkeypatch)。"""
+    return []
+
+
+def _get_system_prompt(cfg):
+    """获取系统提示词(M1 默认值,测试可 monkeypatch)。"""
+    return "You are a helpful assistant."
 
 
 @app.get("/")
@@ -73,8 +97,128 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "type": "error",
                         "message": "replay_failed",
                     })
+            elif msg_type == "ack":
+                # AC-6: 客户端 ACK,回写 config_runtime ws_offset:{session_id}=turn
+                try:
+                    session_id = int(msg["session_id"])
+                    turn = int(msg["turn"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid ack: session_id and turn must be int",
+                    })
+                    continue
+                if session_id <= 0 or turn < 0:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid ack: session_id>0 and turn>=0 required",
+                    })
+                    continue
+                try:
+                    conn = await db.connect()
+                    try:
+                        await ws_offset.handle_ack(
+                            conn, session_id=session_id, turn=turn,
+                        )
+                    finally:
+                        await conn.close()
+                    await ws.send_json({
+                        "type": "ack_confirm",
+                        "session_id": session_id,
+                        "turn": turn,
+                    })
+                except Exception:
+                    # DB 异常不冒泡,发 error 后继续处理下一条消息
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "ack_failed",
+                    })
+            elif msg_type == "user_message":
+                # AC-1: 用户消息触发 ReAct 循环(蓝图 §2.4/§2.6)
+                try:
+                    session_id = int(msg["session_id"])
+                    content = str(msg["content"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid user_message: session_id (int) and content required",
+                    })
+                    continue
+                if session_id <= 0:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid user_message: session_id>0 required",
+                    })
+                    continue
+                try:
+                    cfg = loader.load_config()
+                    tools = _get_tools(cfg)
+                    conn = await db.connect()
+                    try:
+                        cm = ContextManager(
+                            session_id=session_id,
+                            system_prompt=_get_system_prompt(cfg),
+                            tools=tools,
+                        )
+                        await cm.ensure_initial(conn)
+                        adapter = _build_adapter(cfg)
+                        loop = ReactLoop(
+                            session_id=session_id,
+                            context_manager=cm,
+                            adapter=adapter,
+                            tools=tools,
+                            conn=conn,
+                        )
+                        await loop.run_turn(content)
+                        # 排空 event_queue,逐条推送 react_event
+                        while not loop.event_queue.empty():
+                            event = loop.event_queue.get_nowait()
+                            await ws.send_json(event)
+                        await ws.send_json({
+                            "type": "turn_end",
+                            "session_id": session_id,
+                            "turn": loop._turn,
+                        })
+                    finally:
+                        await conn.close()
+                except Exception:
+                    _logger.exception("user_message handling failed")
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "user_message_failed",
+                    })
     except WebSocketDisconnect:
         pass
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    """启动钩子(蓝图 §2.10 + §9.4 AC-5 + §9.13)。
+
+    - db.create_pool 创建连接池(失败时 log warning,不阻止启动)
+    - 注册 APScheduler TTL 清理任务(cron `0 3 * * *`)
+    - scheduler.start()
+    """
+    global _scheduler
+    cfg = loader.load_config()
+    try:
+        db._pool = await db.create_pool(cfg)
+    except Exception as e:
+        _logger.warning(f"DB pool creation failed at startup: {e}")
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from private_agent.storage.ttl_cleanup import schedule_ttl_cleanup
+    _scheduler = AsyncIOScheduler()
+    schedule_ttl_cleanup(_scheduler, cfg)
+    _scheduler.start()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    """关闭钩子:停止 scheduler + 关闭连接池。"""
+    global _scheduler
+    if _scheduler is not None and _scheduler.running:
+        _scheduler.shutdown(wait=False)
+    await db.close_pool()
 
 
 def run_sidecar() -> None:

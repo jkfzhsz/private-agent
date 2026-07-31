@@ -1,13 +1,20 @@
-"""蓝图 §2.10 第 6 条 磁盘占用分级告警。
+"""蓝图 §2.10 第 6 条 磁盘占用分级告警 + M1 get_disk_status 组合。
 
 B4.2:Python Sidecar 检查 Postgres 数据目录大小,三级阈值响应:
 - 1.5GB:预警(yellow)
 - 2GB:禁止新会话(orange)
 - 3GB:强制清理(red)
+
+M1 Phase 1 step 2:get_disk_status 组合 size 查询 + 分级评估,
+从 cfg['observability']['disk'] 读阈值(蓝图 §9.13)。
 """
 from __future__ import annotations
 
+from typing import Any
+
 import asyncpg
+
+from private_agent.config import loader
 
 _GB = 1024 ** 3
 
@@ -76,3 +83,37 @@ async def get_pg_data_dir_size(conn: asyncpg.Connection) -> int:
         "FROM pg_database WHERE datallowconn"
     )
     return int(size)
+
+
+async def get_disk_status(
+    conn: asyncpg.Connection,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """组合 size 查询 + 分级评估,返回磁盘状态(蓝图 §2.10 第 6 条 + §9.13)。
+
+    Args:
+        conn: Postgres 连接。
+        cfg: 配置 dict(默认从 config.yaml 加载);读 observability.disk 阈值。
+
+    Returns:
+        {"level": "none|yellow|orange|red", "message": "...", "size_bytes": N}
+    """
+    if cfg is None:
+        cfg = loader.load_config()
+    disk_cfg = cfg.get("observability", {}).get("disk", {})
+    warning_gb = float(disk_cfg.get("warning_gb", 1.5))
+    block_new_session_gb = float(disk_cfg.get("block_new_session_gb", 2.0))
+    force_cleanup_gb = float(disk_cfg.get("force_cleanup_gb", 3.0))
+
+    size_bytes = await get_pg_data_dir_size(conn)
+    level_info = evaluate_disk_alert_level(
+        size_bytes=size_bytes,
+        warning_gb=warning_gb,
+        block_new_session_gb=block_new_session_gb,
+        force_cleanup_gb=force_cleanup_gb,
+    )
+    return {
+        "level": level_info["level"],
+        "message": level_info["message"],
+        "size_bytes": size_bytes,
+    }

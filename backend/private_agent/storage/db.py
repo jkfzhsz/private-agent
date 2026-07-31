@@ -50,3 +50,43 @@ async def connect(cfg: dict[str, Any] | None = None) -> asyncpg.Connection:
     """
     dsn = build_dsn(cfg)
     return await asyncpg.connect(dsn)
+
+
+# 模块级连接池单例(蓝图 §2.10,sidecar 共享)
+_pool: asyncpg.Pool | None = None
+
+
+async def create_pool(cfg: dict[str, Any] | None = None) -> asyncpg.Pool:
+    """创建 asyncpg 连接池(蓝图 §2.10)。
+
+    Args:
+        cfg: 配置 dict(默认从 config.yaml 加载)。
+
+    Returns:
+        asyncpg.Pool 实例(min_size=1, max_size=10)。
+    """
+    dsn = build_dsn(cfg)
+    return await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+
+
+async def get_pool(cfg: dict[str, Any] | None = None) -> asyncpg.Pool:
+    """获取模块级连接池单例(懒创建,蓝图 §2.10)。
+
+    Args:
+        cfg: 配置 dict(仅在首次创建时使用)。
+
+    Returns:
+        asyncpg.Pool 实例(多次调用返回同一实例)。
+    """
+    global _pool
+    if _pool is None:
+        _pool = await create_pool(cfg)
+    return _pool
+
+
+async def close_pool() -> None:
+    """关闭连接池并重置单例(蓝图 §2.10)。"""
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None

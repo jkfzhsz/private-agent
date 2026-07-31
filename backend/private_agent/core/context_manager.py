@@ -1,0 +1,285 @@
+"""蓝图 §3.1-3.3 上下文管理器 - 三区分区 + 启动构建 + 每轮构建。
+
+Source: spec/m1-react-loop AC-3 + Solution `core/context_manager.py`
+- Zone: dataclass(name/messages/hash), hash 字段 M1-b step 10 预留
+- ContextManager: 三区管理(frozen/stable/active)
+- build_initial: 启动构建,持久化 Frozen Zone(system_prompt + 工具定义)到 messages 表
+- build_per_turn / append_*_message: 每轮构建,Active Zone 追加用户/助手/工具消息
+- get_messages: 返回 Frozen + Stable + Active 合并消息列表
+- spec Out of scope: 三区构建不含压缩;启动时 Stable/Active 为空
+- spec Assumptions: hash 字段预留,本次只存字段不做校验
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from private_agent.tools.defs import ToolDef
+
+if TYPE_CHECKING:
+    import asyncpg
+
+__all__ = ["Zone", "ContextManager"]
+
+
+@dataclass
+class Zone:
+    """蓝图 §3.2 分区元数据。
+
+    name: 'frozen' | 'stable' | 'active'
+    messages: 该区消息列表(role/content/... dict)
+    hash: M1-b step 10 预留(SHA-256 校验),本次仅占位
+    """
+
+    name: str
+    messages: list[dict] = field(default_factory=list)
+    hash: str | None = None
+
+
+class ContextManager:
+    """蓝图 §3.1-3.3 上下文管理器。
+
+    三区:
+    - frozen_zone: 系统提示词 + 工具定义(启动构建,不可变)
+    - stable_zone: 压缩摘要区(M1 为空,压缩留 M1-b step 11)
+    - active_zone: 当前会话消息(每轮追加,build_per_turn 维护)
+    """
+
+    def __init__(
+        self,
+        session_id: int,
+        system_prompt: str,
+        tools: list[ToolDef],
+    ) -> None:
+        self.session_id = session_id
+        self._system_prompt = system_prompt
+        self._tools = list(tools)
+        self.frozen_zone = Zone(name="frozen")
+        self.stable_zone = Zone(name="stable")
+        self.active_zone = Zone(name="active")
+
+    def _build_frozen_content(self) -> str:
+        """构造 Frozen Zone system 消息内容:system_prompt + 工具定义。"""
+        if not self._tools:
+            return self._system_prompt
+        tools_json = json.dumps(
+            [t.to_openai_schema() for t in self._tools],
+            ensure_ascii=False,
+        )
+        return f"{self._system_prompt}\n\n[TOOLS]\n{tools_json}"
+
+    async def build_initial(self, conn: "asyncpg.Connection") -> None:
+        """启动构建(蓝图 §3.3):持久化 Frozen Zone 到 messages 表。
+
+        - role='system', zone='frozen', turn=0
+        - Stable/Active 启动时为空,不入库
+        - 内存三区同步更新
+
+        Args:
+            conn: Postgres 连接。
+        """
+        content = self._build_frozen_content()
+        await conn.execute(
+            """
+            INSERT INTO messages (session_id, turn, role, content, zone)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            self.session_id,
+            0,
+            "system",
+            content,
+            "frozen",
+        )
+        self.frozen_zone.messages = [{"role": "system", "content": content}]
+        self.stable_zone.messages = []
+        self.active_zone.messages = []
+
+    async def ensure_initial(self, conn: "asyncpg.Connection") -> None:
+        """幂等启动构建(蓝图 §3.3 + spec AC-3)。
+
+        若 Frozen Zone 已存在则跳过 INSERT,仅从 DB reload Frozen Zone 到内存
+        (保证 adapter.chat 能拿到 system prompt);否则调用 build_initial。
+
+        用于多次 user_message 场景(同一 session_id 复用),避免重复 INSERT
+        Frozen Zone 行(违反 spec AC-3 "会话启动后 messages 表有 Frozen Zone"
+        的单条语义)。
+
+        M1 简化:仅 reload Frozen Zone,不 reload Stable/Active 历史消息
+        (M1-b/M2 补完整 reload 与压缩)。
+
+        Args:
+            conn: Postgres 连接。
+        """
+        row = await conn.fetchrow(
+            """
+            SELECT content FROM messages
+            WHERE session_id=$1 AND zone='frozen'
+            ORDER BY id LIMIT 1
+            """,
+            self.session_id,
+        )
+        if row is not None:
+            self.frozen_zone.messages = [
+                {"role": "system", "content": row["content"]}
+            ]
+            self.stable_zone.messages = []
+            self.active_zone.messages = []
+            return
+        await self.build_initial(conn)
+
+    async def append_user_message(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        turn: int,
+        content: str,
+    ) -> None:
+        """每轮构建:追加用户消息到 Active Zone(蓝图 §3.3)。
+
+        持久化到 messages 表(role='user', zone='active') + 内存同步。
+
+        Args:
+            conn: Postgres 连接。
+            turn: 当前轮次(≥1)。
+            content: 用户消息文本。
+        """
+        await conn.execute(
+            """
+            INSERT INTO messages (session_id, turn, role, content, zone)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            self.session_id,
+            turn,
+            "user",
+            content,
+            "active",
+        )
+        self.active_zone.messages.append({"role": "user", "content": content})
+
+    async def append_assistant_message(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        turn: int,
+        content: str,
+        tool_calls: list[dict] | None = None,
+    ) -> None:
+        """每轮构建:追加助手消息到 Active Zone(蓝图 §3.3)。
+
+        持久化到 messages 表(role='assistant', zone='active') + 内存同步。
+        tool_calls 不为空时持久化为 JSONB。
+
+        Args:
+            conn: Postgres 连接。
+            turn: 当前轮次。
+            content: 助手消息文本(可空,纯 tool_call 时为空字符串)。
+            tool_calls: 工具调用列表(OpenAI 格式),无则 None。
+        """
+        if tool_calls:
+            tool_calls_json = json.dumps(tool_calls, ensure_ascii=False)
+            await conn.execute(
+                """
+                INSERT INTO messages (session_id, turn, role, content, tool_calls, zone)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+                """,
+                self.session_id,
+                turn,
+                "assistant",
+                content,
+                tool_calls_json,
+                "active",
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO messages (session_id, turn, role, content, zone)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                self.session_id,
+                turn,
+                "assistant",
+                content,
+                "active",
+            )
+        msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
+        self.active_zone.messages.append(msg)
+
+    async def append_tool_message(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        turn: int,
+        tool_call_id: str,
+        content: str,
+        name: str,
+    ) -> None:
+        """每轮构建:追加工具结果消息到 Active Zone(蓝图 §3.3)。
+
+        持久化到 messages 表(role='tool', zone='active') + 内存同步。
+
+        Args:
+            conn: Postgres 连接。
+            turn: 当前轮次。
+            tool_call_id: 对应 tool_call 的 id(OpenAI tool_call_id 字段)。
+            content: 工具输出文本。
+            name: 工具名称。
+        """
+        await conn.execute(
+            """
+            INSERT INTO messages (session_id, turn, role, content, tool_call_id, name, zone)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            self.session_id,
+            turn,
+            "tool",
+            content,
+            tool_call_id,
+            name,
+            "active",
+        )
+        self.active_zone.messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": content,
+                "name": name,
+            }
+        )
+
+    def get_messages(self) -> list[dict]:
+        """返回 Frozen + Stable + Active 三区合并后的消息列表。
+
+        供 ModelAdapter.chat(messages) 使用。顺序:frozen → stable → active。
+        """
+        return [
+            *self.frozen_zone.messages,
+            *self.stable_zone.messages,
+            *self.active_zone.messages,
+        ]
+
+    async def build_per_turn(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        turn: int,
+        user_content: str,
+    ) -> list[dict]:
+        """每轮构建(蓝图 §3.3):追加用户消息并返回合并消息列表。
+
+        副作用:
+        - 持久化用户消息到 messages 表(zone='active')
+        - 内存 active_zone 追加用户消息
+
+        Args:
+            conn: Postgres 连接。
+            turn: 当前轮次(≥1)。
+            user_content: 用户输入文本。
+
+        Returns:
+            Frozen + Stable + Active 合并后的消息列表(供 adapter.chat 使用)。
+        """
+        await self.append_user_message(conn, turn=turn, content=user_content)
+        return self.get_messages()

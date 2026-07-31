@@ -1,7 +1,12 @@
-"""蓝图 §2.3 line 445-450 ws_offset 补发机制。
+"""蓝图 §2.3 line 445-450 ws_offset 补发机制 + M1 ACK 回写与服务端权威。
 
 B3.2b:重连时客户端发送上次 offset,服务端从 react_events 表
 查询 turn > offset 的事件补发(按 turn, id 升序)。
+
+M1 Phase 1 step 4:
+- handle_ack(conn, session_id, turn):客户端 ACK 后回写 config_runtime ws_offset:{session_id}=turn
+- build_replay_messages 优先读 config_runtime(服务端权威),
+  effective_offset = max(config_runtime, last_turn),客户端 last_turn 作 fallback。
 
 蓝图 §2.3:
 - config_runtime 表存储 ws_offset:{session_id} = 客户端最大已接收 turn 值
@@ -110,29 +115,50 @@ async def update_ws_offset(
     )
 
 
+async def handle_ack(
+    conn: asyncpg.Connection,
+    *,
+    session_id: int,
+    turn: int,
+) -> None:
+    """处理客户端 ACK:回写 config_runtime ws_offset:{session_id}=turn(蓝图 §2.3 line 447)。
+
+    客户端确认收到 turn 后,服务端记录权威 offset,供后续 replay 优先使用。
+
+    Args:
+        conn: Postgres 连接。
+        session_id: 会话 ID。
+        turn: 客户端确认已接收的最大 turn 值。
+    """
+    await update_ws_offset(conn, session_id=session_id, turn=turn)
+
+
 async def build_replay_messages(
     conn: asyncpg.Connection,
     *,
     session_id: int,
     last_turn: int,
 ) -> list[dict[str, Any]]:
-    """构造 WS replay 消息序列(蓝图 §2.3 line 449)。
+    """构造 WS replay 消息序列(蓝图 §2.3 line 449 + M1 服务端权威)。
 
-    用于客户端断线重连:服务端查询 turn > last_turn 的事件,
-    包装为 WS 消息列表 [react_event x N, replay_end]。
+    优先读 config_runtime 的 ws_offset:{session_id}(服务端权威),
+    effective_offset = max(config_runtime_offset, last_turn),
+    查询 turn > effective_offset 的事件补发。
 
     Args:
         conn: Postgres 连接。
         session_id: 会话 ID。
-        last_turn: 客户端最大已接收 turn 值。
+        last_turn: 客户端最大已接收 turn 值(fallback)。
 
     Returns:
         WS 消息 dict 列表:
         - 前 N 条:{"type": "react_event", "session_id": ..., "turn": ..., "event_type": ..., "payload": ...}
-        - 末 1 条:{"type": "replay_end", "session_id": ..., "count": N}
+        - 末 1 条:{"type": "replay_end", "session_id": ..., "count": N, "effective_offset": M}
     """
+    config_offset = await get_ws_offset(conn, session_id=session_id)
+    effective_offset = max(config_offset, last_turn)
     events = await fetch_react_events_since_turn(
-        conn, session_id=session_id, last_turn=last_turn,
+        conn, session_id=session_id, last_turn=effective_offset,
     )
     messages: list[dict[str, Any]] = [
         {
@@ -148,6 +174,6 @@ async def build_replay_messages(
         "type": "replay_end",
         "session_id": session_id,
         "count": len(events),
+        "effective_offset": effective_offset,
     })
     return messages
-
