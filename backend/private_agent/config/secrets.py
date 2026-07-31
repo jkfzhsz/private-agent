@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import os
 import secrets as _stdlib_secrets
-from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

@@ -11,9 +11,6 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
-# 蓝图 §2.13 JSON 日志必需字段
-_REQUIRED_FIELDS = ("timestamp", "level", "logger", "message", "trace_id")
-
 
 class JsonFormatter(logging.Formatter):
     """结构化 JSON 日志格式化器(蓝图 §2.13)。
