@@ -12,7 +12,10 @@ const npxCmd = isWin ? "npx.cmd" : "npx";
 
 function run(cmd, args, opts = {}) {
   // Windows 下 .cmd 可执行文件必须经 shell 运行, 否则 spawn 抛 EINVAL
-  const child = spawn(cmd, args, { stdio: "inherit", shell: isWin, ...opts });
+  // 用数组形式避免 DEP0190(shell:true 时 args 拼接的弃用警告)
+  const finalArgs = isWin ? [cmd, ...args] : args;
+  const finalCmd = isWin ? `"${cmd}"` : cmd;
+  const child = spawn(finalCmd, finalArgs, { stdio: "inherit", shell: isWin, ...opts });
   return child;
 }
 
