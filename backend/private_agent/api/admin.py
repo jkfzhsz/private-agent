@@ -51,6 +51,45 @@ def _build_skill_loader(cfg):
     return SkillLoader.from_cfg(cfg)
 
 
+def _build_skill_version_listener(cfg):
+    """构造 SkillVersionListener(plan m4-version-compare-rollback step 4),测试可 monkeypatch。"""
+    from private_agent.eval.hybrid_eval import HybridEvaluator
+    from private_agent.eval.runner import EvalRunner
+    from private_agent.eval.repos import EvalDatasetRepo, EvalRunRepo, VersionSnapshotRepo
+    from private_agent.eval.version_listener import SkillVersionListener
+    from private_agent.models.registry import build_default_adapter
+    from private_agent.skills.loader import SkillLoader
+
+    # listener 持有 EvalRunner(实际触发时再连接 DB)
+    class _LazyRunner:
+        """延迟构造 EvalRunner,避免在 import 时连接 DB。"""
+        def __init__(self, cfg):
+            self._cfg = cfg
+
+        async def run_evaluation(self, *, skill_name, skill_version, model_id,
+                                  eval_mode, mock_enabled, sample_subset, conn):
+            runner = EvalRunner(
+                dataset_repo=EvalDatasetRepo(conn),
+                eval_repo=EvalRunRepo(conn),
+                snapshot_repo=VersionSnapshotRepo(conn),
+                skill_loader=SkillLoader.from_cfg(self._cfg),
+                model_adapter=build_default_adapter(self._cfg),
+                hybrid_evaluator=HybridEvaluator.from_cfg(self._cfg),
+                cfg=self._cfg,
+            )
+            return await runner.run_evaluation(
+                skill_name=skill_name,
+                skill_version=skill_version,
+                model_id=model_id,
+                eval_mode=eval_mode,
+                mock_enabled=mock_enabled,
+                sample_subset=sample_subset,
+                conn=conn,
+            )
+
+    return SkillVersionListener(_LazyRunner(cfg), cfg)
+
+
 class ActivateSkillRequest(BaseModel):
     """POST /admin/sessions/{id}/activate 请求体(plan step 19)。"""
     skill_name: str
@@ -348,4 +387,88 @@ async def get_skill_detail(skill_name: str):
         return JSONResponse(
             status_code=500,
             content={"error": "skill_detail_failed"},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Skill 版本保存 + SkillVersionListener 触发(M4 §8.13,AC-12)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class SaveVersionRequest(BaseModel):
+    """POST /admin/skills/{name}/save-version 请求体(AC-12)。"""
+
+    version: str
+    manifest: dict
+    system_prompt: str = ""
+    tools_yaml: list[dict] = []
+
+
+@router.post("/skills/{skill_name}/save-version", response_model=None)
+async def save_skill_version(skill_name: str, request: SaveVersionRequest):
+    """AC-12: 保存新版本到 version_snapshots + 触发 SkillVersionListener 快速回归。
+
+    Returns:
+        200: {"saved_version": str, "scope": "skill"}
+        500: {"error": "save_version_failed"}
+    """
+    import json as _json
+
+    from private_agent.eval.repos import VersionSnapshotRepo
+    from private_agent.observability.logging import setup_logger
+
+    logger = setup_logger("private_agent.api.admin.save_version")
+    try:
+        conn = await db.connect()
+        try:
+            # 1. 保存到 version_snapshots
+            payload = {
+                "skill_name": skill_name,
+                "manifest": request.manifest,
+                "system_prompt": request.system_prompt,
+                "tools_yaml": request.tools_yaml,
+            }
+            repo = VersionSnapshotRepo(conn)
+            await repo.save(
+                scope="skill",
+                version=request.version,
+                payload=payload,
+            )
+            # 2. 同步 skills 表(upsert)
+            await conn.execute(
+                """
+                INSERT INTO skills (name, version, manifest, system_prompt, tools)
+                VALUES ($1, $2, $3::jsonb, $4, $5::jsonb)
+                ON CONFLICT (name) DO UPDATE
+                    SET version=$2, manifest=$3::jsonb, system_prompt=$4,
+                        tools=$5::jsonb, updated_at=now()
+                """,
+                skill_name,
+                request.version,
+                _json.dumps(request.manifest),
+                request.system_prompt,
+                _json.dumps(request.tools_yaml),
+            )
+            # 3. 触发 SkillVersionListener(失败仅日志,不阻塞)
+            try:
+                cfg = loader.load_config()
+                listener = _build_skill_version_listener(cfg)
+                await listener.on_skill_version_saved(
+                    skill_name=skill_name,
+                    version=request.version,
+                    conn=conn,
+                )
+            except Exception as listener_err:
+                logger.warning(
+                    "SkillVersionListener 触发失败(不阻塞版本保存): %s",
+                    listener_err,
+                )
+            return {"saved_version": request.version, "scope": "skill"}
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.exception("save_skill_version 失败")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "save_version_failed", "detail": str(e)},
         )

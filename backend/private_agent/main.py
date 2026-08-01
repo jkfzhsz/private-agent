@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from private_agent.api import admin, files
+from private_agent.api import admin, eval, files
 from private_agent.config import loader
 from private_agent.core.context_manager import ContextManager
 from private_agent.core.react_loop import ReactLoop
@@ -17,6 +17,7 @@ from private_agent.storage import db, ws_offset
 
 app = FastAPI(title="Private Agent Sidecar", version="0.1.0")
 app.include_router(admin.router)
+app.include_router(eval.router)
 app.include_router(files.router)
 
 _logger = setup_logger("private_agent.main")

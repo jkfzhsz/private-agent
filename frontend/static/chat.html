@@ -137,6 +137,7 @@
     <button class="secondary" onclick="clearEvents()">清空</button>
     <button class="secondary" onclick="sendPing()">Ping</button>
     <button class="secondary" onclick="forceReconnect()">模拟断开重连</button>
+    <button class="secondary" onclick="toggleEvalPanel()">评估面板</button>
   </div>
 
   <div class="events" id="events">
@@ -149,6 +150,12 @@
   </div>
 
   <div class="log" id="log"></div>
+
+  <div id="evalPanel" style="display:none; margin-top:16px; padding:12px; border:1px solid #ddd; border-radius:8px;">
+    <h3 style="font-size:14px; margin-bottom:8px;">评估面板(eval)</h3>
+    <div id="evalRunsList" style="font-size:12px; color:#666;">点击下方按钮加载运行列表</div>
+    <button class="secondary" onclick="loadEvalRuns()" style="margin-top:8px;">加载评估运行</button>
+  </div>
 </div>
 
 <script>
@@ -496,6 +503,37 @@ log("点击"连接"建立 WS 连接,或直接发送消息(会自动连接)");
 
 // 自动连接
 connect();
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 评估面板(eval panel)M4 §8.12
+// ──────────────────────────────────────────────────────────────────────────────
+var EVAL_API_BASE = "http://localhost:8765/admin/eval";
+
+function toggleEvalPanel() {
+  var panel = document.getElementById("evalPanel");
+  panel.style.display = (panel.style.display === "none") ? "block" : "none";
+}
+
+async function loadEvalRuns() {
+  try {
+    var resp = await fetch(EVAL_API_BASE + "/runs?limit=20");
+    var data = await resp.json();
+    var runs = data.runs || [];
+    var html = runs.length === 0
+      ? "<i>暂无运行记录</i>"
+      : runs.map(function(r) {
+          var status = r.finished_at ? "completed" : "running";
+          return "<div style='padding:4px 0; border-bottom:1px solid #eee;'>"
+            + "<b>" + r.skill_name + "</b> v" + r.skill_version
+            + " [" + r.eval_mode + "] " + status
+            + " <code>" + (r.run_id || "").slice(0, 8) + "</code>"
+            + "</div>";
+        }).join("");
+    document.getElementById("evalRunsList").innerHTML = html;
+  } catch (e) {
+    document.getElementById("evalRunsList").innerHTML = "<i style='color:#f44336;'>加载失败: " + e.message + "</i>";
+  }
+}
 </script>
 </body>
 </html>

@@ -113,6 +113,184 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// 评估面板组件(M4 §8.12,AC-11)
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface EvalRun {
+  run_id: string;
+  skill_name: string;
+  skill_version: string;
+  model_id: string;
+  eval_mode: string;
+  finished_at: string | null;
+  metrics?: Record<string, Record<string, number>>;
+}
+
+interface CompareResult {
+  base_version: string;
+  target_version: string;
+  diff: Record<string, Record<string, { delta: number; status: string }>>;
+}
+
+const API_BASE = "http://localhost:8765/admin/eval";
+
+async function fetchJson(url: string): Promise<unknown> {
+  const resp = await fetch(url);
+  return resp.json();
+}
+
+function EvalPanel(): JSX.Element {
+  const [runs, setRuns] = useState<EvalRun[]>([]);
+  const [compare, setCompare] = useState<CompareResult | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const loadRuns = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = (await fetchJson(`${API_BASE}/runs?limit=20`)) as { runs: EvalRun[] };
+      setRuns(data.runs ?? []);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadCompare = useCallback(async () => {
+    if (runs.length < 2) return;
+    const versions = [...new Set(runs.map((r) => r.skill_version))].slice(0, 2);
+    if (versions.length < 2) return;
+    const data = (await fetchJson(
+      `${API_BASE}/versions/compare?skill_name=${runs[0].skill_name}&base_version=${versions[0]}&target_version=${versions[1]}`
+    )) as CompareResult;
+    setCompare(data);
+  }, [runs]);
+
+  useEffect(() => {
+    loadRuns();
+  }, [loadRuns]);
+
+  // 版本趋势折线图数据(completion_rate 随版本变化)
+  const trendPoints = runs
+    .filter((r) => r.metrics?.task_completion?.completion_rate !== undefined)
+    .map((r, i) => ({
+      x: 20 + i * 60,
+      y: 120 - r.metrics!.task_completion!.completion_rate * 100,
+      version: r.skill_version,
+      rate: r.metrics!.task_completion!.completion_rate,
+    }));
+
+  return (
+    <div style={{ marginTop: 24, padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
+      <h2 style={{ fontSize: 16, marginBottom: 12 }}>评估面板</h2>
+
+      {/* 运行列表 */}
+      <div style={{ marginBottom: 16 }}>
+        <h3 style={{ fontSize: 13, marginBottom: 8 }}>运行列表</h3>
+        <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid #ddd", textAlign: "left" }}>
+              <th style={{ padding: 4 }}>run_id</th>
+              <th style={{ padding: 4 }}>skill</th>
+              <th style={{ padding: 4 }}>version</th>
+              <th style={{ padding: 4 }}>model</th>
+              <th style={{ padding: 4 }}>mode</th>
+              <th style={{ padding: 4 }}>status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((r) => (
+              <tr key={r.run_id} style={{ borderBottom: "1px solid #eee" }}>
+                <td style={{ padding: 4 }}>{r.run_id.slice(0, 8)}</td>
+                <td style={{ padding: 4 }}>{r.skill_name}</td>
+                <td style={{ padding: 4 }}>{r.skill_version}</td>
+                <td style={{ padding: 4 }}>{r.model_id}</td>
+                <td style={{ padding: 4 }}>{r.eval_mode}</td>
+                <td style={{ padding: 4 }}>{r.finished_at ? "completed" : "running"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {runs.length === 0 && <div style={{ fontSize: 12, color: "#999" }}>暂无运行记录</div>}
+      </div>
+
+      {/* 版本趋势折线图(SVG) */}
+      <div style={{ marginBottom: 16 }}>
+        <h3 style={{ fontSize: 13, marginBottom: 8 }}>版本趋势</h3>
+        {trendPoints.length >= 2 ? (
+          <svg width={400} height={140} style={{ border: "1px solid #eee" }}>
+            <line x1={20} y1={20} x2={20} y2={120} stroke="#ccc" />
+            <line x1={20} y1={120} x2={380} y2={120} stroke="#ccc" />
+            <polyline
+              points={trendPoints.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke="#1976d2"
+              strokeWidth={2}
+            />
+            {trendPoints.map((p, i) => (
+              <g key={i}>
+                <circle cx={p.x} cy={p.y} r={3} fill="#1976d2" />
+                <text x={p.x} y={135} fontSize={10} textAnchor="middle" fill="#666">
+                  {p.version}
+                </text>
+              </g>
+            ))}
+          </svg>
+        ) : (
+          <div style={{ fontSize: 12, color: "#999" }}>Insufficient data (需要 ≥2 个版本数据点)</div>
+        )}
+      </div>
+
+      {/* 版本对比表格 + 退化告警标记 */}
+      <div style={{ marginBottom: 16 }}>
+        <h3 style={{ fontSize: 13, marginBottom: 8 }}>版本对比</h3>
+        <button
+          onClick={loadCompare}
+          disabled={runs.length < 2 || loading}
+          style={{ fontSize: 12, padding: "4px 8px", marginBottom: 8 }}
+        >
+          对比最新两版本
+        </button>
+        {compare && (
+          <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #ddd", textAlign: "left" }}>
+                <th style={{ padding: 4 }}>category</th>
+                <th style={{ padding: 4 }}>metric</th>
+                <th style={{ padding: 4 }}>delta</th>
+                <th style={{ padding: 4 }}>status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(compare.diff).flatMap(([cat, metrics]) =>
+                Object.entries(metrics).map(([metric, info]) => (
+                  <tr key={`${cat}-${metric}`} style={{ borderBottom: "1px solid #eee" }}>
+                    <td style={{ padding: 4 }}>{cat}</td>
+                    <td style={{ padding: 4 }}>{metric}</td>
+                    <td style={{ padding: 4 }}>{info.delta.toFixed(3)}</td>
+                    <td style={{ padding: 4 }}>
+                      {info.status === "degraded" ? (
+                        <span style={{ color: "#fff", background: "#f44336", padding: "2px 6px", borderRadius: 3, fontSize: 11 }}>
+                          degraded
+                        </span>
+                      ) : info.status === "improved" ? (
+                        <span style={{ color: "#fff", background: "#4caf50", padding: "2px 6px", borderRadius: 3, fontSize: 11 }}>
+                          improved
+                        </span>
+                      ) : (
+                        <span style={{ color: "#666", fontSize: 11 }}>stable</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // 主组件
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -121,6 +299,7 @@ export default function App(): JSX.Element {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<ConnStatus>("disconnected");
   const [sessionId] = useState<number>(() => getSessionIdFromUrl());
+  const [showEvalPanel, setShowEvalPanel] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastTurnRef = useRef<number>(0);
@@ -310,6 +489,16 @@ export default function App(): JSX.Element {
           <span style={{ fontSize: 13, color: "#666" }}>{status}</span>
           <span style={{ fontSize: 12, color: "#999" }}>session={sessionId}</span>
           <span style={{ fontSize: 12, color: "#999" }}>last_turn={lastTurnRef.current}</span>
+          <button
+            onClick={() => setShowEvalPanel(!showEvalPanel)}
+            style={{
+              fontSize: 12, padding: "4px 10px", borderRadius: 4, border: "1px solid #ddd",
+              background: showEvalPanel ? "#1976d2" : "#fff", color: showEvalPanel ? "#fff" : "#333",
+              cursor: "pointer",
+            }}
+          >
+            评估面板
+          </button>
         </div>
       </header>
 
@@ -405,6 +594,8 @@ export default function App(): JSX.Element {
           发送
         </button>
       </div>
+
+      {showEvalPanel && <EvalPanel />}
     </div>
   );
 }

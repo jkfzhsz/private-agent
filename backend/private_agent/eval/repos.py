@@ -1,16 +1,21 @@
-"""M4 §8.11 + §7.3 eval/repos.py - 三个仓储层(蓝图 §8.4/§8.11/§7.3)。
+"""M4 §8.11 + §7.3 + §8.16 eval/repos.py - 四个仓储层(蓝图 §8.4/§8.11/§7.3/§8.16)。
 
 Source: plan/m4-eval-foundation step 4-6 (AC-3, AC-4, AC-5, AC-6)
+Source: spec/m4-continuous-evolution §B (AC-2..AC-6)
 - EvalDatasetRepo: eval_datasets 表 CRUD,insert 入库前调 validate_expected_trace
 - EvalRunRepo: eval_runs 表 CRUD,status 三态(running/completed/failed)
   用 finished_at + metrics.error 联合判断(避免 schema 变更)
 - VersionSnapshotRepo: version_snapshots 表 CRUD,scope+version 唯一约束 upsert
+- ReviewQueueRepo: 低分案例人工审核队列(JSON 文件存储,MVP 避免新增 DB 表)
 
 mock_mode 字段保留但不用(spec Out of scope),统一用 mock_enabled。
 """
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -21,8 +26,14 @@ from private_agent.eval.models import (
     InvalidSampleFormatError,
     validate_expected_trace,
 )
+from private_agent.observability.logging import setup_logger
 
-__all__ = ["EvalDatasetRepo", "EvalRunRepo", "VersionSnapshotRepo"]
+__all__ = [
+    "EvalDatasetRepo",
+    "EvalRunRepo",
+    "VersionSnapshotRepo",
+    "ReviewQueueRepo",
+]
 
 
 def _parse_jsonb(value: Any) -> Any:
@@ -426,3 +437,208 @@ class VersionSnapshotRepo:
             "payload": dict(_parse_jsonb(row["payload"])),
             "created_at": row["created_at"],
         }
+
+
+# ── ReviewQueueRepo ─────────────────────────────────────────────────────
+
+
+_VALID_DECISIONS = {"model_limitation_drop", "prompt_defect_edit"}
+_INSERT_DECISIONS = {"prompt_defect_edit"}
+_INSERT_STATUSES = {"approved", "edited"}
+
+
+class ReviewQueueRepo:
+    """低分案例人工审核队列存储(spec m4-continuous-evolution §B,AC-2..AC-6)。
+
+    MVP 用 JSON 文件存储(避免新增 DB 表),路径: {workspace_root}/.eval_review_queue.json
+    V2 可迁移到 DB 表。
+
+    JSON 文件格式:
+        {
+          "items": [
+            {"id": 1, "source_run_id": ..., "sample_input": ..., "status": "pending",
+             "created_at": "...", "decided_at": null, "decision": null, ...},
+            ...
+          ],
+          "next_id": 2
+        }
+
+    原子写入:写临时文件 + os.replace(防止写一半崩溃导致数据损坏)。
+
+    Args:
+        queue_file: JSON 文件路径。
+        dataset_repo: EvalDatasetRepo 实例(AC-4 入库需要);None 时无法入库。
+    """
+
+    def __init__(
+        self,
+        *,
+        queue_file: str,
+        dataset_repo: "EvalDatasetRepo | None" = None,
+    ) -> None:
+        self._queue_file = queue_file
+        self._dataset_repo = dataset_repo
+        self._logger = setup_logger("private_agent.eval.review_queue_repo")
+
+    async def add(self, item: dict) -> int:
+        """AC-2: 添加审核项,返回 item_id,status='pending'。
+
+        Args:
+            item: 审核项字段(source_run_id / sample_input / actual_output /
+                actual_events / failure_reason / suggested_as 等)。
+
+        Returns:
+            新分配的 item_id(int,从 1 起递增,持久化到文件)。
+        """
+        data = self._load()
+        item_id = data["next_id"]
+        new_item = {
+            "id": item_id,
+            "status": "pending",
+            "created_at": _utc_now_iso(),
+            "decided_at": None,
+            "decision": None,
+        }
+        # 合并调用方传入的字段(不覆盖 id/status/created_at)
+        for k, v in item.items():
+            if k not in new_item:
+                new_item[k] = v
+        data["items"].append(new_item)
+        data["next_id"] = item_id + 1
+        self._atomic_write(data)
+        return item_id
+
+    async def list_pending(self, limit: int = 20) -> list[dict]:
+        """AC-3: 列出 status='pending' 的审核项(按 id 升序)。"""
+        return self._list(status="pending", limit=limit)
+
+    async def list_all(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        """列出所有审核项(可按 status 过滤,按 id 升序)。"""
+        return self._list(status=status, limit=limit)
+
+    async def update_status(
+        self,
+        item_id: int,
+        *,
+        status: str,
+        decision: str,
+        edited_sample: EvalSample | None = None,
+    ) -> None:
+        """AC-4/AC-5/AC-6: 更新审核状态。
+
+        Args:
+            item_id: 审核项 id。
+            status: "approved" | "rejected" | "edited"。
+                approved/edited + prompt_defect_edit → 入库
+                rejected + model_limitation_drop → 丢弃
+            decision: "model_limitation_drop" | "prompt_defect_edit"。
+            edited_sample: decision='prompt_defect_edit' 时必填,入库前调
+                validate_expected_trace 校验。
+
+        Raises:
+            KeyError: item_id 不存在。
+            ValueError: decision 非法,或 prompt_defect_edit 缺 edited_sample。
+            InvalidSampleFormatError: edited_sample 校验失败(AC-6)。
+        """
+        if decision not in _VALID_DECISIONS:
+            raise ValueError(
+                f"非法 decision: {decision},应为 {sorted(_VALID_DECISIONS)}"
+            )
+        if decision in _INSERT_DECISIONS and edited_sample is None:
+            raise ValueError(
+                f"decision={decision} 必须提供 edited_sample"
+            )
+        if status not in _INSERT_STATUSES and status != "rejected":
+            raise ValueError(
+                f"非法 status: {status},应为 approved/rejected/edited"
+            )
+
+        data = self._load()
+        target = next((i for i in data["items"] if i["id"] == item_id), None)
+        if target is None:
+            raise KeyError(f"审核项不存在: item_id={item_id}")
+
+        # AC-6: 入库前校验(在修改队列状态前校验,失败则状态保持 pending)
+        if decision in _INSERT_DECISIONS and status in _INSERT_STATUSES:
+            assert edited_sample is not None  # 上面已校验
+            # 强制 case_type=boundary, split=test(spec §D)
+            forced_sample = edited_sample.model_copy(update={
+                "case_type": "boundary",
+                "split": "test",
+            })
+            # AC-6: 入库前调 validate_expected_trace
+            validate_expected_trace(
+                forced_sample.expected_react_trace.model_dump()
+            )
+            if self._dataset_repo is None:
+                raise RuntimeError(
+                    "ReviewQueueRepo.dataset_repo 未配置,无法入库 edited_sample"
+                )
+            await self._dataset_repo.insert(forced_sample)
+
+        # 入库成功(或无需入库)后更新队列状态
+        target["status"] = status
+        target["decision"] = decision
+        target["decided_at"] = _utc_now_iso()
+        self._atomic_write(data)
+
+    # ── 内部辅助 ──────────────────────────────────────────────────────
+
+    def _list(self, *, status: str | None, limit: int) -> list[dict]:
+        data = self._load()
+        items = data["items"]
+        if status is not None:
+            items = [i for i in items if i["status"] == status]
+        # 按 id 升序
+        items = sorted(items, key=lambda i: i["id"])
+        return list(items[:limit])
+
+    def _load(self) -> dict:
+        """加载 JSON 文件,不存在则返回空结构。"""
+        if not os.path.exists(self._queue_file):
+            return {"items": [], "next_id": 1}
+        try:
+            with open(self._queue_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if not content:
+                return {"items": [], "next_id": 1}
+            data = json.loads(content)
+            # 兼容旧文件缺失 next_id 的情况
+            if "next_id" not in data:
+                data["next_id"] = (
+                    max((i["id"] for i in data.get("items", [])), default=0) + 1
+                )
+            return data
+        except (json.JSONDecodeError, OSError) as e:
+            self._logger.warning(
+                "审核队列文件读取失败,重置为空: %s (%s)", self._queue_file, e
+            )
+            return {"items": [], "next_id": 1}
+
+    def _atomic_write(self, data: dict) -> None:
+        """原子写入:先写临时文件,再 os.replace 覆盖(POSIX 原子,Windows Best-effort)。"""
+        parent = os.path.dirname(self._queue_file) or "."
+        os.makedirs(parent, exist_ok=True)
+        # tempfile 在同目录下生成,确保 replace 在同一文件系统
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".eval_review_queue.", suffix=".tmp", dir=parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self._queue_file)
+        except Exception:
+            # 失败时清理临时文件
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+
+def _utc_now_iso() -> str:
+    """返回当前 UTC 时间的 ISO 8601 字符串(带时区)。"""
+    return datetime.now(timezone.utc).isoformat()
