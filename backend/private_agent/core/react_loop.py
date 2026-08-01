@@ -26,7 +26,9 @@ import json
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from private_agent.core.billing import BillingRecorder
 from private_agent.core.checkpoint import CheckpointManager
+from private_agent.core.compressor import Compressor
 from private_agent.core.injection_guard import InjectionGuard
 from private_agent.models.base import AllProvidersFailedError, ChatResult, ModelAdapter
 from private_agent.observability.logging import setup_logger
@@ -80,6 +82,8 @@ class ReactLoop:
         self._logger = setup_logger("private_agent.react_loop")
         self._cfg = cfg or {}
         self._injection_guard = InjectionGuard()
+        self._compressor = Compressor()
+        self._billing = BillingRecorder()
 
     # ──────────────────────────────────────────────────────────────────────────
     # State machine
@@ -173,6 +177,20 @@ class ReactLoop:
                 self._transition(ReactLoopState.ERROR)
                 await self._save_checkpoint()
                 return
+
+            # B4 P0-4: 记录对话计费
+            try:
+                if hasattr(result, "usage") and result.usage is not None:
+                    await self._billing.record_usage(
+                        self._conn,
+                        session_id=self._session_id,
+                        turn=self._turn,
+                        model_id=getattr(result, "used_provider", "unknown"),
+                        usage=result.usage,
+                        cost_type="dialogue",
+                    )
+            except Exception:
+                self._logger.exception("billing record_usage failed")
 
             # 首次模型调用后产出 thinking event
             if not has_emitted_thinking:
@@ -308,6 +326,7 @@ class ReactLoop:
                 )
                 self._transition(ReactLoopState.IDLE)
                 await self._save_checkpoint()
+                await self._maybe_compress()
                 return
 
         # 超出 max_iterations
@@ -342,6 +361,32 @@ class ReactLoop:
             )
         except Exception as e:
             self._logger.warning("checkpoint save failed: %s", e)
+
+    async def _maybe_compress(self) -> None:
+        """B4 P0-1: 每轮结束后检查并触发上下文压缩(蓝图 §3.9)。"""
+        try:
+            cfg = self._cfg.get("context", {}).get("compression", {})
+            if not cfg.get("enabled", True):
+                return
+            context_window = cfg.get("context_window", 8000)
+            active_zone_token_limit = cfg.get("active_zone_token_limit", 4000)
+            messages = await self._context_manager.build_messages()
+            active_turns = self._turn
+            triggered = self._compressor.maybe_compress(
+                messages,
+                active_turns=active_turns,
+                context_window=context_window,
+                compress_adapter=None,
+            )
+            if triggered:
+                await self._compressor._emit_compress_event(
+                    self._conn,
+                    session_id=self._session_id,
+                    turn=self._turn,
+                    trigger="token_limit" if self._token_estimator.estimate_messages(messages) > context_window * 0.8 else "turn_limit",
+                )
+        except Exception as e:
+            self._logger.warning("compression failed: %s", e)
 
     def _find_tool(self, name: str) -> ToolDef | None:
         """按名查找工具定义。
