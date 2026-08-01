@@ -9,6 +9,9 @@ Source: spec/m1-react-loop AC-3 + Solution `core/context_manager.py`
 - build_messages: get_messages 的 async 别名,供 run_turn 调用
 - spec Out of scope: 三区构建不含压缩;启动时 Stable/Active 为空
 - spec Assumptions: hash 字段预留,本次只存字段不做校验
+
+M2 §4.5 扩展:ContextManager 接受可选的 memory_manager,在 ensure_initial 时
+注入用户记忆到 Stable Zone。
 """
 from __future__ import annotations
 
@@ -52,10 +55,12 @@ class ContextManager:
         session_id: int,
         system_prompt: str,
         tools: list[ToolDef],
+        memory_manager: Any | None = None,
     ) -> None:
         self.session_id = session_id
         self._system_prompt = system_prompt
         self._tools = list(tools)
+        self._memory_manager = memory_manager
         self.frozen_zone = Zone(name="frozen")
         self.stable_zone = Zone(name="stable")
         self.active_zone = Zone(name="active")
@@ -96,11 +101,39 @@ class ContextManager:
         self.stable_zone.messages = []
         self.active_zone.messages = []
 
+    async def _inject_memories(self, conn: "asyncpg.Connection") -> None:
+        """注入用户记忆到 Stable Zone(蓝图 §4.5)。
+
+        在 ensure_initial 调用 build_initial 后执行,将高重要性记忆注入
+        Stable Zone 初始内容。
+        """
+        if self._memory_manager is None:
+            return
+        memories = await self._memory_manager.load_user_memories()
+        if not memories:
+            return
+        memories_text = self._memory_manager.format_memories_for_stable(memories)
+        await conn.execute(
+            """
+            INSERT INTO messages (session_id, turn, role, content, zone)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            self.session_id,
+            0,
+            "user",
+            memories_text,
+            "stable",
+        )
+        self.stable_zone.messages = [
+            {"role": "user", "content": memories_text}
+        ]
+
     async def ensure_initial(self, conn: "asyncpg.Connection") -> None:
         """幂等启动构建(蓝图 §3.3 + spec AC-3)。
 
         若 Frozen Zone 已存在则跳过 INSERT,仅从 DB reload Frozen Zone 到内存
-        (保证 adapter.chat 能拿到 system prompt);否则调用 build_initial。
+        (保证 adapter.chat 能拿到 system prompt);否则调用 build_initial
+        并注入用户记忆(§4.5)。
 
         用于多次 user_message 场景(同一 session_id 复用),避免重复 INSERT
         Frozen Zone 行(违反 spec AC-3 "会话启动后 messages 表有 Frozen Zone"
@@ -128,6 +161,7 @@ class ContextManager:
             self.active_zone.messages = []
             return
         await self.build_initial(conn)
+        await self._inject_memories(conn)
 
     async def append_user_message(
         self,

@@ -10,6 +10,8 @@ from private_agent.api import admin
 from private_agent.config import loader
 from private_agent.core.context_manager import ContextManager
 from private_agent.core.react_loop import ReactLoop
+from private_agent.memory.manager import MemoryManager
+from private_agent.memory.memories_repo import MemoriesRepo
 from private_agent.observability.logging import setup_logger
 from private_agent.storage import db, ws_offset
 
@@ -162,10 +164,30 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     tools = _get_tools(cfg)
                     conn = await db.connect()
                     try:
+                        # 构造 MemoryManager(蓝图 §4.2-§4.5)
+                        memories_repo = MemoriesRepo(conn)
+                        memory_mgr = MemoryManager(
+                            memories_repo=memories_repo,
+                            compress_adapter=None,  # MVP 复用压缩模型,暂缺
+                            extract_interval_turns=cfg.get("memory", {}).get(
+                                "extract_interval_turns", 8
+                            ),
+                            inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
+                            eviction_max_active=cfg.get("memory", {}).get(
+                                "eviction", {}
+                            ).get("max_active_count", 200),
+                            eviction_min_importance=cfg.get("memory", {}).get(
+                                "eviction", {}
+                            ).get("min_importance_threshold", 0.3),
+                            eviction_expire_days=cfg.get("memory", {}).get(
+                                "eviction", {}
+                            ).get("expire_days", 30),
+                        )
                         cm = ContextManager(
                             session_id=session_id,
                             system_prompt=_get_system_prompt(cfg),
                             tools=tools,
+                            memory_manager=memory_mgr,
                         )
                         await cm.ensure_initial(conn)
                         adapter = _build_adapter(cfg)
@@ -186,6 +208,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             "session_id": session_id,
                             "turn": loop._turn,
                         })
+                        # 每轮结束后触发记忆提取(蓝图 §4.2)
+                        await memory_mgr.maybe_extract(
+                            session_id=session_id, current_turn=loop._turn,
+                        )
                     finally:
                         await conn.close()
                 except Exception:

@@ -1,4 +1,4 @@
-"""蓝图 §5.x / spec m2-tools-lifecycle - 8 类内置工具注册。
+"""蓝图 §5.x / spec m2-tools-lifecycle - 9 类内置工具注册。
 
 注册所有内置工具到 ToolRegistry, 供 ReAct 循环调用。
 """
@@ -11,6 +11,7 @@ from private_agent.tools.builtins.file_read import FILE_READ_TOOL
 from private_agent.tools.builtins.file_write import FILE_WRITE_TOOL
 from private_agent.tools.builtins.http_request import HTTP_REQUEST_TOOL
 from private_agent.tools.builtins.read_artifact import READ_ARTIFACT_TOOL
+from private_agent.tools.builtins.search_knowledge import SEARCH_KNOWLEDGE_TOOL
 from private_agent.tools.builtins.web_search import WEB_SEARCH_TOOL
 from private_agent.tools.registry import ToolRegistry
 
@@ -22,13 +23,14 @@ __all__ = [
     "FILE_READ_TOOL",
     "FILE_WRITE_TOOL",
     "HTTP_REQUEST_TOOL",
+    "SEARCH_KNOWLEDGE_TOOL",
     "WEB_SEARCH_TOOL",
     "READ_ARTIFACT_TOOL",
 ]
 
 
 def register_all_builtins(registry: ToolRegistry) -> None:
-    """注册所有 8 类内置工具到 ToolRegistry。
+    """注册所有 9 类内置工具到 ToolRegistry。
 
     Args:
         registry: ToolRegistry 实例。
@@ -40,6 +42,7 @@ def register_all_builtins(registry: ToolRegistry) -> None:
         FILE_READ_TOOL,
         FILE_WRITE_TOOL,
         HTTP_REQUEST_TOOL,
+        SEARCH_KNOWLEDGE_TOOL,
         WEB_SEARCH_TOOL,
         READ_ARTIFACT_TOOL,
     ]
