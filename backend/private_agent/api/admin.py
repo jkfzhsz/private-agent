@@ -24,6 +24,18 @@ from private_agent.api.files import _get_outputs_dir
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+async def _load_cfg() -> dict:
+    """加载 config.yaml 并合并 config_runtime 运行时覆盖(runtime > yaml)。
+
+    设置页修改 provider/MCP 后, 此处读到的即为最新生效配置。
+    """
+    conn = await db.connect()
+    try:
+        return await loader.load_config_with_overrides(conn)
+    finally:
+        await conn.close()
+
+
 def _build_compress_adapter(cfg):
     """构造压缩模型适配器(蓝图 §4.2,spec AC-7),测试可 monkeypatch。"""
     from private_agent.models.registry import build_compress_adapter
@@ -466,7 +478,7 @@ async def get_providers():
     """
     import os
 
-    cfg = loader.load_config()
+    cfg = await _load_cfg()
     providers = cfg.get("models", {}).get("providers", {})
     result = []
     for name, prov in providers.items():
@@ -486,6 +498,132 @@ async def get_providers():
             "fallback_chain", []
         ),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 设置页编辑: provider 配置更新 / 连通性测试 (Phase 1 补足)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+async def _set_runtime(conn, key: str, value) -> None:
+    """upsert 一条 config_runtime 记录(点分 key + JSONB value)。"""
+    import json as _json
+
+    await conn.execute(
+        """
+        INSERT INTO config_runtime (key, value)
+        VALUES ($1, $2::jsonb)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        """,
+        key,
+        _json.dumps(value),
+    )
+
+
+def _ensure_master_key() -> bytes:
+    """确保 PA_MASTER_KEY 可用: 未设置时生成 64 hex 并追加到 backend/.env。"""
+    import os
+
+    from private_agent.config import secrets
+
+    hex_key = os.environ.get("PA_MASTER_KEY", "")
+    if hex_key:
+        return bytes.fromhex(hex_key)
+    # 自动生成并持久化到 backend/.env(个人应用, 首次使用自动初始化)
+    import secrets as _secrets
+
+    new_key = _secrets.token_hex(32)  # 64 hex chars = 32 bytes
+    cfg = loader.load_config()
+    import os as _os
+
+    workspace = _os.path.expandvars(cfg.get("system", {}).get("workspace_root", "."))
+    env_path = _os.path.join(workspace, ".env")
+    try:
+        with open(env_path, "a", encoding="utf-8") as f:
+            f.write(f"\n# AES master key (auto-generated)\nPA_MASTER_KEY={new_key}\n")
+    except OSError:
+        pass
+    os.environ["PA_MASTER_KEY"] = new_key
+    return bytes.fromhex(new_key)
+
+
+class ProviderUpdateRequest(BaseModel):
+    """PUT /settings/providers/{name} 请求体(至少一项)。"""
+
+    base_url: str | None = None
+    model_name: str | None = None
+    enabled: bool | None = None
+    api_key: str | None = None  # 提供才更新; 明文仅走 HTTPS/本机回环, 加密后存库
+
+
+@router.put("/settings/providers/{name}", response_model=None)
+async def update_provider(name: str, body: ProviderUpdateRequest):
+    """更新模型 provider 配置(运行时覆盖, config_runtime 优先级 > yaml)。
+
+    - base_url/model_name/enabled → config_runtime(下次加载配置即生效)
+    - api_key 提供时 → AES-256-GCM 加密存 config_runtime + 同步设置环境变量(热生效)
+    """
+    import os
+
+    # 校验 provider 存在
+    cfg = await _load_cfg()
+    providers = cfg.get("models", {}).get("providers", {})
+    if name not in providers:
+        raise HTTPException(status_code=404, detail=f"provider '{name}' not found")
+
+    conn = await db.connect()
+    try:
+        prefix = f"models.providers.{name}"
+        if body.base_url is not None:
+            await _set_runtime(conn, f"{prefix}.base_url", body.base_url)
+        if body.model_name is not None:
+            await _set_runtime(conn, f"{prefix}.model_name", body.model_name)
+        if body.enabled is not None:
+            await _set_runtime(conn, f"{prefix}.enabled", bool(body.enabled))
+
+        if body.api_key is not None and body.api_key.strip():
+            master = _ensure_master_key()
+            from private_agent.config import secrets
+
+            encrypted = secrets.encrypt_api_key(body.api_key.strip(), master)
+            await _set_runtime(conn, f"{prefix}.api_key_encrypted", encrypted)
+            # 热生效: 本进程适配器直接读环境变量
+            os.environ[f"PA_{name.upper()}_API_KEY"] = body.api_key.strip()
+    finally:
+        await conn.close()
+    return {"ok": True, "name": name}
+
+
+@router.post("/settings/providers/{name}/test", response_model=None)
+async def test_provider(name: str):
+    """连通性测试: 用当前配置(含 key)实际调用一次模型。
+
+    Returns:
+        200: {"ok": true, "provider", "sample"} | {"ok": false, "provider", "error"}
+    """
+    import os
+
+    cfg = await _load_cfg()
+    env_var = f"PA_{name.upper()}_API_KEY"
+    key_val = os.environ.get(env_var, "")
+    if not key_val or key_val == "test-key":
+        return {"ok": False, "provider": name, "error": "未配置 API Key(可在设置中录入)"}
+    try:
+        from private_agent.models.registry import get_adapter
+
+        adapter = get_adapter(name, cfg)
+        result = await adapter.chat(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+        )
+        sample = (result.content or result.reasoning_content or "")[:80]
+        return {"ok": True, "provider": name, "sample": sample}
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "provider": name,
+            "error": f"{type(e).__name__}: {e}",
+        }
 
 
 @router.get("/sessions", response_model=None)
@@ -742,12 +880,191 @@ async def list_mcp_servers():
         200: {"servers": [{id, type, command, args, url, tags, timeout_sec}],
               "protocol_version": str}
     """
-    cfg = loader.load_config()
+    cfg = await _load_cfg()
     mcp_cfg = cfg.get("tools", {}).get("mcp", {})
     return {
         "servers": mcp_cfg.get("servers", []),
         "protocol_version": mcp_cfg.get("protocol_version", ""),
     }
+
+
+class McpServerRequest(BaseModel):
+    """POST /settings/mcp 请求体: 新增/更新 MCP server(存 config_runtime)。"""
+
+    name: str
+    type: str = "http"  # http | stdio
+    command: str | None = None  # stdio 用
+    args: list[str] = []  # stdio 用
+    url: str | None = None  # http 用
+    enabled: bool = True
+    timeout_sec: float = 30.0
+
+
+@router.post("/settings/mcp", response_model=None)
+async def upsert_mcp_server(body: McpServerRequest):
+    """新增/更新 MCP server 配置。
+
+    MCP servers 是列表结构, 存 config_runtime 的 tools.mcp.servers(整体列表,
+    runtime > yaml 整体覆盖)。MCP client 在启动时加载, 改动后重启后端生效。
+    """
+    import json as _json
+
+    value = {
+        "id": body.name,
+        "type": body.type,
+        "enabled": body.enabled,
+        "timeout_sec": body.timeout_sec,
+    }
+    if body.type == "http" or body.url:
+        value["type"] = "http"
+        value["url"] = body.url or ""
+    else:
+        value["type"] = "stdio"
+        value["command"] = body.command or ""
+        value["args"] = body.args or []
+
+    conn = await db.connect()
+    try:
+        # 现有列表: config_runtime 优先, 否则用 yaml 的
+        row = await conn.fetchval(
+            "SELECT value FROM config_runtime WHERE key = 'tools.mcp.servers'"
+        )
+        if row:
+            servers = _json.loads(row) if isinstance(row, str) else row
+        else:
+            cfg = await _load_cfg()
+            servers = list(cfg.get("tools", {}).get("mcp", {}).get("servers", []))
+
+        servers = [
+            s for s in servers
+            if isinstance(s, dict) and (s.get("id") != body.name and s.get("name") != body.name)
+        ]
+        servers.append(value)
+        await _set_runtime(conn, "tools.mcp.servers", servers)
+    finally:
+        await conn.close()
+    return {"ok": True, "server": body.name, "count": len(servers)}
+
+
+@router.delete("/settings/mcp/{name}", response_model=None)
+async def delete_mcp_server(name: str):
+    """删除 MCP server 配置(config_runtime tools.mcp.servers 列表)。"""
+    import json as _json
+
+    conn = await db.connect()
+    try:
+        row = await conn.fetchval(
+            "SELECT value FROM config_runtime WHERE key = 'tools.mcp.servers'"
+        )
+        if row:
+            servers = _json.loads(row) if isinstance(row, str) else row
+        else:
+            cfg = await _load_cfg()
+            servers = list(cfg.get("tools", {}).get("mcp", {}).get("servers", []))
+
+        remaining = [
+            s for s in servers
+            if isinstance(s, dict) and (s.get("id") != name and s.get("name") != name)
+        ]
+        if remaining:
+            await _set_runtime(conn, "tools.mcp.servers", remaining)
+        else:
+            await conn.execute(
+                "DELETE FROM config_runtime WHERE key = 'tools.mcp.servers'"
+            )
+    finally:
+        await conn.close()
+    return {"ok": True, "server": name}
+
+
+@router.post("/settings/mcp/{name}/test", response_model=None)
+async def test_mcp_server(name: str):
+    """MCP server 连通性测试: HTTP 发 initialize, stdio spawn 握手。"""
+    cfg = await _load_cfg()
+    servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
+    svc = next(
+        (s for s in servers if s.get("id") == name or s.get("name") == name),
+        None,
+    )
+    if not svc:
+        return {"ok": False, "server": name, "error": "server_not_found"}
+    try:
+        if svc.get("type") == "http" or svc.get("url"):
+            return await _test_mcp_http(name, svc["url"])
+        return await _test_mcp_stdio(name, svc.get("command", ""), svc.get("args", []))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}
+
+
+async def _test_mcp_http(name: str, url: str) -> dict:
+    import httpx
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "private-agent-test", "version": "0.1"},
+        },
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(url, json=payload)
+        if resp.status_code != 200:
+            return {"ok": False, "server": name, "error": f"HTTP {resp.status_code}"}
+        data = resp.json()
+        result = data.get("result", {})
+        return {
+            "ok": True,
+            "server": name,
+            "protocol": result.get("protocolVersion", ""),
+            "server_info": result.get("serverInfo", {}).get("name", ""),
+        }
+
+
+async def _test_mcp_stdio(name: str, command: str, args: list[str]) -> dict:
+    import asyncio
+
+    if not command:
+        return {"ok": False, "server": name, "error": "stdio server 缺少 command"}
+    proc = await asyncio.create_subprocess_exec(
+        command, *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "private-agent-test", "version": "0.1"},
+            },
+        }
+        import json as _json
+
+        proc.stdin.write((_json.dumps(payload) + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
+        data = _json.loads(line.decode("utf-8"))
+        result = data.get("result", {})
+        return {
+            "ok": True,
+            "server": name,
+            "protocol": result.get("protocolVersion", ""),
+            "server_info": result.get("serverInfo", {}).get("name", ""),
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 

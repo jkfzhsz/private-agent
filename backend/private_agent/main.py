@@ -232,7 +232,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     })
                     continue
                 try:
-                    cfg = loader.load_config()
+                    cfg = await _load_cfg_with_runtime()
                     conn = await db.connect()
                     try:
                         # 会话懒创建(蓝图 §2.10):WS 收到首条 user_message 时,
@@ -352,6 +352,8 @@ async def _on_startup() -> None:
             async with db._pool.acquire() as conn:
                 await migrations.migrate_all(conn)
             _logger.info("DB schema migrated (idempotent)")
+            # 从 config_runtime 恢复 AES 加密的 API key → 环境变量(设置页录入后重启仍生效)
+            await _restore_keys_from_runtime()
         except Exception as e:
             _logger.warning(f"DB schema migration failed at startup: {e}")
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -359,6 +361,51 @@ async def _on_startup() -> None:
     _scheduler = AsyncIOScheduler()
     schedule_ttl_cleanup(_scheduler, cfg)
     _scheduler.start()
+
+
+async def _load_cfg_with_runtime() -> dict:
+    """加载 config.yaml 并合并 config_runtime 运行时覆盖(蓝图 §2.12, runtime > yaml)。
+
+    设置页对 provider/MCP 的修改写入 config_runtime 后, 后续对话即用合并后的配置。
+    """
+    conn = await db.connect()
+    try:
+        return await loader.load_config_with_overrides(conn)
+    finally:
+        await conn.close()
+
+
+async def _restore_keys_from_runtime() -> None:
+    """从 config_runtime 读取 models.providers.*.api_key_encrypted, 解密后设置环境变量。
+
+    设置页录入的 API key 重启后依赖此恢复(否则 env 丢失 → 模型 401)。
+    """
+    import os
+
+    from private_agent.config import secrets
+
+    master_hex = os.environ.get("PA_MASTER_KEY", "")
+    if not master_hex:
+        return  # 无 master key 则跳过(从未在设置页录入过 key)
+    try:
+        master = bytes.fromhex(master_hex)
+    except ValueError:
+        return
+    async with db._pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT key, value FROM config_runtime WHERE key LIKE 'models.providers.%.api_key_encrypted'"
+        )
+    for row in rows:
+        key_path = row["key"]  # models.providers.deepseek.api_key_encrypted
+        parts = key_path.split(".")
+        if len(parts) < 4:
+            continue
+        prov_name = parts[2]
+        try:
+            plain = secrets.decrypt_api_key(row["value"], master)
+        except Exception:  # noqa: BLE001
+            continue
+        os.environ[f"PA_{prov_name.upper()}_API_KEY"] = plain
 
 
 def _configure_logger(cfg: dict) -> None:

@@ -1,5 +1,5 @@
-// Phase 1 Task 12 + 1.5 - 设置视图
-// 模型 provider 状态 + MCP servers + 主题壁纸(上传/移除)
+// Phase 1 Task 12 + 1.5 + 16 - 设置视图
+// 模型 provider 可编辑(地址/模型/开关/API Key/测试连通性) + MCP servers 增删测 + 主题壁纸
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = "http://localhost:8765/admin";
@@ -20,6 +20,7 @@ interface McpServer {
   args?: string[];
   url?: string;
   tags?: string[];
+  enabled?: boolean;
 }
 
 export default function SettingsView(): JSX.Element {
@@ -58,47 +59,11 @@ export default function SettingsView(): JSX.Element {
           模型 Provider
         </div>
         <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
-          API Key 通过环境变量 PA_{"{NAME}"}_API_KEY 配置(不显示明文);降级链: {fallbackChain.join(" → ") || "—"}
+          可编辑地址/模型/开关/API Key, 支持连通性测试; 降级链: {fallbackChain.join(" → ") || "—"}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {providers.map((p) => (
-            <div
-              key={p.name}
-              style={{
-                display: "flex", alignItems: "center", gap: 12,
-                padding: "12px 14px", borderRadius: "var(--radius-sm)",
-                background: "rgba(255,255,255,0.5)",
-              }}
-            >
-              <span
-                style={{
-                  width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-                  background: p.enabled ? "var(--success-text)" : "#cbd5e1",
-                }}
-              />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 14, fontWeight: 600 }}>{p.name}</span>
-                  <span
-                    style={{
-                      fontSize: 11, padding: "1px 8px", borderRadius: 10,
-                      background: p.api_key_configured ? "var(--success-bg)" : "#f1f5f9",
-                      color: p.api_key_configured ? "var(--success-text)" : "var(--text-tertiary)",
-                    }}
-                  >
-                    {p.api_key_configured ? "Key 已配置" : "Key 未配置"}
-                  </span>
-                  {!p.enabled && (
-                    <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "#fef3c7", color: "#d97706" }}>
-                      已禁用
-                    </span>
-                  )}
-                </div>
-                <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {p.model_name ?? "—"} · {p.base_url ?? "—"}
-                </div>
-              </div>
-            </div>
+            <ProviderRow key={p.name} provider={p} onSaved={load} />
           ))}
         </div>
       </div>
@@ -108,40 +73,409 @@ export default function SettingsView(): JSX.Element {
           MCP Servers
         </div>
         <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
-          协议版本: {protocol || "—"} · 配置源: config.yaml → tools.mcp.servers
+          协议版本: {protocol || "—"} · 可新增/删除/测试连通性(改动重启后端后生效)
         </div>
-        {mcpServers.length === 0 ? (
-          <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "20px 0", textAlign: "center" }}>
-            当前未配置 MCP server。在 config.yaml 的 tools.mcp.servers 中添加后重启生效。
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {mcpServers.map((s) => (
-              <div
-                key={s.id}
-                style={{
-                  display: "flex", alignItems: "center", gap: 12,
-                  padding: "12px 14px", borderRadius: "var(--radius-sm)",
-                  background: "rgba(255,255,255,0.5)",
-                }}
-              >
-                <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{s.id}</span>
-                <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--info-bg)", color: "var(--info-text)" }}>
-                  {s.type}
-                </span>
-                <span style={{ fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}>
-                  {s.url || [s.command, ...(s.args ?? [])].join(" ")}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {mcpServers.map((s) => (
+            <McpRow key={s.id} server={s} onChange={load} />
+          ))}
+          {mcpServers.length === 0 && (
+            <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
+              当前未配置 MCP server
+            </div>
+          )}
+          <McpAddForm onAdded={load} />
+        </div>
       </div>
 
       {error && <div style={{ fontSize: 12, color: "var(--danger-text)" }}>加载失败: {error}</div>}
 
       {/* 主题壁纸 */}
       <WallpaperSection />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Provider 行(可编辑 + 测试)
+// ──────────────────────────────────────────────────────────────────────────────
+
+function ProviderRow({
+  provider,
+  onSaved,
+}: {
+  provider: ProviderInfo;
+  onSaved: () => void;
+}): JSX.Element {
+  const [editing, setEditing] = useState(false);
+  const [baseUrl, setBaseUrl] = useState(provider.base_url ?? "");
+  const [modelName, setModelName] = useState(provider.model_name ?? "");
+  const [enabled, setEnabled] = useState(provider.enabled);
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const beginEdit = (): void => {
+    setBaseUrl(provider.base_url ?? "");
+    setModelName(provider.model_name ?? "");
+    setEnabled(provider.enabled);
+    setApiKey("");
+    setMsg(null);
+    setEditing(true);
+  };
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const body: Record<string, unknown> = {};
+      if (baseUrl.trim()) body.base_url = baseUrl.trim();
+      if (modelName.trim()) body.model_name = modelName.trim();
+      body.enabled = enabled;
+      if (apiKey.trim()) body.api_key = apiKey.trim();
+      const resp = await fetch(`${API_BASE}/settings/providers/${provider.name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setMsg("已保存");
+      setEditing(false);
+      onSaved();
+    } catch (err) {
+      setMsg(`保存失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const resp = await fetch(`${API_BASE}/settings/providers/${provider.name}/test`, {
+        method: "POST",
+      });
+      const data = await resp.json();
+      setMsg(
+        data.ok
+          ? `✅ 连通正常: ${data.sample ?? ""}`
+          : `❌ ${data.error ?? "测试失败"}`
+      );
+    } catch (err) {
+      setMsg(`测试失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        padding: "12px 14px",
+        borderRadius: "var(--radius-sm)",
+        background: "rgba(255,255,255,0.5)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <span
+          style={{
+            width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+            background: provider.enabled ? "var(--success-text)" : "#cbd5e1",
+          }}
+        />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 14, fontWeight: 600 }}>{provider.name}</span>
+            <span
+              style={{
+                fontSize: 11, padding: "1px 8px", borderRadius: 10,
+                background: provider.api_key_configured ? "var(--success-bg)" : "#f1f5f9",
+                color: provider.api_key_configured ? "var(--success-text)" : "var(--text-tertiary)",
+              }}
+            >
+              {provider.api_key_configured ? "Key 已配置" : "Key 未配置"}
+            </span>
+            {!provider.enabled && (
+              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "#fef3c7", color: "#d97706" }}>
+                已禁用
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {provider.model_name ?? "—"} · {provider.base_url ?? "—"}
+          </div>
+        </div>
+        {!editing && (
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }} onClick={beginEdit}>
+              编辑
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }} onClick={() => void test()} disabled={busy}>
+              测试
+            </button>
+          </div>
+        )}
+      </div>
+
+      {editing && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(148,163,184,0.15)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API 地址</span>
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://..."
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>模型名</span>
+            <input
+              value={modelName}
+              onChange={(e) => setModelName(e.target.value)}
+              placeholder="model-name"
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API Key</span>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={provider.api_key_configured ? "已配置(留空不修改)" : "输入新 Key"}
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
+              <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+              启用
+            </label>
+            <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void save()} disabled={busy}>
+              保存
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setEditing(false)} disabled={busy}>
+              取消
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => void test()} disabled={busy}>
+              测试连通性
+            </button>
+          </div>
+          {msg && <div style={{ fontSize: 12, color: msg.startsWith("✅") ? "var(--success-text)" : msg.startsWith("❌") ? "var(--danger-text)" : "var(--text-secondary)" }}>{msg}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MCP Server 行(测试 + 删除)
+// ──────────────────────────────────────────────────────────────────────────────
+
+function McpRow({
+  server,
+  onChange,
+}: {
+  server: McpServer;
+  onChange: () => void;
+}): JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const test = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const resp = await fetch(`${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}/test`, {
+        method: "POST",
+      });
+      const data = await resp.json();
+      setMsg(
+        data.ok
+          ? `✅ 连接正常 (${data.server_info || data.protocol || "ok"})`
+          : `❌ ${data.error ?? "测试失败"}`
+      );
+    } catch (err) {
+      setMsg(`测试失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await fetch(`${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}`, { method: "DELETE" });
+      onChange();
+    } catch (err) {
+      setMsg(`删除失败: ${String(err)}`);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.5)" }}>
+      <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{server.id}</span>
+      <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--info-bg)", color: "var(--info-text)", flexShrink: 0 }}>
+        {server.type}
+      </span>
+      <span style={{ fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+        {server.url || [server.command, ...(server.args ?? [])].join(" ")}
+      </span>
+      <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 10px", flexShrink: 0 }} onClick={() => void test()} disabled={busy}>
+        测试
+      </button>
+      <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 10px", flexShrink: 0, color: "var(--danger-text)" }} onClick={() => void remove()} disabled={busy}>
+        删除
+      </button>
+      {msg && <span style={{ fontSize: 11, color: msg.startsWith("✅") ? "var(--success-text)" : "var(--danger-text)" }}>{msg}</span>}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MCP 新增表单
+// ──────────────────────────────────────────────────────────────────────────────
+
+function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [type, setType] = useState<"http" | "stdio">("http");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const submit = async (): Promise<void> => {
+    if (!name.trim()) {
+      setMsg("请填写 server 名称");
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      const body: Record<string, unknown> = {
+        name: name.trim(),
+        type,
+      };
+      if (type === "http") {
+        if (!url.trim()) {
+          setMsg("请填写 URL");
+          setBusy(false);
+          return;
+        }
+        body.url = url.trim();
+      } else {
+        if (!command.trim()) {
+          setMsg("请填写启动命令");
+          setBusy(false);
+          return;
+        }
+        body.command = command.trim();
+        body.args = args.split(/\s+/).filter(Boolean);
+      }
+      const resp = await fetch(`${API_BASE}/settings/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setName("");
+      setUrl("");
+      setCommand("");
+      setArgs("");
+      setMsg("已添加(重启后端后生效)");
+      onAdded();
+    } catch (err) {
+      setMsg(`添加失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button className="btn-ghost" style={{ fontSize: 12, padding: "8px 14px", alignSelf: "flex-start" }} onClick={() => setOpen(true)}>
+        + 添加 MCP Server
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.4)" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>名称</span>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="server 名称(唯一)"
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+        />
+        <div style={{ display: "flex", gap: 4 }}>
+          {(["http", "stdio"] as const).map((t) => (
+            <button
+              key={t}
+              className="btn-ghost"
+              style={{
+                fontSize: 11, padding: "4px 10px",
+                background: type === t ? "var(--gradient-indigo)" : "rgba(255,255,255,0.5)",
+                color: type === t ? "#fff" : "var(--text-primary)",
+                border: "none",
+              }}
+              onClick={() => setType(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {type === "http" ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>URL</span>
+          <input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="http://127.0.0.1:port/mcp"
+            style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+          />
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>命令</span>
+            <input
+              value={command}
+              onChange={(e) => setCommand(e.target.value)}
+              placeholder="npx"
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>参数</span>
+            <input
+              value={args}
+              onChange={(e) => setArgs(e.target.value)}
+              placeholder="空格分隔, 如 -y @modelcontextprotocol/server-filesystem C:/tmp"
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </div>
+        </>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void submit()} disabled={busy}>
+          添加
+        </button>
+        <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setOpen(false)}>
+          取消
+        </button>
+        {msg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{msg}</span>}
+      </div>
     </div>
   );
 }
