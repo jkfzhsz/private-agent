@@ -78,6 +78,9 @@ async function bootstrap(): Promise<void> {
     // 注入 WORKSPACE: 后端 config.yaml 的 workspace_root=${WORKSPACE},
     // 缺失会导致日志/产物目录错位、DB 连接异常
     env: { WORKSPACE: config.workspaceRoot },
+    // 工作目录设为 backend: config.yaml 的 skills.storage.dev_dir="./skills"
+    // 等相对路径以此解析, 否则 Electron 拉起的后端 cwd=frontend → 技能加载为空
+    cwd: config.workspaceRoot,
   });
   await sidecarManager.start();
   console.log("[main] Sidecar health OK");

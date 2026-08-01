@@ -14,6 +14,8 @@ export interface SidecarConfig {
   port: number;
   healthUrl: string;
   env?: NodeJS.ProcessEnv;
+  /** 后端进程工作目录(应为 backend 目录, 使 config.yaml 中 ./skills 等相对路径解析正确) */
+  cwd?: string;
 }
 
 export const MAX_RESTARTS = 3;
@@ -23,6 +25,7 @@ export function spawnSidecar(config: SidecarConfig): ChildProcess {
   return spawn(config.pythonCommand, ["-m", config.moduleName], {
     env: { ...process.env, ...config.env },
     stdio: ["pipe", "pipe", "pipe"],
+    cwd: config.cwd,
   });
 }
 
