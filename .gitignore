@@ -22,3 +22,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Tool caches / traces
+.workbuddy/
+backend/.claude/
