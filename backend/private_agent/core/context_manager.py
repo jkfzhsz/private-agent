@@ -188,6 +188,31 @@ class ContextManager:
         await self.build_initial(conn)
         await self._inject_memories(conn)
 
+    async def verify_frozen_hash(self, conn: "asyncpg.Connection") -> None:
+        """校验 Frozen Zone hash 与 sessions.frozen_hash 一致(B1 P1-4)。
+
+        供 react_loop 每轮调用(本 spec 不集成,由 B3 与 checkpoint 一起接入);
+        PA_FROZEN_HASH_VERIFY=0 时跳过校验(逃生通道)。
+
+        Args:
+            conn: Postgres 连接。
+
+        Raises:
+            FrozenHashMismatchError: frozen_hash 非 NULL 且与计算值不一致。
+        """
+        if os.environ.get("PA_FROZEN_HASH_VERIFY", "1") == "0":
+            return
+        db_hash = await conn.fetchval(
+            "SELECT frozen_hash FROM sessions WHERE id=$1", self.session_id
+        )
+        if db_hash is None:
+            return  # 老会话无 hash,跳过
+        computed = self.compute_frozen_hash()
+        if computed != db_hash:
+            raise FrozenHashMismatchError(
+                f"frozen_hash mismatch: db={db_hash[:8]}... computed={computed[:8]}..."
+            )
+
     async def reload_from_db(self, conn: "asyncpg.Connection") -> None:
         """完整重放历史消息(Frozen+Stable+Active 三区)(蓝图 §8.10,AC-1)。
 

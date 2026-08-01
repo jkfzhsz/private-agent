@@ -859,3 +859,80 @@ def test_replace_frozen_zone_post_write_verify(monkeypatch):
             await conn.close()
 
     asyncio.run(_run())
+
+
+def test_verify_frozen_hash_passes_on_correct_hash(monkeypatch):
+    """B1 P1-4: verify_frozen_hash 在 hash 正确时正常返回。"""
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "1")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="verify hash",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            await cm.verify_frozen_hash(conn)  # 不抛错即通过
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_verify_frozen_hash_raises_on_mismatch(monkeypatch):
+    """B1 P1-4: verify_frozen_hash 在 frozen_hash 被篡改时抛 FrozenHashMismatchError。"""
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "1")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="verify mismatch",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            await conn.execute(
+                "UPDATE sessions SET frozen_hash=$2 WHERE id=$1",
+                session_id,
+                "0" * 64,
+            )
+            with pytest.raises(FrozenHashMismatchError):
+                await cm.verify_frozen_hash(conn)
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_verify_frozen_hash_skips_when_env_disabled(monkeypatch):
+    """B1 P1-4: PA_FROZEN_HASH_VERIFY=0 时 verify_frozen_hash 跳过校验。"""
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "0")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="verify disabled",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            await conn.execute(
+                "UPDATE sessions SET frozen_hash=$2 WHERE id=$1",
+                session_id,
+                "0" * 64,
+            )
+            await cm.verify_frozen_hash(conn)  # 不抛错即通过
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
