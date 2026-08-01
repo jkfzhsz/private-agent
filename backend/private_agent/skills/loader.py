@@ -61,6 +61,69 @@ class SkillLoader:
             f"Skill '{skill_name}' 不存在(PG + {self.dev_dir}/{skill_name}/ 均未找到)"
         )
 
+    async def list_all(self, conn=None) -> list[Skill]:
+        """列出所有 enabled Skill(plan step 17)。
+
+        PG 优先:查 skills 表 is_enabled=TRUE;PG 无记录则扫文件系统 dev_dir/*/skill.yaml。
+
+        Args:
+            conn: asyncpg.Connection(可选)。
+
+        Returns:
+            Skill 列表(name 降序排列)。
+        """
+        if self.runtime_source == "db_first" and conn is not None:
+            skills = await self._list_from_pg(conn)
+            if skills:
+                return skills
+        return await self._list_from_filesystem()
+
+    async def _list_from_pg(self, conn) -> list[Skill]:
+        """从 PG skills 表列出所有 enabled(按 name 升序)。"""
+        rows = await conn.fetch(
+            "SELECT name, version, description, manifest, system_prompt, tools, is_enabled "
+            "FROM skills WHERE is_enabled = TRUE ORDER BY name ASC"
+        )
+        skills = []
+        for row in rows:
+            manifest_dict = row["manifest"] if isinstance(row["manifest"], dict) else json.loads(row["manifest"])
+            manifest = SkillManifest(**manifest_dict)
+            skills.append(Skill(
+                manifest=manifest,
+                system_prompt=row["system_prompt"] or "",
+                tools_yaml=row["tools"] if isinstance(row["tools"], list) else json.loads(row["tools"] or "[]"),
+            ))
+        return skills
+
+    async def _list_from_filesystem(self) -> list[Skill]:
+        """从 dev_dir/*/ 扫描所有 skill.yaml。"""
+        root = Path(self.dev_dir)
+        if not root.exists():
+            return []
+        skills = []
+        for skill_dir in sorted(root.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            skill_yaml = skill_dir / "skill.yaml"
+            if not skill_yaml.exists():
+                continue
+            try:
+                with skill_yaml.open(encoding="utf-8") as f:
+                    manifest_dict = yaml.safe_load(f)
+                manifest = SkillManifest(**manifest_dict)
+                prompt_file = skill_dir / "system_prompt.md"
+                system_prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
+                tools_yaml = skill_dir / "tools.yaml"
+                tools = []
+                if tools_yaml.exists():
+                    with tools_yaml.open(encoding="utf-8") as f:
+                        tools = yaml.safe_load(f) or []
+                skills.append(Skill(manifest=manifest, system_prompt=system_prompt, tools_yaml=tools))
+            except Exception:
+                # 单个 skill 加载失败不影响其他 skill 列表
+                continue
+        return skills
+
     async def _load_from_pg(self, skill_name: str, conn) -> Skill | None:
         """从 PG skills 表加载(按 name + is_enabled + 最新 updated_at)。"""
         row = await conn.fetchrow(

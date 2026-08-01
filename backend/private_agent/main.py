@@ -35,16 +35,38 @@ def _build_compress_adapter(cfg):
     return build_compress_adapter(cfg)
 
 
-def _get_tools(cfg):
-    """获取工具列表(M2:从 ToolRegistry 注册所有内置工具,测试可 monkeypatch)。
+async def _get_tools(cfg, session_id: int, conn):
+    """获取工具列表(M3:按 session locked_skill 过滤,测试可 monkeypatch)。
 
-    MCP 工具发现由 startup 阶段异步完成,此处仅返回内置工具。
+    - session 未 activate (locked_skill_name IS NULL) → 返回全部内置工具(M1 行为)
+    - session 已 activate → 按 skill manifest.dependencies.tools 白名单过滤(AC-3)
+
+    Args:
+        cfg: 配置 dict。
+        session_id: 会话 ID。
+        conn: asyncpg.Connection。
+
+    Returns:
+        ToolDef 列表(过滤后)。
     """
+    from private_agent.skills.loader import SkillLoader
     from private_agent.tools.builtins import register_all_builtins
     from private_agent.tools.registry import ToolRegistry
+
     registry = ToolRegistry()
     register_all_builtins(registry)
-    return registry.list_tools()
+
+    locked_skill = await conn.fetchval(
+        "SELECT locked_skill_name FROM sessions WHERE id = $1",
+        session_id,
+    )
+    if not locked_skill:
+        return registry.list_tools()
+
+    loader = SkillLoader.from_cfg(cfg)
+    skill = await loader.load(locked_skill, conn)
+    whitelist = [t.name for t in skill.manifest.dependencies.tools if t.enabled]
+    return registry.list_tools_for_session(whitelist)
 
 
 def _get_system_prompt(cfg):
@@ -167,9 +189,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     continue
                 try:
                     cfg = loader.load_config()
-                    tools = _get_tools(cfg)
                     conn = await db.connect()
                     try:
+                        tools = await _get_tools(cfg, session_id, conn)
                         # 构造 MemoryManager(蓝图 §4.2-§4.5)
                         memories_repo = MemoriesRepo(conn)
                         memory_mgr = MemoryManager(

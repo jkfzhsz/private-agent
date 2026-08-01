@@ -1,0 +1,45 @@
+name: office
+version: "1.0.0"
+description: "办公场景助手 — 文档处理、数据分析、网页研究"
+scenario: office
+author: "private-agent"
+created_at: "2026-08-01"
+enabled: true
+
+dependencies:
+  tools:
+    - name: calculator
+      safety_level_override: safe
+    - name: code_execution
+      safety_level_override: elevated
+    - name: datetime
+      safety_level_override: safe
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+    - name: search_knowledge
+      safety_level_override: safe
+    - name: web_search
+      safety_level_override: safe
+    - name: http_request
+      safety_level_override: elevated
+      enabled: false
+
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 50
+
+knowledge_base:
+  enabled: true
+  scenario: office
+  auto_retrieve: false
+
+examples:
+  enabled: true
+  max_examples: 2
+  inject_to: frozen_zone
+
+max_frozen_token: 4000

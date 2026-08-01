@@ -95,7 +95,7 @@ def _patch_adapter_and_tools(monkeypatch, responses, tools):
     def _fake_build_adapter(cfg):
         return _MockAdapter(responses=responses)
 
-    def _fake_get_tools(cfg):
+    async def _fake_get_tools(cfg, session_id, conn):
         return list(tools)
 
     monkeypatch.setattr(main_mod, "_build_adapter", _fake_build_adapter)
