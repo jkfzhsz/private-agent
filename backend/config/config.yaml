@@ -138,7 +138,7 @@ tools:
   mcp:
     config_source: "hybrid"  # [runtime]
     probe_interval_sec: 60  # [runtime]
-    servers: []  # MCP 服务声明列表:每项含 id/type/command/args/tags/timeout
+    servers: []  # MCP 服务声明列表:每项含 id/type/command/args/tags/timeout;http 类型含 url,可选 health_check_interval_sec(默认 30)
     # MCP 2026-07-28 协议版本协商(MVP 锁定旧协议,V2 启用新协议)
     protocol_version: "2025-11-25"  # [runtime] MVP 仅支持 2025-11-25;loader 对 2026-07-28 抛 ConfigNotSupportedInMVP
     cache_ttl_ms: 30000  # [runtime] V2 启用

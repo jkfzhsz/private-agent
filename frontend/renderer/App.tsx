@@ -8,6 +8,7 @@
 // - ACK 机制:收到 react_event 后发送 ack(session_id + turn)
 // - session_id 管理:首次连接时从 URL 参数获取或生成
 import { useCallback, useEffect, useRef, useState } from "react";
+import SkillSelectionPanel from "./SkillSelectionPanel";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 类型定义
@@ -299,6 +300,9 @@ export default function App(): JSX.Element {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<ConnStatus>("disconnected");
   const [sessionId] = useState<number>(() => getSessionIdFromUrl());
+  const [realSessionId, setRealSessionId] = useState<number | null>(null);
+  const [activeSkill, setActiveSkill] = useState<string | null>(null);
+  const [view, setView] = useState<"skill_selection" | "chat">("skill_selection");
   const [showEvalPanel, setShowEvalPanel] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -324,6 +328,10 @@ export default function App(): JSX.Element {
 
       case "react_event": {
         if (msg.event_type && msg.turn !== undefined && msg.payload) {
+          // 从后端回传更新真实 session_id(B2 P1-9:activate 需要真实 session)
+          if (msg.session_id && msg.session_id !== sessionId) {
+            setRealSessionId(msg.session_id);
+          }
           const event: ReactEvent = {
             id: ++eventIdRef.current,
             session_id: msg.session_id ?? sessionId,
@@ -360,6 +368,10 @@ export default function App(): JSX.Element {
 
       case "error":
         if (msg.message) {
+          // B2 P1-9: skill_not_found → 自动切回技能选择页
+          if (/skill_not_found|skill not found/i.test(msg.message)) {
+            setView("skill_selection");
+          }
           const event: ReactEvent = {
             id: ++eventIdRef.current,
             session_id: msg.session_id ?? sessionId,
@@ -475,6 +487,32 @@ export default function App(): JSX.Element {
     status === "connected" ? "#4caf50" :
     status === "reconnecting" ? "#ff9800" : "#f44336";
 
+  // B2 P1-9: 技能选择视图(首次进入 / skill_not_found 跳转)
+  if (view === "skill_selection") {
+    return (
+      <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 900, margin: "0 auto", padding: 16 }}>
+        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h1 style={{ fontSize: 20, margin: 0 }}>Private Agent</h1>
+          <span style={{ fontSize: 12, color: "#999" }}>session={realSessionId ?? sessionId}</span>
+        </header>
+        <div
+          style={{
+            border: "1px solid #ddd", borderRadius: 8, padding: 24,
+            backgroundColor: "#fafafa",
+          }}
+        >
+          <SkillSelectionPanel
+            sessionId={realSessionId ?? sessionId}
+            onActivated={(name) => {
+              setActiveSkill(name);
+              setView("chat");
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 900, margin: "0 auto", padding: 16 }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -489,6 +527,9 @@ export default function App(): JSX.Element {
           <span style={{ fontSize: 13, color: "#666" }}>{status}</span>
           <span style={{ fontSize: 12, color: "#999" }}>session={sessionId}</span>
           <span style={{ fontSize: 12, color: "#999" }}>last_turn={lastTurnRef.current}</span>
+          {activeSkill && (
+            <span style={{ fontSize: 12, color: "#1976d2" }}>skill={activeSkill}</span>
+          )}
           <button
             onClick={() => setShowEvalPanel(!showEvalPanel)}
             style={{

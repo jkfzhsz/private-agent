@@ -49,7 +49,11 @@ class SandboxService:
 
         lang_cfg = sandbox_cfg.get("languages", {}).get("python", {})
         python_cmd = lang_cfg.get("command", "python")
-        self._executor = SandboxExecutor(python_command=python_cmd)
+        js_lang_cfg = sandbox_cfg.get("languages", {}).get("javascript", {})
+        node_cmd = js_lang_cfg.get("command", "node")
+        self._executor = SandboxExecutor(
+            python_command=python_cmd, node_command=node_cmd
+        )
 
         output_cfg = sandbox_cfg.get("output", {})
         self._stdout_artifact_threshold = output_cfg.get(
@@ -70,7 +74,7 @@ class SandboxService:
 
         Args:
             code: 要执行的代码。
-            language: 语言(当前仅支持 "python")。
+            language: 语言(python/javascript,B2 P1-7)。
             timeout: 超时秒数(默认用 config 值)。
             session_id: 会话 ID(用于工作目录隔离和事件记录)。
 
@@ -93,7 +97,7 @@ class SandboxService:
             )
 
         # 3. 代码预扫描(告警不阻断)
-        warnings = self._code_scanner.scan(code) if self._code_scanner else []
+        warnings = self._code_scanner.scan(code, language) if self._code_scanner else []
 
         # 4. 环境变量脱敏
         safe_env = self._env_sanitizer.sanitize(dict(os.environ))

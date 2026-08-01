@@ -22,24 +22,40 @@ class CodeScanner:
         r"socket\.socket\s*\(",
         r"os\.kill\s*\(",
         r"os\.fork\s*\(",
-        r"eval\s*\(",
-        r"exec\s*\(",
+        r"\beval\s*\(",
+        r"\bexec\s*\(",
+    ]
+
+    # B2 P1-7: JavaScript 危险模式(node 沙箱)
+    JS_DANGEROUS_PATTERNS: list[str] = [
+        r"child_process\.(exec|execSync|spawn|spawnSync|fork)\s*\(",
+        r"require\s*\(\s*['\"]child_process['\"]\s*\)",
+        r"eval\s*\(",
+        r"new\s+Function\s*\(",
+        r"fs\.(unlinkSync|rmSync|writeFileSync|appendFileSync)\s*\(",
+        r"process\.(env|exit)\b",
+        r"globalThis\.fetch\s*\(",
     ]
 
     def __init__(self, patterns: list[str] | None = None) -> None:
         self._patterns = patterns or list(self.DEFAULT_DANGEROUS_PATTERNS)
 
-    def scan(self, code: str) -> list[CodeWarning]:
+    def scan(self, code: str, language: str = "python") -> list[CodeWarning]:
         """预扫描代码,返回告警列表(不阻断)。
 
         Args:
             code: 用户提交的代码文本。
+            language: 语言标识(python/javascript),决定使用的危险模式集。
 
         Returns:
             已匹配到的告警列表(空列表表示无告警)。
         """
+        patterns = self._patterns
+        if self._patterns == list(self.DEFAULT_DANGEROUS_PATTERNS) and language == "javascript":
+            # 自定义 patterns 优先;默认配置时按语言切换(B2 P1-7)
+            patterns = list(self.JS_DANGEROUS_PATTERNS)
         warnings: list[CodeWarning] = []
-        for pattern in self._patterns:
+        for pattern in patterns:
             for match in re.finditer(pattern, code):
                 line = code[: match.start()].count("\n") + 1
                 warnings.append(CodeWarning(

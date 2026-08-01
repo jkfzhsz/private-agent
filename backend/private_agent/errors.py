@@ -20,11 +20,10 @@ class ConfigNotSupportedInMVP(ConfigError):
     """
 
 
-class McpHttpStubNotImplementedError(PrivateAgentError):
-    """MCP HTTP 模式在 MVP 阶段未实现(蓝图 §5.x / spec m2-tools-lifecycle)。
+class McpConnectError(PrivateAgentError):
+    """MCP 服务器连接失败(B2 P1-6)。
 
-    MVP 仅支持 stdio 模式通信;HTTP 模式仅保留类型定义和配置解析 stub,
-    调用 connect/discover/call 时抛此异常。
+    HTTP 模式 connect 后自动 ping 失败,或服务器不可达时抛出。
     """
 
 

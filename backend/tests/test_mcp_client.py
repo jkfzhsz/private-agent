@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from private_agent.errors import McpHttpStubNotImplementedError
 from private_agent.tools.mcp_client import MCPClient, MCPClientConfig
 
 
@@ -61,32 +60,53 @@ class TestMCPClientConfig:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MCPClient - HTTP stub (AC-4)
+# MCPClient - HTTP (B2 P1-6)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestMCPClientHttpStub:
-    """AC-4: HTTP 模式 MCPClient 应抛出 McpHttpStubNotImplementedError。"""
+class TestMCPClientHttp:
+    """P1-6: HTTP 模式 MCPClient 生命周期(connect/discover/call/disconnect)。"""
 
-    async def test_connect_http_raises(self, http_config: MCPClientConfig) -> None:
+    async def test_connect_http_marks_connected(self, http_config: MCPClientConfig) -> None:
+        """connect(http) 应建 httpx client 并标记 connected。"""
         client = MCPClient(http_config)
-        with pytest.raises(McpHttpStubNotImplementedError):
+        with patch.object(client, "ping", new=AsyncMock(return_value=True)):
             await client.connect()
-
-    async def test_discover_http_raises(self, http_config: MCPClientConfig) -> None:
-        client = MCPClient(http_config)
-        with pytest.raises(McpHttpStubNotImplementedError):
-            await client.discover_tools()
-
-    async def test_call_tool_http_raises(self, http_config: MCPClientConfig) -> None:
-        client = MCPClient(http_config)
-        with pytest.raises(McpHttpStubNotImplementedError):
-            await client.call_tool("test", {})
-
-    async def test_disconnect_http_raises(self, http_config: MCPClientConfig) -> None:
-        client = MCPClient(http_config)
-        with pytest.raises(McpHttpStubNotImplementedError):
+            assert client.connected is True
             await client.disconnect()
+
+    async def test_connect_http_ping_failure_raises(self, http_config: MCPClientConfig) -> None:
+        """connect(http) ping 失败应抛 McpConnectError。"""
+        from private_agent.errors import McpConnectError
+
+        client = MCPClient(http_config)
+        with patch.object(client, "ping", new=AsyncMock(return_value=False)):
+            with pytest.raises(McpConnectError):
+                await client.connect()
+
+    async def test_discover_http_returns_tools(self, http_config: MCPClientConfig) -> None:
+        """discover_tools(http) 经 _http_post 返回工具列表。"""
+        client = MCPClient(http_config)
+        client._connected = True
+        with patch.object(client, "_http_post", new=AsyncMock(return_value={"tools": [{"name": "t"}]})):
+            tools = await client.discover_tools()
+            assert tools == [{"name": "t"}]
+
+    async def test_call_tool_http_returns_result(self, http_config: MCPClientConfig) -> None:
+        """call_tool(http) 经 _http_post 返回结果。"""
+        client = MCPClient(http_config)
+        client._connected = True
+        with patch.object(client, "_http_post", new=AsyncMock(return_value={"content": []})):
+            result = await client.call_tool("echo", {"text": "hi"})
+            assert result == {"content": []}
+
+    async def test_disconnect_http_closes_and_idempotent(self, http_config: MCPClientConfig) -> None:
+        """disconnect(http) 关闭 client 且幂等。"""
+        client = MCPClient(http_config)
+        client._connected = True
+        await client.disconnect()
+        assert client.connected is False
+        await client.disconnect()  # 不抛异常
 
     async def test_connected_property_http(self, http_config: MCPClientConfig) -> None:
         client = MCPClient(http_config)

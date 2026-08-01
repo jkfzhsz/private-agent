@@ -34,6 +34,36 @@ class TestCodeScanner:
         warnings = scanner.scan(code)
         assert warnings == []
 
+    def test_scan_javascript_detects_child_process(self) -> None:
+        """P1-7: scan JS child_process.exec 返回告警。"""
+        scanner = CodeScanner()
+        code = "const { exec } = require('child_process'); exec('rm -rf /');"
+        warnings = scanner.scan(code, language="javascript")
+        assert len(warnings) >= 1
+        assert any("child_process" in w.snippet or "exec" in w.snippet for w in warnings)
+
+    def test_scan_javascript_detects_eval(self) -> None:
+        """P1-7: scan JS eval() 返回告警。"""
+        scanner = CodeScanner()
+        code = "eval('1+1')"
+        warnings = scanner.scan(code, language="javascript")
+        assert len(warnings) >= 1
+
+    def test_scan_javascript_clean_no_warnings(self) -> None:
+        """P1-7: 普通 JS 代码无告警。"""
+        scanner = CodeScanner()
+        code = "console.log('hello'); const x = 1 + 2;"
+        warnings = scanner.scan(code, language="javascript")
+        assert warnings == []
+
+    def test_scan_python_default_not_flagged_as_js(self) -> None:
+        """P1-7: 默认 python 语言不套用 JS patterns,保持向后兼容。"""
+        scanner = CodeScanner()
+        code = "require('fs')"
+        # python 语言下 require(...) 不应触发 JS 特有告警
+        warnings = scanner.scan(code)
+        assert warnings == []
+
 
 class TestEnvSanitizer:
     def test_sanitize_filters_api_key(self) -> None:

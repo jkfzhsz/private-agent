@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -14,10 +15,12 @@ class SandboxExecutor:
 
     基于 asyncio.create_subprocess_exec,写临时脚本→启动子进程→超时控制→收集输出。
     MVP 仅子进程模式,V2 可升级 Docker 后端。
+    支持语言:python / javascript(B2 P1-7)。
     """
 
-    def __init__(self, python_command: str = "python") -> None:
+    def __init__(self, python_command: str = "python", node_command: str = "node") -> None:
         self._python_cmd = python_command
+        self._node_cmd = node_command
 
     async def execute(
         self,
@@ -71,7 +74,12 @@ class SandboxExecutor:
 
     async def _write_script(self, code: str, language: str, workspace: str) -> str:
         """将代码写入临时脚本文件。"""
-        ext = ".py" if language == "python" else ".txt"
+        if language == "python":
+            ext = ".py"
+        elif language == "javascript":
+            ext = ".js"
+        else:
+            ext = ".txt"
         scripts_dir = Path(workspace) / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
         script_path = scripts_dir / f"script_{int(time.time())}{ext}"
@@ -82,5 +90,19 @@ class SandboxExecutor:
         """构建子进程执行命令。"""
         if language == "python":
             return [self._python_cmd, script_path]
+        if language == "javascript":
+            return [self._find_node_cmd(), script_path]
         msg = f"Unsupported language: {language}"
         raise ValueError(msg)
+
+    def _find_node_cmd(self) -> str:
+        """定位 node 可执行文件(B2 P1-7)。
+
+        Raises:
+            ValueError: node 不在 PATH 中。
+        """
+        cmd = shutil.which(self._node_cmd)
+        if cmd is None:
+            msg = f"node command '{self._node_cmd}' not found in PATH"
+            raise ValueError(msg)
+        return cmd
