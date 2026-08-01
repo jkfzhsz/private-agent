@@ -1,0 +1,40 @@
+name: data_analysis
+version: "1.0.0"
+description: "数据分析场景助手 — 数据清洗、可视化、统计检验"
+scenario: data_analysis
+author: "private-agent"
+created_at: "2026-08-01"
+enabled: true
+
+dependencies:
+  tools:
+    - name: calculator
+      safety_level_override: safe
+    - name: code_execution
+      safety_level_override: elevated
+    - name: datetime
+      safety_level_override: safe
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+    - name: search_knowledge
+      safety_level_override: safe
+
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 100
+
+knowledge_base:
+  enabled: true
+  scenario: data_analysis
+  auto_retrieve: false
+
+examples:
+  enabled: true
+  max_examples: 2
+  inject_to: frozen_zone
+
+max_frozen_token: 4000
