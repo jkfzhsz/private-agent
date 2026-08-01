@@ -81,15 +81,22 @@ async def migrate_kb_chunks_embedding_to_vector(conn: asyncpg.Connection) -> Non
 async def migrate_all(conn: asyncpg.Connection) -> None:
     """执行 schema.sql 创建全部表与索引(蓝图 §9.14)。
 
-    幂等:CREATE TABLE/INDEX 无 IF NOT EXISTS 时会在重复执行时报错;
-    调用方应先 DROP SCHEMA public CASCADE 再调用(见 test_migrations.py fixture)。
+    幂等:对已有库(如生产启动自动迁移场景)sessions 表已存在时跳过
+    schema.sql 的 CREATE TABLE/INDEX(非幂等),仅执行末尾的增量 ALTER 补丁;
+    全新库则完整执行 schema.sql + 增量补丁。可安全在每次启动时调用。
 
     M3: 末尾追加幂等 ALTER,为老部署(已有 sessions 表但无锁定列)补列。
     """
     sql = SCHEMA_FILE.read_text(encoding="utf-8")
     # B6: 确保 pgvector 扩展在 schema.sql 执行前安装(vector(1024) 类型需要)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    await conn.execute(sql)
+    # 幂等判断:sessions 表存在视为 schema 已创建,跳过非幂等的 CREATE 段
+    sessions_exists = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_tables "
+        "WHERE schemaname='public' AND tablename='sessions')"
+    )
+    if not sessions_exists:
+        await conn.execute(sql)
     # M3 §7.3 会话锁定列(老部署补列,新部署 schema.sql 已含)
     await conn.execute(
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS locked_skill_name VARCHAR(100)"

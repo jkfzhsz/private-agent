@@ -296,6 +296,16 @@ async def _on_startup() -> None:
         db._pool = await db.create_pool(cfg)
     except Exception as e:
         _logger.warning(f"DB pool creation failed at startup: {e}")
+    # 启动自动迁移(migrate_all 幂等:全新库建表,已有库跑增量补丁)
+    if db._pool is not None:
+        from private_agent.storage import migrations
+
+        try:
+            async with db._pool.acquire() as conn:
+                await migrations.migrate_all(conn)
+            _logger.info("DB schema migrated (idempotent)")
+        except Exception as e:
+            _logger.warning(f"DB schema migration failed at startup: {e}")
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from private_agent.storage.ttl_cleanup import schedule_ttl_cleanup
     _scheduler = AsyncIOScheduler()

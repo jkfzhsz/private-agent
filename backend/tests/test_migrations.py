@@ -76,6 +76,28 @@ def test_all_13_tables_exist():
     assert not missing, f"Missing tables: {missing}. Got: {sorted(actual)}"
 
 
+def test_migrate_all_idempotent_on_existing_schema():
+    """启动自动迁移场景:migrate_all 对已有 schema 重复执行不报错、表不丢失。
+
+    生产启动挂载(main.py _on_startup)每次启动都会调用 migrate_all,
+    已有库 sessions 表存在时必须跳过非幂等的 CREATE 段,仅跑增量补丁。
+    """
+    _setup_schema()  # 首次:全新库完整建表
+    from private_agent.storage import migrations
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            await migrations.migrate_all(conn)  # 第二次:已有 schema,应幂等
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+    actual = _list_tables()
+    missing = set(EXPECTED_TABLES) - actual
+    assert not missing, f"Tables lost after idempotent migrate_all: {missing}"
+
+
 def _sessions_columns() -> set[str]:
     """返回 sessions 表的列名集合。"""
     async def _run() -> set[str]:
