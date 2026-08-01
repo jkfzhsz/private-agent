@@ -3,8 +3,8 @@
 -- 13 张表 + 索引 + 扩展
 -- ==============================================================================
 
--- 扩展(pgcrypto 需 DBA 预装;pgvector 在 M2 RAG 阶段引入,需版本匹配 PG 17)
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ==============================================================================
 -- 1. sessions - 会话元信息 (§2.10, §9.14 软删除:archived_at)
@@ -136,14 +136,17 @@ CREATE TABLE kb_chunks (
     scenario    VARCHAR(50),
     source      VARCHAR(200),
     chunk_text  TEXT NOT NULL,
-    -- M0 占位 BYTEA;M2 RAG 阶段需安装匹配 PG 17 的 pgvector 后 ALTER 为 vector(1024) + HNSW 索引 (§4.10/§4.11)
-    embedding   BYTEA NOT NULL DEFAULT '\x'::bytea,
+    embedding   vector(1024) NOT NULL,
     metadata    JSONB DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ DEFAULT NOW(),
     is_active   BOOLEAN DEFAULT TRUE
 );
 
 CREATE INDEX idx_kb_chunks_doc ON kb_chunks(doc_id) WHERE is_active = TRUE;
+-- HNSW 向量索引(蓝图 §4.11 line 3037-3039)
+CREATE INDEX idx_kb_chunks_embedding_hnsw ON kb_chunks
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 128);
 
 -- ==============================================================================
 -- 8. version_snapshots - 版本快照 (§2.10, §7.3 Skill, §4.16 KB, §9.14 保留最近20个)

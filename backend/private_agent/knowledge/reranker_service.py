@@ -123,15 +123,24 @@ def _rerank_worker_fn(
     """Worker 进程 reranker 函数(蓝图 §4.14)。
 
     在 Worker 进程内执行,加载 bge-reranker 模型进行重排。
-
-    Args:
-        query: 查询文本。
-        texts: 候选文本列表。
-
-    Returns:
-        [(index, score), ...] 按分数降序排列。
+    FlagEmbedding 不可用时返回全 1.0 分数。
     """
-    raise NotImplementedError(
-        "Worker reranker requires FlagEmbedding library. "
-        "Install with: pip install FlagEmbedding"
-    )
+    try:
+        from FlagEmbedding import FlagReranker
+
+        model = FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)
+        scores = model.compute_score(
+            [[query, text] for text in texts],
+            normalize=True,
+        )
+        if hasattr(scores, "tolist"):
+            scores = scores.tolist()
+        ranked = sorted(
+            [(i, float(s)) for i, s in enumerate(scores)],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        return ranked
+    except ImportError:
+        logger.warning("FlagEmbedding not available, skipping rerank")
+        return [(i, 1.0) for i in range(len(texts))]

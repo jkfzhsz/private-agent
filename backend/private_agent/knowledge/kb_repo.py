@@ -238,8 +238,8 @@ class KnowledgeBaseRepo:
             raise ValueError("chunk.doc_id is required")
         return await self._conn.fetchval(
             """
-            INSERT INTO kb_chunks (doc_id, scenario, source, chunk_text, metadata)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO kb_chunks (doc_id, scenario, source, chunk_text, metadata, embedding)
+            VALUES ($1, $2, $3, $4, $5, array_fill(0.0, ARRAY[1024])::vector)
             RETURNING id
             """,
             chunk.doc_id,

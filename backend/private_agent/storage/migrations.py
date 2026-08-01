@@ -54,6 +54,30 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
         )
 
 
+async def migrate_kb_chunks_embedding_to_vector(conn: asyncpg.Connection) -> None:
+    """B6 P0-5: kb_chunks.embedding BYTEA → vector(1024) + HNSW 索引。
+
+    幂等:检查 information_schema.columns 是否已有 vector 类型。
+    """
+    row = await conn.fetchrow(
+        "SELECT udt_name FROM information_schema.columns "
+        "WHERE table_name='kb_chunks' AND column_name='embedding'"
+    )
+    if row and row["udt_name"] == "vector":
+        return
+
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await conn.execute(
+        "ALTER TABLE kb_chunks ALTER COLUMN embedding TYPE vector(1024) "
+        "USING '\\x'::bytea::text::vector"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding_hnsw ON kb_chunks "
+        "USING hnsw (embedding vector_cosine_ops) "
+        "WITH (m = 16, ef_construction = 128)"
+    )
+
+
 async def migrate_all(conn: asyncpg.Connection) -> None:
     """执行 schema.sql 创建全部表与索引(蓝图 §9.14)。
 
@@ -63,6 +87,8 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     M3: 末尾追加幂等 ALTER,为老部署(已有 sessions 表但无锁定列)补列。
     """
     sql = SCHEMA_FILE.read_text(encoding="utf-8")
+    # B6: 确保 pgvector 扩展在 schema.sql 执行前安装(vector(1024) 类型需要)
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
     await conn.execute(sql)
     # M3 §7.3 会话锁定列(老部署补列,新部署 schema.sql 已含)
     await conn.execute(
@@ -85,3 +111,5 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     )
     # B1 P0-8: react_events.event_type CHECK 扩容(老部署补丁,新部署 schema.sql 已含)
     await migrate_react_events_event_type_check(conn)
+    # B6 P0-5: kb_chunks embedding BYTEA→vector(1024) + HNSW 索引(老部署补丁)
+    await migrate_kb_chunks_embedding_to_vector(conn)

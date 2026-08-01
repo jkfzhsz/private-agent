@@ -185,22 +185,43 @@ class EmbeddingService:
         self._embed_query_cached.cache_clear()
         logger.info("Query embedding LRU cache cleared")
 
+    @staticmethod
+    def select_model_by_memory() -> str:
+        """B6 P0-6: 按可用内存选择模型(蓝图 §4.10 line 2972-2980)。
+
+        可用内存 <6GB → bge-small-zh-v1.5, 否则 → bge-m3。
+        """
+        try:
+            import psutil
+
+            avail_gb = psutil.virtual_memory().available / (1024**3)
+            if avail_gb < 6.0:
+                logger.warning(
+                    "Available memory %.1fGB < 6GB, using light model", avail_gb
+                )
+                return "BAAI/bge-small-zh-v1.5"
+        except ImportError:
+            pass
+        return "BAAI/bge-m3"
+
 
 def _embed_worker_fn(
     texts: list[str], model_name: str
 ) -> list[list[float]]:
     """Worker 进程 embedding 函数(蓝图 §4.10)。
 
-    在 Worker 进程内执行,加载 bge-m3 模型进行批量 embedding。
-
-    Args:
-        texts: 文本列表。
-        model_name: 模型名称。
-
-    Returns:
-        向量列表。
+    在 Worker 进程内执行,加载 bge-m3/bge-small 模型进行批量 embedding。
+    FlagEmbedding 不可用时返回 mock 全 0 向量。
     """
-    raise NotImplementedError(
-        "Worker embedding requires FlagEmbedding library. "
-        "Install with: pip install FlagEmbedding"
-    )
+    try:
+        from FlagEmbedding import BGEM3FlagModel
+
+        model = BGEM3FlagModel(model_name, use_fp16=True)
+        embeddings = model.encode(
+            texts, batch_size=32, max_length=8192
+        )["dense_vecs"]
+        return embeddings.tolist()
+    except ImportError:
+        logger.warning("FlagEmbedding not available, using mock embeddings")
+        dim = 1024 if "m3" in model_name else 384
+        return [[0.0] * dim for _ in texts]
