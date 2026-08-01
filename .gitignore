@@ -26,3 +26,7 @@ logs/
 # Tool caches / traces
 .workbuddy/
 backend/.claude/
+
+# Sandbox runtime artifacts
+backend/outputs/
+backend/.sandbox/

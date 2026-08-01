@@ -79,21 +79,10 @@ class SkillManager:
                 f"不允许切换到 '{skill_name}'"
             )
 
-        # 4. 模板变量替换(蓝图 §3.7)
-        created_at = row["created_at"] if (row and "created_at" in row) else None
-        system_prompt = self._replace_template_vars(
-            skill.system_prompt, skill_name, session_id, created_at
+        # 4. 模板变量替换(蓝图 §3.7) + 少样本注入(蓝图 §7.7)
+        system_prompt = await self.build_system_prompt(
+            skill, skill_name, session_id, conn
         )
-
-        # 少样本注入(蓝图 §7.7)
-        if skill.manifest.examples.enabled:
-            examples = await self.example_loader.load(
-                skill_name,
-                max_examples=skill.manifest.examples.max_examples,
-                max_token=skill.manifest.max_frozen_token,
-            )
-            if examples:
-                system_prompt += "\n\n## 示例\n\n" + "\n\n".join(examples)
 
         # 5. 工具白名单过滤(仅 enabled=true,AC-3)
         whitelist = [
@@ -126,6 +115,42 @@ class SkillManager:
             "filtered_tools": filtered_tools,
             "system_prompt": system_prompt,
         }
+
+    async def build_system_prompt(
+        self,
+        skill,
+        skill_name: str,
+        session_id: int,
+        conn,
+    ) -> str:
+        """构建 Skill 的 system_prompt(模板替换 + 少样本注入)。
+
+        与 activate_skill 生成的 prompt 完全一致,供运行时(WS user_message)
+        复用,保证 Frozen Zone hash 稳定。
+
+        Args:
+            skill: Skill 对象(loader 已加载)。
+            skill_name: Skill 名。
+            session_id: 会话 ID。
+            conn: asyncpg.Connection。
+        """
+        row = await conn.fetchrow(
+            "SELECT created_at FROM sessions WHERE id = $1", session_id
+        )
+        created_at = row["created_at"] if (row and "created_at" in row) else None
+        system_prompt = self._replace_template_vars(
+            skill.system_prompt, skill_name, session_id, created_at
+        )
+        # 少样本注入(蓝图 §7.7)
+        if skill.manifest.examples.enabled:
+            examples = await self.example_loader.load(
+                skill_name,
+                max_examples=skill.manifest.examples.max_examples,
+                max_token=skill.manifest.max_frozen_token,
+            )
+            if examples:
+                system_prompt += "\n\n## 示例\n\n" + "\n\n".join(examples)
+        return system_prompt
 
     def _validate_tools(self, tools: list[ToolDependency]) -> None:
         """校验 manifest 引用的工具都在 ToolRegistry 中存在(AC-5)。"""

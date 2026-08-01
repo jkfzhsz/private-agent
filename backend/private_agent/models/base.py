@@ -7,6 +7,7 @@ Source: plan/m1-react-loop step 7
 """
 from __future__ import annotations
 
+import asyncio
 import typing
 from dataclasses import dataclass, field
 
@@ -46,6 +47,16 @@ class AllProvidersFailedError(Exception):
     """fallback_chain 全部 provider 失败(蓝图 §2.9 终态错误)。"""
 
 
+def _is_retryable_error(e: ProviderError) -> bool:
+    """判断 ProviderError 是否值得重试(http error / upstream 5xx / 429)。"""
+    msg = str(e)
+    return (
+        "http error" in msg
+        or "upstream 429" in msg
+        or "upstream 5" in msg
+    )
+
+
 @typing.runtime_checkable
 class ModelAdapter(typing.Protocol):
     """蓝图 §2.7 模型适配器 Protocol。
@@ -71,8 +82,10 @@ class FallbackChain:
 
     按构造时传入的 adapters 顺序尝试:
     - 任一 adapter 抛 ProviderError → 记录 failed_providers,继续下一个
+    - 可重试错误(http error / upstream 5xx / 429)先指数退避重试一次
+      (V1.5:上游服务间歇性抖动时提升成功率)
     - 任一 adapter 成功 → 返回 ChatResult(used_provider=成功方,failed_providers=前面失败列表)
-    - 全部失败 → 抛 AllProvidersFailedError
+    - 全部失败 → 抛 AllProvidersFailedError(附最后一个 provider 的错误详情)
     """
 
     def __init__(self, adapters: list[ModelAdapter]):
@@ -86,15 +99,23 @@ class FallbackChain:
         failed: list[str] = []
         last_error: Exception | None = None
         for adapter in self._adapters:
-            try:
-                result = await adapter.chat(messages, tools)
-            except ProviderError as e:
-                failed.append(adapter.provider_name)
-                last_error = e
-                continue
-            # 成功:回填 failed_providers(适配器自身不感知降级上下文)
-            result.failed_providers = failed
-            return result
+            attempts = 0
+            while True:
+                attempts += 1
+                try:
+                    result = await adapter.chat(messages, tools)
+                except ProviderError as e:
+                    last_error = e
+                    # 可重试错误:退避后重试一次;认证类(401/400/403)重试无意义
+                    if attempts == 1 and _is_retryable_error(e):
+                        await asyncio.sleep(0.5)
+                        continue
+                    failed.append(adapter.provider_name)
+                    break
+                # 成功:回填 failed_providers(适配器自身不感知降级上下文)
+                result.failed_providers = failed
+                return result
+        detail = f" | last: {last_error}" if last_error else ""
         raise AllProvidersFailedError(
-            f"all {len(self._adapters)} providers failed: {failed}"
+            f"all {len(self._adapters)} providers failed: {failed}{detail}"
         ) from last_error

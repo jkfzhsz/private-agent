@@ -85,9 +85,36 @@ async def _get_tools(cfg, session_id: int, conn):
     return registry.list_tools_for_session(whitelist)
 
 
-def _get_system_prompt(cfg):
-    """获取系统提示词(M1 默认值,测试可 monkeypatch)。"""
-    return "You are a helpful assistant."
+async def _get_system_prompt(cfg, session_id: int, conn):
+    """获取系统提示词(测试可 monkeypatch)。
+
+    - session 未 activate (locked_skill_name IS NULL) → 返回默认提示词(M1 行为)
+    - session 已 activate → 返回锁定 skill 的 system_prompt(模板替换 + 少样本,
+      与 activate_skill 生成完全一致,保证 Frozen Zone hash 稳定,AC-3)
+    """
+    from private_agent.skills.example_loader import ExampleLoader
+    from private_agent.skills.loader import SkillLoader
+    from private_agent.skills.manager import SkillManager
+    from private_agent.tools.builtins import register_all_builtins
+    from private_agent.tools.registry import ToolRegistry
+
+    locked_skill = await conn.fetchval(
+        "SELECT locked_skill_name FROM sessions WHERE id = $1",
+        session_id,
+    )
+    if not locked_skill:
+        return "You are a helpful assistant."
+
+    loader = SkillLoader.from_cfg(cfg)
+    skill = await loader.load(locked_skill, conn)
+    registry = ToolRegistry()
+    register_all_builtins(registry)
+    mgr = SkillManager(
+        loader=loader,
+        example_loader=ExampleLoader.from_cfg(cfg),
+        tool_registry=registry,
+    )
+    return await mgr.build_system_prompt(skill, locked_skill, session_id, conn)
 
 
 @app.get("/")
@@ -240,7 +267,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         )
                         cm = ContextManager(
                             session_id=session_id,
-                            system_prompt=_get_system_prompt(cfg),
+                            system_prompt=await _get_system_prompt(
+                                cfg, session_id, conn
+                            ),
                             tools=tools,
                             memory_manager=memory_mgr,
                         )

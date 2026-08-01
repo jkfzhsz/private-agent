@@ -7,7 +7,7 @@
 // - 重连机制:指数退避(1s,2s,4s,8s,max 16s),重连后发送 replay(session_id + last_turn)
 // - ACK 机制:收到 react_event 后发送 ack(session_id + turn)
 // - session_id 管理:首次连接时从 URL 参数获取或生成
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import SkillSelectionPanel from "./SkillSelectionPanel";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -16,7 +16,7 @@ import SkillSelectionPanel from "./SkillSelectionPanel";
 
 type ConnStatus = "connected" | "disconnected" | "reconnecting";
 
-type EventType = "thinking" | "tool_call" | "tool_result" | "final" | "error";
+type EventType = "user" | "thinking" | "tool_call" | "tool_result" | "final" | "error";
 
 interface ReactEvent {
   id: number;
@@ -48,7 +48,8 @@ const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 const MAX_RECONNECT_DELAY = 16000;
 
 const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string }> = {
-  thinking: { bg: "#f0f0f0", label: "Thinking", icon: "💭" },
+  user: { bg: "#dbeafe", label: "You", icon: "🧑" },
+  thinking: { bg: "#f5f5f5", label: "Thinking", icon: "💭" },
   tool_call: { bg: "#e3f2fd", label: "Tool Call", icon: "🔧" },
   tool_result: { bg: "#e8f5e9", label: "Tool Result", icon: "✅" },
   final: { bg: "#e8eaf6", label: "Final", icon: "🎯" },
@@ -95,6 +96,8 @@ function getSessionIdFromUrl(): number {
 
 function formatPayload(eventType: EventType, payload: Record<string, unknown>): string {
   switch (eventType) {
+    case "user":
+      return String(payload.content ?? "");
     case "thinking":
       return String(payload.content ?? "");
     case "tool_call": {
@@ -304,6 +307,31 @@ export default function App(): JSX.Element {
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [view, setView] = useState<"skill_selection" | "chat">("skill_selection");
   const [showEvalPanel, setShowEvalPanel] = useState(false);
+  // 每个 turn 的"推理过程"展开状态(默认收起)
+  const [openThinkingTurns, setOpenThinkingTurns] = useState<Set<number>>(new Set());
+
+  // 按 turn 分组事件:同一轮对话合并为一个 AI 回复块
+  const turnGroups = useMemo(() => {
+    const map = new Map<number, ReactEvent[]>();
+    for (const ev of events) {
+      const t = ev.turn;
+      if (!map.has(t)) map.set(t, []);
+      map.get(t)!.push(ev);
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
+  }, [events]);
+
+  const toggleThinking = (turn: number): void => {
+    setOpenThinkingTurns((prev) => {
+      const next = new Set(prev);
+      if (next.has(turn)) {
+        next.delete(turn);
+      } else {
+        next.add(turn);
+      }
+      return next;
+    });
+  };
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastTurnRef = useRef<number>(0);
@@ -461,6 +489,18 @@ export default function App(): JSX.Element {
       session_id: sessionId,
       content,
     });
+    // 用户消息立即上屏(右侧气泡)
+    setEvents((prev) => [
+      ...prev,
+      {
+        id: ++eventIdRef.current,
+        session_id: sessionId,
+        turn: lastTurnRef.current + 1,
+        event_type: "user",
+        payload: { content },
+        ts: Date.now(),
+      },
+    ]);
     setInput("");
   }, [input, sessionId, sendWs]);
 
@@ -554,51 +594,217 @@ export default function App(): JSX.Element {
           backgroundColor: "#fafafa",
         }}
       >
-        {events.length === 0 && (
+        {turnGroups.length === 0 && (
           <div style={{ color: "#999", textAlign: "center", paddingTop: 40 }}>
             发送一条消息开始对话
           </div>
         )}
-        {events.map((ev) => {
-          const style = EVENT_STYLES[ev.event_type] ?? EVENT_STYLES.error;
-          const text = formatPayload(ev.event_type, ev.payload);
-          // AC-9: tool_result 含 outputs/*.png 等图片路径时渲染 <img>
-          const imagePaths = ev.event_type === "tool_result" ? extractImagePaths(text) : [];
+        {turnGroups.map(([turn, evs]) => {
+          const userEv = evs.find((e) => e.event_type === "user");
+          const thinkingEv = evs.find((e) => e.event_type === "thinking");
+          const finalEv = evs.find((e) => e.event_type === "final");
+          const errorEv = evs.find((e) => e.event_type === "error");
+          const toolEvents = evs.filter(
+            (e) => e.event_type === "tool_call" || e.event_type === "tool_result"
+          );
+          // 有用户消息但还没有 final → AI 正在思考
+          const isPending = !!userEv && !finalEv && !errorEv;
+          const thinkingOpen = openThinkingTurns.has(turn);
+          const thinkingText = thinkingEv
+            ? formatPayload("thinking", thinkingEv.payload)
+            : "";
+
           return (
-            <div
-              key={ev.id}
-              style={{
-                backgroundColor: style.bg,
-                borderRadius: 6,
-                padding: "8px 12px",
-                marginBottom: 8,
-                fontStyle: ev.event_type === "thinking" ? "italic" : "normal",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: "#333" }}>
-                  {style.icon} {style.label}
-                  <span style={{ color: "#999", fontWeight: 400, marginLeft: 8 }}>
-                    turn={ev.turn}
-                  </span>
-                </span>
-                <span style={{ fontSize: 11, color: "#999" }}>
-                  {new Date(ev.ts).toLocaleTimeString()}
-                </span>
-              </div>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 13, fontFamily: "monospace" }}>
-                {text}
-              </pre>
-              {imagePaths.length > 0 && (
-                <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-                  {imagePaths.map((p) => (
-                    <img
-                      key={p}
-                      src={imagePathToUrl(p)}
-                      alt={p}
-                      style={{ maxWidth: "100%", borderRadius: 4, border: "1px solid #ddd" }}
-                    />
-                  ))}
+            <div key={turn} style={{ marginBottom: 14 }}>
+              {userEv && (
+                <div
+                  style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}
+                >
+                  <div
+                    style={{
+                      backgroundColor: "#dbeafe",
+                      borderRadius: "12px 12px 2px 12px",
+                      padding: "8px 14px",
+                      maxWidth: "80%",
+                    }}
+                  >
+                    <pre
+                      style={{
+                        margin: 0,
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        fontSize: 13,
+                        fontFamily: "inherit",
+                      }}
+                    >
+                      {formatPayload("user", userEv.payload)}
+                    </pre>
+                  </div>
+                </div>
+              )}
+
+              {userEv && (
+                <div style={{ display: "flex", gap: 10 }}>
+                  <div
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: "50%",
+                      flexShrink: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 14,
+                      fontWeight: 600,
+                      color: "#fff",
+                      background: "linear-gradient(135deg, #818cf8, #c084fc)",
+                    }}
+                  >
+                    PA
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
+                      Private Agent
+                    </div>
+
+                    {isPending && !thinkingEv && (
+                      <div style={{ color: "#9ca3af", fontSize: 13 }}>
+                        💭 思考中…
+                      </div>
+                    )}
+
+                    {thinkingEv && (
+                      <div
+                        style={{
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 8,
+                          marginBottom: 8,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <button
+                          onClick={() => toggleThinking(turn)}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            width: "100%",
+                            padding: "6px 10px",
+                            border: "none",
+                            background: "#f9fafb",
+                            cursor: "pointer",
+                            fontSize: 12,
+                            color: "#6b7280",
+                            textAlign: "left",
+                          }}
+                        >
+                          <span style={{ fontSize: 11 }}>{thinkingOpen ? "▾" : "▸"}</span>
+                          {thinkingOpen ? "收起推理过程" : "查看推理过程"}
+                          {!thinkingOpen && (
+                            <span style={{ color: "#9ca3af", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {thinkingText.slice(0, 60)}
+                            </span>
+                          )}
+                        </button>
+                        {thinkingOpen && (
+                          <pre
+                            style={{
+                              margin: 0,
+                              padding: "8px 12px",
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                              fontSize: 12,
+                              color: "#6b7280",
+                              maxHeight: 260,
+                              overflowY: "auto",
+                              fontStyle: "italic",
+                            }}
+                          >
+                            {thinkingText || "（无推理内容）"}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+
+                    {toolEvents.length > 0 &&
+                      toolEvents.map((te) => {
+                        const text = formatPayload(te.event_type, te.payload);
+                        const imagePaths =
+                          te.event_type === "tool_result"
+                            ? extractImagePaths(text)
+                            : [];
+                        return (
+                          <div key={te.id} style={{ marginBottom: 6 }}>
+                            <div
+                              style={{
+                                backgroundColor:
+                                  te.event_type === "tool_call" ? "#eef2ff" : "#ecfdf5",
+                                borderRadius: 8,
+                                padding: "6px 10px",
+                                fontSize: 12,
+                                color: "#6b7280",
+                              }}
+                            >
+                              {te.event_type === "tool_call" ? (
+                                <>🔧 {text}</>
+                              ) : (
+                                <>✅ {text.slice(0, 120)}{text.length > 120 ? "…" : ""}</>
+                              )}
+                            </div>
+                            {imagePaths.length > 0 && (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+                                {imagePaths.map((p) => (
+                                  <img
+                                    key={p}
+                                    src={imagePathToUrl(p)}
+                                    alt={p}
+                                    style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid #e5e7eb" }}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                    {finalEv && (
+                      <div
+                        style={{
+                          backgroundColor: "#ffffff",
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 12,
+                          padding: "10px 14px",
+                        }}
+                      >
+                        <pre
+                          style={{
+                            margin: 0,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            fontSize: 13,
+                            fontFamily: "inherit",
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {formatPayload("final", finalEv.payload)}
+                        </pre>
+                      </div>
+                    )}
+
+                    {errorEv && (
+                      <div
+                        style={{
+                          backgroundColor: "#ffebee",
+                          borderRadius: 8,
+                          padding: "8px 12px",
+                          fontSize: 13,
+                          color: "#c62828",
+                        }}
+                      >
+                        ❌ {formatPayload("error", errorEv.payload)}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

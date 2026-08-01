@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -15,6 +16,8 @@ from private_agent.models.base import (
     ModelCapability,
     ProviderError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICompatibleAdapter(ModelAdapter):
@@ -42,8 +45,13 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_name = model_name or self.default_model_name
+        # V1.5:推理模型(reasoning)复杂请求思考时间可能远超 httpx 默认 5s,
+        # 放宽读超时至 120s,避免 ReadTimeout 误杀正常推理(连接 15s)
+        self._timeout = httpx.Timeout(120.0, connect=15.0)
         # 注入 client(测试用 MockTransport);默认新建 AsyncClient
-        self._client = client if client is not None else httpx.AsyncClient()
+        self._client = client if client is not None else httpx.AsyncClient(
+            timeout=self._timeout
+        )
 
     async def chat(
         self,
@@ -58,10 +66,28 @@ class OpenAICompatibleAdapter(ModelAdapter):
             body["tools"] = tools
         url = f"{self.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        try:
-            resp = await self._client.post(url, json=body, headers=headers)
-        except httpx.HTTPError as e:
-            raise ProviderError(self.provider_name, f"http error: {e}") from e
+        # V1.5:httpx AsyncClient 长连接可能被上游服务端断开(keep-alive 超时),
+        # 复用失效连接会报空消息 http error 且 httpx 不自动重连。
+        # 首次 http error 时重建 client 重试一次,保证对话链路稳定。
+        resp: httpx.Response | None = None
+        for attempt in range(2):
+            try:
+                resp = await self._client.post(url, json=body, headers=headers)
+                break
+            except httpx.HTTPError as e:
+                logger.warning(
+                    "provider %s http error attempt=%d: %r",
+                    self.provider_name, attempt, e,
+                )
+                if attempt == 0:
+                    try:
+                        await self._client.aclose()
+                    except Exception:
+                        pass
+                    self._client = httpx.AsyncClient(timeout=self._timeout)
+                    continue
+                raise ProviderError(self.provider_name, f"http error: {e}") from e
+        assert resp is not None
         if resp.status_code >= 500:
             raise ProviderError(
                 self.provider_name,
