@@ -54,6 +54,29 @@ const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string 
   error: { bg: "#ffebee", label: "Error", icon: "❌" },
 };
 
+// M3 AC-9: tool_result 中 outputs/*.png 等图片路径解析(蓝图 §7.12)
+// 匹配 "outputs/foo.png" 或 "/outputs/foo-bar.jpg" 形式的路径
+const IMAGE_PATH_RE = /(?:^|[^\w/])((?:\/?outputs\/)?[\w\-]+\.(?:png|jpg|jpeg|gif|svg|webp))/gi;
+
+function extractImagePaths(text: string): string[] {
+  if (!text) return [];
+  const paths: string[] = [];
+  let m: RegExpExecArray | null;
+  IMAGE_PATH_RE.lastIndex = 0;
+  while ((m = IMAGE_PATH_RE.exec(text)) !== null) {
+    paths.push(m[1]);
+  }
+  // 去重,保留顺序
+  return Array.from(new Set(paths));
+}
+
+function imagePathToUrl(path: string): string {
+  // 取 outputs/ 之后的部分作为 filename,拼接 /files/outputs/{filename}
+  const match = path.match(/outputs\/([\w\-\.]+)$/i);
+  const filename = match ? match[1] : path.replace(/^\/?outputs\//, "");
+  return `/files/outputs/${filename}`;
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // 辅助函数
 // ──────────────────────────────────────────────────────────────────────────────
@@ -308,6 +331,9 @@ export default function App(): JSX.Element {
         )}
         {events.map((ev) => {
           const style = EVENT_STYLES[ev.event_type] ?? EVENT_STYLES.error;
+          const text = formatPayload(ev.event_type, ev.payload);
+          // AC-9: tool_result 含 outputs/*.png 等图片路径时渲染 <img>
+          const imagePaths = ev.event_type === "tool_result" ? extractImagePaths(text) : [];
           return (
             <div
               key={ev.id}
@@ -331,8 +357,20 @@ export default function App(): JSX.Element {
                 </span>
               </div>
               <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 13, fontFamily: "monospace" }}>
-                {formatPayload(ev.event_type, ev.payload)}
+                {text}
               </pre>
+              {imagePaths.length > 0 && (
+                <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {imagePaths.map((p) => (
+                    <img
+                      key={p}
+                      src={imagePathToUrl(p)}
+                      alt={p}
+                      style={{ maxWidth: "100%", borderRadius: 4, border: "1px solid #ddd" }}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}

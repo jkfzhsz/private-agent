@@ -429,6 +429,18 @@ function renderEvent(msg) {
   div.id = "event-" + (++eventIdSeq);
 
   var ts = new Date().toLocaleTimeString();
+  var text = formatPayload(eventType, msg.payload || {});
+  // AC-9: tool_result 含 outputs/*.png 等图片路径时渲染 <img>
+  var imagePaths = eventType === "tool_result" ? extractImagePaths(text) : [];
+  var imgHtml = "";
+  if (imagePaths.length > 0) {
+    imgHtml = '<div style="margin-top:8px;display:flex;flex-direction:column;gap:8px;">' +
+      imagePaths.map(function(p) {
+        return '<img src="' + imagePathToUrl(p) + '" alt="' + escapeHtml(p) +
+          '" style="max-width:100%;border-radius:4px;border:1px solid #ddd;" />';
+      }).join("") +
+      '</div>';
+  }
   div.innerHTML =
     '<div class="event-header">' +
       '<span>' + meta.icon + ' ' + meta.label +
@@ -436,10 +448,31 @@ function renderEvent(msg) {
       '</span>' +
       '<span class="event-time">' + ts + '</span>' +
     '</div>' +
-    '<pre class="event-body">' + escapeHtml(formatPayload(eventType, msg.payload || {})) + '</pre>';
+    '<pre class="event-body">' + escapeHtml(text) + '</pre>' +
+    imgHtml;
 
   eventsEl.appendChild(div);
   eventsEl.scrollTop = eventsEl.scrollHeight;
+}
+
+// M3 AC-9: tool_result 中 outputs/*.png 等图片路径解析(蓝图 §7.12)
+var IMAGE_PATH_RE = /(?:^|[^\w/])((?:\/?outputs\/)?[\w\-]+\.(?:png|jpg|jpeg|gif|svg|webp))/gi;
+
+function extractImagePaths(text) {
+  if (!text) return [];
+  var paths = [];
+  IMAGE_PATH_RE.lastIndex = 0;
+  var m;
+  while ((m = IMAGE_PATH_RE.exec(text)) !== null) {
+    if (paths.indexOf(m[1]) === -1) paths.push(m[1]);
+  }
+  return paths;
+}
+
+function imagePathToUrl(path) {
+  var match = path.match(/outputs\/([\w\-\.]+)$/i);
+  var filename = match ? match[1] : path.replace(/^\/?outputs\//, "");
+  return "/files/outputs/" + filename;
 }
 
 function escapeHtml(s) {
