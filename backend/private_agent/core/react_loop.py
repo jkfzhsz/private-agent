@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from private_agent.models.base import AllProvidersFailedError, ChatResult, ModelAdapter
 from private_agent.observability.logging import setup_logger
@@ -61,6 +61,7 @@ class ReactLoop:
         tools: list[ToolDef],
         conn: asyncpg.Connection,
         max_iterations: int = 10,
+        event_sink: Callable[[dict], Awaitable[None]] | None = None,
     ) -> None:
         self._session_id = session_id
         self._context_manager = context_manager
@@ -72,6 +73,7 @@ class ReactLoop:
         self._state = ReactLoopState.IDLE
         self._iteration = 0
         self.event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._event_sink = event_sink
         self._logger = setup_logger("private_agent.react_loop")
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -104,6 +106,10 @@ class ReactLoop:
 
         # 推送到队列(WS 消费)
         await self.event_queue.put(event)
+
+        # event_sink 回调(非 None 时调用,用于 ReplayExecutor 静默收集或真实会话 WS 推送)
+        if self._event_sink is not None:
+            await self._event_sink(event)
 
     @property
     def state(self) -> ReactLoopState:

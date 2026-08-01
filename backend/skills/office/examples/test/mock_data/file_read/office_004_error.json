@@ -1,0 +1,5 @@
+{
+  "output": "",
+  "error": "permission_denied: 无法访问 /etc/shadow (权限不足)",
+  "metadata": {"source": "/etc/shadow", "expected_result_type": "error", "error_type": "PermissionError"}
+}

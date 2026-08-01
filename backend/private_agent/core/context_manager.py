@@ -173,6 +173,107 @@ class ContextManager:
         await self.build_initial(conn)
         await self._inject_memories(conn)
 
+    async def reload_from_db(self, conn: "asyncpg.Connection") -> None:
+        """完整重放历史消息(Frozen+Stable+Active 三区)(蓝图 §8.10,AC-1)。
+
+        M1 ensure_initial 仅 reload Frozen Zone,本方法补全 Stable/Active reload,
+        用于 ReplayExecutor 重建评估会话上下文。
+
+        按 (turn, id) 顺序读取 messages 表,按 zone 分组重建三区内存:
+        - frozen: role='system' 单条
+        - stable: 任意 role(记忆注入为 user)
+        - active: user/assistant/tool 三类,保留 tool_calls/tool_call_id/name
+
+        Args:
+            conn: Postgres 连接。
+        """
+        rows = await conn.fetch(
+            """
+            SELECT role, content, tool_calls, tool_call_id, name, zone
+            FROM messages
+            WHERE session_id=$1
+            ORDER BY turn, id
+            """,
+            self.session_id,
+        )
+        frozen: list[dict] = []
+        stable: list[dict] = []
+        active: list[dict] = []
+        for row in rows:
+            zone = row["zone"]
+            role = row["role"]
+            if zone == "frozen":
+                frozen.append({"role": role, "content": row["content"]})
+            elif zone == "stable":
+                stable.append({"role": role, "content": row["content"]})
+            elif zone == "active":
+                msg: dict[str, Any] = {"role": role, "content": row["content"]}
+                # tool_calls(JSONB):asyncpg 默认返回 str,需 json.loads
+                tc = row["tool_calls"]
+                if tc is not None:
+                    if isinstance(tc, str):
+                        msg["tool_calls"] = json.loads(tc)
+                    else:
+                        msg["tool_calls"] = tc
+                if row["tool_call_id"] is not None:
+                    msg["tool_call_id"] = row["tool_call_id"]
+                if row["name"] is not None:
+                    msg["name"] = row["name"]
+                active.append(msg)
+        self.frozen_zone.messages = frozen
+        self.stable_zone.messages = stable
+        self.active_zone.messages = active
+
+    async def replace_frozen_zone(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        system_prompt: str,
+        tools: list[ToolDef],
+        skill_version: str | None = None,
+    ) -> None:
+        """替换 Frozen Zone(版本切换/回滚时使用)(蓝图 §8.10,AC-2)。
+
+        流程:
+        1. 删除 messages 表中 session_id+zone='frozen' 的记录
+        2. 更新 self._system_prompt + self._tools
+        3. 调 build_initial(conn)(用新 system_prompt + tools 插入新 frozen 行)
+        4. 重新计算 frozen_hash
+        5. UPDATE sessions SET frozen_hash(始终)+ locked_skill_version(仅当 skill_version 非 None)
+
+        Args:
+            conn: Postgres 连接。
+            system_prompt: 新的系统提示词。
+            tools: 新的工具定义列表。
+            skill_version: 可选,新 Skill 版本(传入时更新 sessions.locked_skill_version)。
+        """
+        # 1. 删除旧 frozen 行
+        await conn.execute(
+            "DELETE FROM messages WHERE session_id=$1 AND zone='frozen'",
+            self.session_id,
+        )
+        # 2. 更新内存 system_prompt + tools
+        self._system_prompt = system_prompt
+        self._tools = list(tools)
+        # 3. 重新 build_initial(插入新 frozen 行 + 内存同步)
+        await self.build_initial(conn)
+        # 4. 重新计算 frozen_hash
+        new_hash = self.compute_frozen_hash()
+        # 5. UPDATE sessions
+        if skill_version is not None:
+            await conn.execute(
+                "UPDATE sessions SET frozen_hash=$2, locked_skill_version=$3 WHERE id=$1",
+                self.session_id,
+                new_hash,
+                skill_version,
+            )
+        else:
+            await conn.execute(
+                "UPDATE sessions SET frozen_hash=$2 WHERE id=$1",
+                self.session_id,
+                new_hash,
+            )
+
     async def append_user_message(
         self,
         conn: "asyncpg.Connection",

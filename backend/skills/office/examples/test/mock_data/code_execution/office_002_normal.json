@@ -1,0 +1,5 @@
+{
+  "output": "| 名称 | 厂商 | 核心特性 | 定价 |\n|------|------|----------|------|\n| GitHub Copilot | GitHub | AI 代码补全 + Chat | $10/月 |\n| Cursor | Anysphere | AI 编辑器 + 多模型 | $20/月 |\n| Codeium | Codeium | 免费 AI 补全 | 免费 |\n| Tabnine | Tabnine | 本地化 AI 补全 | $12/月 |",
+  "error": null,
+  "metadata": {"language": "python", "expected_result_type": "stdout", "exit_code": 0}
+}

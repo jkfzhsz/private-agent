@@ -1,0 +1,5 @@
+{
+  "output": "日期,产品,销售额",
+  "error": null,
+  "metadata": {"source": "empty.xlsx", "rows": 0, "expected_result_type": "spreadsheet", "note": "仅含表头,无数据行"}
+}
