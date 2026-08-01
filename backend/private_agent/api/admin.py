@@ -489,11 +489,13 @@ async def get_providers():
 
 
 @router.get("/sessions", response_model=None)
-async def list_sessions(limit: int = 50):
+async def list_sessions(limit: int = 50, has_messages: bool = True):
     """列出历史会话(供侧边栏任务树, 蓝图 §2.10)。
 
     Args:
         limit: 返回条数上限(默认 50)。
+        has_messages: 仅返回有真实对话消息的会话(默认 True, 过滤掉
+            测试/占位产生的空会话, 让任务树只显示日常对话)。
 
     Returns:
         200: [{
@@ -516,10 +518,13 @@ async def list_sessions(limit: int = 50):
                            0
                        ) AS last_turn
                 FROM sessions s
+                WHERE NOT $2::bool
+                   OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
                 ORDER BY s.updated_at DESC
                 LIMIT $1
                 """,
                 min(max(int(limit), 1), 200),
+                bool(has_messages),
             )
             return [
                 {

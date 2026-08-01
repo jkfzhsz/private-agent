@@ -73,8 +73,45 @@ export class SidecarManager {
 
   async start(): Promise<void> {
     this.stopped = false;
-    this.proc = spawnSidecar(this.config);
-    this.proc.on("exit", (code) => {
+    const proc = spawnSidecar(this.config);
+    this.proc = proc;
+
+    // 收集子进程 stderr, 启动失败时用于诊断(如端口被占 → bind 失败)
+    let capturedStderr = "";
+    proc.stderr?.on("data", (d: Buffer) => {
+      capturedStderr += String(d);
+    });
+
+    // 等待 health OK; 若子进程提前退出(端口被占/启动失败)则立即报错, 不等超时
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const onExit = (code: number | null) => {
+        if (settled) return;
+        settled = true;
+        const tail = capturedStderr.trim().slice(-400);
+        reject(
+          new Error(
+            `Sidecar 进程提前退出 (code=${code})${tail ? `: ${tail}` : ""}` +
+              `\n(若端口 ${this.config.port} 被占用, 请先关闭占用该端口的进程)`
+          )
+        );
+      };
+      proc.once("exit", onExit);
+      waitForHealth(this.config.healthUrl)
+        .then(() => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        })
+        .catch((e: unknown) => {
+          if (settled) return;
+          settled = true;
+          reject(e);
+        });
+    });
+
+    // health OK 后的常驻崩溃监控: 自动重启(≤3 次, 指数退避)
+    proc.on("exit", (code) => {
       if (this.stopped) return;
       if (this.restarts < MAX_RESTARTS) {
         const delay = RESTART_DELAYS_MS[this.restarts] ?? RESTART_DELAYS_MS[0];
@@ -84,7 +121,6 @@ export class SidecarManager {
         }, delay);
       }
     });
-    await waitForHealth(this.config.healthUrl);
   }
 
   async stop(): Promise<void> {
