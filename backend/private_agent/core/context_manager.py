@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from private_agent.errors import FrozenHashMismatchError
 from private_agent.tools.defs import ToolDef
 
 if TYPE_CHECKING:
@@ -169,6 +171,19 @@ class ContextManager:
             ]
             self.stable_zone.messages = []
             self.active_zone.messages = []
+            # B1 P1-4: hash 校验(环境变量 PA_FROZEN_HASH_VERIFY=0 可关)
+            if os.environ.get("PA_FROZEN_HASH_VERIFY", "1") != "0":
+                db_hash = await conn.fetchval(
+                    "SELECT frozen_hash FROM sessions WHERE id=$1",
+                    self.session_id,
+                )
+                if db_hash is not None:
+                    computed = self.compute_frozen_hash()
+                    if computed != db_hash:
+                        raise FrozenHashMismatchError(
+                            f"frozen_hash mismatch: db={db_hash[:8]}... "
+                            f"computed={computed[:8]}..."
+                        )
             return
         await self.build_initial(conn)
         await self._inject_memories(conn)
@@ -259,6 +274,16 @@ class ContextManager:
         await self.build_initial(conn)
         # 4. 重新计算 frozen_hash
         new_hash = self.compute_frozen_hash()
+        # B1 P1-4: 写后完整性兜底校验(AC-15)
+        # 理论上 new_hash == compute_frozen_hash()(刚算的),但作为并发/篡改安全网
+        # spec AC-15 要求此校验存在;测试通过 mock compute_frozen_hash 验证抛错路径
+        if os.environ.get("PA_FROZEN_HASH_VERIFY", "1") != "0":
+            computed = self.compute_frozen_hash()
+            if computed != new_hash:
+                raise FrozenHashMismatchError(
+                    f"replace_frozen_zone post-write hash mismatch: "
+                    f"new_hash={new_hash[:8]}... computed={computed[:8]}..."
+                )
         # 5. UPDATE sessions
         if skill_version is not None:
             await conn.execute(

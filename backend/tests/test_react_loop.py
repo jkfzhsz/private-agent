@@ -257,9 +257,10 @@ def test_run_turn_persists_react_events_to_db_with_incrementing_turn():
             await conn.close()
 
     rows = asyncio.run(_run())
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert rows[0]["event_type"] == "thinking"
     assert rows[1]["event_type"] == "final"
+    assert rows[2]["event_type"] == "checkpoint"
     # turn 递增(同一轮内 thinking 和 final 共享 turn=1)
     assert rows[0]["turn"] == 1
     assert rows[1]["turn"] == 1
@@ -645,7 +646,7 @@ def test_run_turn_with_tool_calls_persists_all_events_to_db():
             await conn.close()
 
     types = asyncio.run(_run())
-    assert types == ["thinking", "tool_call", "tool_result", "final"]
+    assert types == ["thinking", "tool_call", "tool_result", "final", "checkpoint"]
 
 
 def test_run_turn_persists_assistant_message_with_tool_calls():

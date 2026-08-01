@@ -12,7 +12,21 @@ import asyncpg
 
 # 蓝图 §2.13 event_type 合法值
 _VALID_EVENT_TYPES = frozenset(
-    {"thinking", "tool_call", "tool_result", "final", "error", "checkpoint"}
+    {
+        "thinking",
+        "tool_call",
+        "tool_result",
+        "final",
+        "error",
+        "checkpoint",
+        "sandbox_execution",
+        "memory_extracted",
+        "compress",
+        "token_usage",
+        "injection_alert",
+        "injection_blocked",
+        "tool_error",
+    }
 )
 
 

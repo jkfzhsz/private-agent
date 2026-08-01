@@ -26,6 +26,8 @@ import json
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from private_agent.core.checkpoint import CheckpointManager
+from private_agent.core.injection_guard import InjectionGuard
 from private_agent.models.base import AllProvidersFailedError, ChatResult, ModelAdapter
 from private_agent.observability.logging import setup_logger
 from private_agent.storage.react_events import insert_react_event
@@ -62,6 +64,7 @@ class ReactLoop:
         conn: asyncpg.Connection,
         max_iterations: int = 10,
         event_sink: Callable[[dict], Awaitable[None]] | None = None,
+        cfg: dict | None = None,
     ) -> None:
         self._session_id = session_id
         self._context_manager = context_manager
@@ -75,6 +78,8 @@ class ReactLoop:
         self.event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._event_sink = event_sink
         self._logger = setup_logger("private_agent.react_loop")
+        self._cfg = cfg or {}
+        self._injection_guard = InjectionGuard()
 
     # ──────────────────────────────────────────────────────────────────────────
     # State machine
@@ -166,6 +171,7 @@ class ReactLoop:
                     },
                 )
                 self._transition(ReactLoopState.ERROR)
+                await self._save_checkpoint()
                 return
 
             # 首次模型调用后产出 thinking event
@@ -217,6 +223,7 @@ class ReactLoop:
                             },
                         )
                         self._transition(ReactLoopState.ERROR)
+                        await self._save_checkpoint()
                         return
 
                     # 执行工具(P2 fix: 包 try/except 防 handler 异常崩溃)
@@ -236,6 +243,7 @@ class ReactLoop:
                             },
                         )
                         self._transition(ReactLoopState.ERROR)
+                        await self._save_checkpoint()
                         return
 
                     # 产出 tool_result event
@@ -248,6 +256,32 @@ class ReactLoop:
                             "error": tool_result.error,
                         },
                     )
+
+                    # B3 P0-2: 注入防护扫描(告警不阻断)
+                    if self._injection_guard.is_enabled(self._cfg):
+                        tool_output = tool_result.output or ""
+                        source = "sandbox" if tool_name == "code_execution" else "mcp"
+                        try:
+                            truncated = self._injection_guard.truncate_tool_result(
+                                tool_output, source
+                            )
+                            scan_result = self._injection_guard.scan(
+                                truncated, tool_call_id, source
+                            )
+                            for alert in scan_result.high_alerts:
+                                await self._emit_event(
+                                    "injection_alert",
+                                    payload={
+                                        "pattern": alert.pattern,
+                                        "call_id": alert.call_id,
+                                        "risk": alert.risk,
+                                        "source": alert.source,
+                                        "snippet": alert.snippet,
+                                    },
+                                )
+                            tool_result.output = truncated
+                        except Exception:
+                            self._logger.exception("injection_guard scan failed")
 
                     # 持久化 tool message
                     await self._context_manager.append_tool_message(
@@ -273,6 +307,7 @@ class ReactLoop:
                     },
                 )
                 self._transition(ReactLoopState.IDLE)
+                await self._save_checkpoint()
                 return
 
         # 超出 max_iterations
@@ -284,10 +319,29 @@ class ReactLoop:
             },
         )
         self._transition(ReactLoopState.ERROR)
+        await self._save_checkpoint()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Internal helpers
     # ──────────────────────────────────────────────────────────────────────────
+
+    async def _save_checkpoint(self) -> None:
+        """B3 P0-3: 每轮结束写入 checkpoint(蓝图 §2.14)。"""
+        try:
+            ctx_summary = {
+                "frozen_zone_len": len(self._context_manager.frozen_zone.messages),
+                "stable_zone_len": len(self._context_manager.stable_zone.messages),
+                "active_zone_msg_count": len(self._context_manager.active_zone.messages),
+                "active_zone_turn_range": [self._turn, self._turn],
+            }
+            await CheckpointManager.save_checkpoint(
+                self._conn,
+                session_id=self._session_id,
+                turn=self._turn,
+                ctx_summary=ctx_summary,
+            )
+        except Exception as e:
+            self._logger.warning("checkpoint save failed: %s", e)
 
     def _find_tool(self, name: str) -> ToolDef | None:
         """按名查找工具定义。

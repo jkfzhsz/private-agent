@@ -40,3 +40,13 @@ class SandboxResourceError(PrivateAgentError):
 
     磁盘超限/内存超限(Windows 无 setrlimit 时兜底)时抛出。
     """
+
+
+class FrozenHashMismatchError(PrivateAgentError):
+    """Frozen Zone hash 校验失败异常(B1 P1-4)。
+
+    ensure_initial 加载时或 replace_frozen_zone 写入后,compute_frozen_hash()
+    与 sessions.frozen_hash 不一致时抛出。
+
+    环境变量 PA_FROZEN_HASH_VERIFY=0 可关闭校验(逃生通道,默认开启)。
+    """

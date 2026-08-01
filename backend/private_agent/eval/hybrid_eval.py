@@ -8,7 +8,11 @@ Judge 调用失败不阻塞,降级返回 0 分。
 """
 from __future__ import annotations
 
-from private_agent.eval.judge import LLMJudge
+from private_agent.eval.judge import (
+    LLMJudge,
+    build_judge_adapter,
+    load_judge_prompt,
+)
 from private_agent.eval.metrics import compute_all_metrics
 from private_agent.eval.models import EvalSample
 
@@ -24,6 +28,20 @@ class HybridEvaluator:
 
     def __init__(self, *, judge: LLMJudge) -> None:
         self._judge = judge
+
+    @classmethod
+    def from_cfg(cls, cfg: dict) -> "HybridEvaluator":
+        """B1 P1-10: 从 cfg 构造 HybridEvaluator(供 api/eval.py _build_eval_runner 使用)。
+
+        Args:
+            cfg: 配置 dict,需含 eval.judge_model + eval.judge_prompt_dir。
+
+        Returns:
+            HybridEvaluator 实例。
+        """
+        adapter = build_judge_adapter(cfg)
+        prompt = load_judge_prompt(cfg)
+        return cls(judge=LLMJudge(adapter=adapter, prompt_template=prompt))
 
     async def evaluate_sample(
         self,

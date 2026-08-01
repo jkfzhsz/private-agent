@@ -67,24 +67,52 @@ async def _insert_run(
 
 
 def test_trigger_eval_run_endpoint_returns_run_id(monkeypatch):
-    """AC-8: POST /admin/eval/runs 触发评估运行,返回 run_id。"""
+    """AC-8: POST /admin/eval/runs 触发评估运行,返回 run_id。
+
+    B1 P1-10 AC-10: 解除 _build_eval_runner monkeypatch,走真实路径 + 底层 mock。
+    """
     _setup_schema()
 
     # mock EvalRunner.run_evaluation 避免依赖完整评估流程
     captured = {}
 
-    class _MockRunner:
-        async def run_evaluation(self, **kwargs):
-            captured.update(kwargs)
-            return "mock-run-id-123"
+    from private_agent.eval.runner import EvalRunner
+
+    original_run = EvalRunner.run_evaluation
+
+    async def _mock_run(self, **kwargs):
+        captured.update(kwargs)
+        return "mock-run-id-123"
+
+    monkeypatch.setattr(EvalRunner, "run_evaluation", _mock_run)
+
+    # mock 底层 _build_default_adapter + _build_hybrid_evaluator(走真实 _build_eval_runner)
+    from private_agent.models.base import ChatResult, ModelCapability
+
+    class _MockAdapter:
+        provider_name = "mock-glm"
+        capability = ModelCapability(
+            streaming=False, function_calling=False, vision=False, json_mode=False
+        )
+
+        async def chat(self, messages, tools=None):
+            return ChatResult(content="mock")
+
+    from private_agent.eval.hybrid_eval import HybridEvaluator
+    from private_agent.eval.judge import LLMJudge
+
+    mock_judge = MagicMock(spec=LLMJudge)
+    mock_evaluator = HybridEvaluator(judge=mock_judge)
 
     async def _fake_connect(*args, **kwargs):
         return await asyncpg.connect(TEST_DSN)
 
     monkeypatch.setattr("private_agent.api.eval.db.connect", _fake_connect)
     monkeypatch.setattr(
-        "private_agent.api.eval._build_eval_runner",
-        lambda cfg, conn: _MockRunner(),
+        "private_agent.api.eval._build_default_adapter", lambda cfg: _MockAdapter()
+    )
+    monkeypatch.setattr(
+        "private_agent.api.eval._build_hybrid_evaluator", lambda cfg: mock_evaluator
     )
 
     client = TestClient(app)
@@ -98,7 +126,7 @@ def test_trigger_eval_run_endpoint_returns_run_id(monkeypatch):
             "mock_enabled": False,
         },
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["run_id"] == "mock-run-id-123"
     assert captured["skill_name"] == "office"

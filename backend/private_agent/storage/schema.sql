@@ -76,7 +76,13 @@ CREATE TABLE react_events (
     id          BIGSERIAL PRIMARY KEY,
     session_id  BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     turn        INT NOT NULL,
-    event_type  TEXT NOT NULL CHECK (event_type IN ('thinking', 'tool_call', 'tool_result', 'final', 'error', 'checkpoint')),
+    event_type  TEXT NOT NULL CHECK (event_type IN (
+        'thinking', 'tool_call', 'tool_result', 'final', 'error', 'checkpoint',
+        'sandbox_execution', 'memory_extracted',
+        'compress', 'token_usage',
+        'injection_alert', 'injection_blocked',
+        'tool_error'
+    )),
     payload     JSONB NOT NULL,
     created_at  TIMESTAMPTZ DEFAULT now()
 );

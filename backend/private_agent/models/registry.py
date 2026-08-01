@@ -84,6 +84,16 @@ def build_compress_adapter(cfg: dict) -> ModelAdapter | None:
     )
 
 
+def build_default_adapter(cfg: dict) -> ModelAdapter | None:
+    """B1 P1-10: 返回 fallback chain 的首个 adapter(供 EvalRunner 等单 adapter 场景使用)。
+
+    Returns:
+        FallbackChain 链首 adapter;chain 为空(所有 provider disabled)时返回 None。
+    """
+    chain = build_fallback_chain(cfg)
+    return chain._adapters[0] if chain._adapters else None
+
+
 class ManualRouter:
     """蓝图 §2.9 manual router(MVP 简化版:按名直选,不走 tag 协商)。
 

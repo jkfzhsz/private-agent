@@ -678,3 +678,184 @@ def test_ensure_initial_second_call_reloads_frozen_to_memory():
     # Stable/Active 重置为空
     assert cm2.stable_zone.messages == []
     assert cm2.active_zone.messages == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# B1 P1-4: Frozen Zone hash 校验(AC-11..15)
+# Source: plan/b1-foundation-compliance step 21
+# ──────────────────────────────────────────────────────────────────────────────
+
+import pytest
+from private_agent.errors import FrozenHashMismatchError
+
+
+def test_ensure_initial_raises_on_hash_mismatch(monkeypatch):
+    """AC-11: sessions.frozen_hash 错误 → ensure_initial 抛 FrozenHashMismatchError。"""
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "1")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            # 第一次 build_initial,会写入正确的 frozen_hash
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="original",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            # 篡改 sessions.frozen_hash 为错误值
+            await conn.execute(
+                "UPDATE sessions SET frozen_hash=$2 WHERE id=$1",
+                session_id,
+                "0" * 64,  # 错误 hash
+            )
+            # 新实例,reload 路径应抛 FrozenHashMismatchError
+            cm2 = ContextManager(
+                session_id=session_id,
+                system_prompt="original",
+                tools=[ECHO_TOOL],
+            )
+            with pytest.raises(FrozenHashMismatchError):
+                await cm2.ensure_initial(conn)
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_ensure_initial_passes_on_correct_hash(monkeypatch):
+    """AC-12: sessions.frozen_hash 正确 → ensure_initial 正常返回。"""
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "1")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="correct hash test",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            # 新实例同 system_prompt+tools,reload 时 hash 应一致
+            cm2 = ContextManager(
+                session_id=session_id,
+                system_prompt="correct hash test",
+                tools=[ECHO_TOOL],
+            )
+            await cm2.ensure_initial(conn)  # 不抛错即通过
+            assert cm2.frozen_zone.messages[0]["content"]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_ensure_initial_passes_on_null_hash(monkeypatch):
+    """AC-13: sessions.frozen_hash 为 NULL → ensure_initial 正常返回(老会话兼容)。"""
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "1")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="null hash test",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            # 显式置 NULL(模拟老会话无 frozen_hash 列)
+            await conn.execute(
+                "UPDATE sessions SET frozen_hash=NULL WHERE id=$1",
+                session_id,
+            )
+            cm2 = ContextManager(
+                session_id=session_id,
+                system_prompt="null hash test",
+                tools=[ECHO_TOOL],
+            )
+            await cm2.ensure_initial(conn)  # 不抛错即通过
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_ensure_initial_skips_verify_when_env_disabled(monkeypatch):
+    """AC-14: PA_FROZEN_HASH_VERIFY=0 → 即使 hash 错误也不抛错。"""
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "0")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="env disabled test",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            # 篡改 hash
+            await conn.execute(
+                "UPDATE sessions SET frozen_hash=$2 WHERE id=$1",
+                session_id,
+                "deadbeef" * 8,
+            )
+            cm2 = ContextManager(
+                session_id=session_id,
+                system_prompt="env disabled test",
+                tools=[ECHO_TOOL],
+            )
+            await cm2.ensure_initial(conn)  # 不抛错即通过(verify 关闭)
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_replace_frozen_zone_post_write_verify(monkeypatch):
+    """AC-15: replace_frozen_zone 写后 compute_frozen_hash 不一致 → 抛 FrozenHashMismatchError。
+
+    通过 mock compute_frozen_hash 返回不一致值验证兜底校验路径。
+    """
+    _setup_schema()
+    monkeypatch.setenv("PA_FROZEN_HASH_VERIFY", "1")
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt="initial",
+                tools=[ECHO_TOOL],
+            )
+            await cm.ensure_initial(conn)
+            # mock compute_frozen_hash 第二次调用返回不一致值
+            call_count = {"n": 0}
+            original = cm.compute_frozen_hash
+
+            def _mocked():
+                call_count["n"] += 1
+                if call_count["n"] >= 2:
+                    return "f" * 64  # 写后校验时返回不一致值
+                return original()
+
+            cm.compute_frozen_hash = _mocked
+            with pytest.raises(FrozenHashMismatchError):
+                await cm.replace_frozen_zone(
+                    conn,
+                    system_prompt="new prompt",
+                    tools=[ECHO_TOOL],
+                    skill_version="2.0.0",
+                )
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())

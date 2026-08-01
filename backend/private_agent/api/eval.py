@@ -67,12 +67,14 @@ class ReviewDecisionRequest(BaseModel):
 
 def _build_eval_runner(cfg, conn) -> EvalRunner:
     """构造 EvalRunner(测试可 monkeypatch)。"""
+    model_adapter = _build_default_adapter(cfg)
+    assert model_adapter is not None, "fallback_chain empty: no enabled provider in cfg"
     return EvalRunner(
         dataset_repo=EvalDatasetRepo(conn),
         eval_repo=EvalRunRepo(conn),
         snapshot_repo=VersionSnapshotRepo(conn),
         skill_loader=SkillLoader.from_cfg(cfg),
-        model_adapter=_build_default_adapter(cfg),
+        model_adapter=model_adapter,
         hybrid_evaluator=_build_hybrid_evaluator(cfg),
         cfg=cfg,
     )

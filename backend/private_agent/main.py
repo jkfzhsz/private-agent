@@ -4,10 +4,14 @@
 """
 from __future__ import annotations
 
+import logging
+import os
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from private_agent.api import admin, eval, files
 from private_agent.config import loader
+from private_agent.core.checkpoint import CheckpointManager
 from private_agent.core.context_manager import ContextManager
 from private_agent.core.react_loop import ReactLoop
 from private_agent.memory.manager import MemoryManager
@@ -20,7 +24,8 @@ app.include_router(admin.router)
 app.include_router(eval.router)
 app.include_router(files.router)
 
-_logger = setup_logger("private_agent.main")
+# B1 P1-2: 模块级仅持有 logger 句柄(无 handler),file_path 由 _on_startup / run_sidecar 延迟配置
+_logger = logging.getLogger("private_agent.main")
 
 _scheduler = None  # APScheduler 单例(startup 创建,shutdown 停止)
 
@@ -97,6 +102,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     - replay: ws_offset 补发(蓝图 §2.3 line 449),从 react_events 查 turn > last_turn 的事件
     """
     await ws.accept()
+    session_id = None
     try:
         while True:
             msg = await ws.receive_json()
@@ -227,6 +233,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             adapter=adapter,
                             tools=tools,
                             conn=conn,
+                            cfg=cfg,
                         )
                         await loop.run_turn(content)
                         # 排空 event_queue,逐条推送 react_event
@@ -246,12 +253,30 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         await conn.close()
                 except Exception:
                     _logger.exception("user_message handling failed")
+                    try:
+                        await CheckpointManager.mark_session_interrupted(
+                            conn, session_id
+                        )
+                    except Exception:
+                        pass
                     await ws.send_json({
                         "type": "error",
                         "message": "user_message_failed",
                     })
     except WebSocketDisconnect:
-        pass
+        if session_id is not None:
+            try:
+                conn = await db.connect()
+                try:
+                    await CheckpointManager.mark_session_interrupted(
+                        conn, session_id
+                    )
+                finally:
+                    await conn.close()
+            except Exception:
+                _logger.exception(
+                    "Failed to mark session interrupted on disconnect"
+                )
 
 
 @app.on_event("startup")
@@ -261,9 +286,12 @@ async def _on_startup() -> None:
     - db.create_pool 创建连接池(失败时 log warning,不阻止启动)
     - 注册 APScheduler TTL 清理任务(cron `0 3 * * *`)
     - scheduler.start()
+    - B1 P1-2: 读 cfg.observability.logging.file_path 配置 FileHandler
     """
-    global _scheduler
+    global _scheduler, _logger
     cfg = loader.load_config()
+    # B1 P1-2: 配置 file_path(展开环境变量)
+    _configure_logger(cfg)
     try:
         db._pool = await db.create_pool(cfg)
     except Exception as e:
@@ -273,6 +301,24 @@ async def _on_startup() -> None:
     _scheduler = AsyncIOScheduler()
     schedule_ttl_cleanup(_scheduler, cfg)
     _scheduler.start()
+
+
+def _configure_logger(cfg: dict) -> None:
+    """B1 P1-2: 从 cfg 读 file_path 并配置 logger(FileHandler 失败时降级仅 stdout)。"""
+    global _logger
+    obs_cfg = cfg.get("observability", {}).get("logging", {})
+    file_path = obs_cfg.get("file_path")
+    level = obs_cfg.get("level", "INFO").upper()
+    level_int = getattr(logging, level, logging.INFO)
+    expanded_path = os.path.expandvars(file_path) if file_path else None
+    try:
+        _logger = setup_logger(
+            "private_agent.main", level=level_int, file_path=expanded_path
+        )
+    except (OSError, PermissionError) as e:
+        # FileHandler 创建失败(路径不可写/权限不足)时降级仅 StreamHandler
+        _logger = setup_logger("private_agent.main", level=level_int)
+        _logger.warning(f"FileHandler setup failed, fallback to stdout only: {e}")
 
 
 @app.on_event("shutdown")
@@ -288,11 +334,13 @@ def run_sidecar() -> None:
     """启动 Sidecar:从 config.yaml 读取端口,uvicorn 监听(蓝图 §2.2 + §9.13)."""
     import uvicorn
 
+    global _logger
     cfg = loader.load_config()
+    # B1 P1-2: 配置 file_path(展开环境变量)
+    _configure_logger(cfg)
     host = cfg["server"]["http"]["host"]
     http_port = cfg["server"]["http"]["port"]
-    logger = setup_logger("private_agent.main")
-    logger.info(f"Sidecar started: host={host} http_port={http_port}")
+    _logger.info(f"Sidecar started: host={host} http_port={http_port}")
     uvicorn.run(app, host=host, port=http_port)
 
 
