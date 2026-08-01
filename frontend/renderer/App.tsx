@@ -8,7 +8,14 @@
 // - ACK 机制:收到 react_event 后发送 ack(session_id + turn)
 // - session_id 管理:首次连接时从 URL 参数获取或生成
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import SkillSelectionPanel from "./SkillSelectionPanel";
+import LiquidBackground from "./components/LiquidBackground";
+import Sidebar, { type ViewKey } from "./components/Sidebar";
+import ArtifactPanel, { type Artifact } from "./components/ArtifactPanel";
+import HomeView from "./views/HomeView";
+import KnowledgeView from "./views/KnowledgeView";
+import MemoryView from "./views/MemoryView";
+import SettingsView from "./views/SettingsView";
+import "./styles/design-tokens.css";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 类型定义
@@ -72,11 +79,14 @@ function extractImagePaths(text: string): string[] {
   return Array.from(new Set(paths));
 }
 
+const FILES_BASE = "http://127.0.0.1:8765/files/outputs";
+
 function imagePathToUrl(path: string): string {
-  // 取 outputs/ 之后的部分作为 filename,拼接 /files/outputs/{filename}
+  // 取 outputs/ 之后的部分作为 filename,拼接后端文件服务绝对地址
+  // (vite 5173 下相对路径会请求前端自身导致 404)
   const match = path.match(/outputs\/([\w\-\.]+)$/i);
   const filename = match ? match[1] : path.replace(/^\/?outputs\//, "");
-  return `/files/outputs/${filename}`;
+  return `${FILES_BASE}/${filename}`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -116,183 +126,10 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
   }
 }
 
+
 // ──────────────────────────────────────────────────────────────────────────────
-// 评估面板组件(M4 §8.12,AC-11)
+// 视图组件(评估已移除; 设置/知识库/记忆见 views/ 目录; 首页见 HomeView)
 // ──────────────────────────────────────────────────────────────────────────────
-
-interface EvalRun {
-  run_id: string;
-  skill_name: string;
-  skill_version: string;
-  model_id: string;
-  eval_mode: string;
-  finished_at: string | null;
-  metrics?: Record<string, Record<string, number>>;
-}
-
-interface CompareResult {
-  base_version: string;
-  target_version: string;
-  diff: Record<string, Record<string, { delta: number; status: string }>>;
-}
-
-const API_BASE = "http://localhost:8765/admin/eval";
-
-async function fetchJson(url: string): Promise<unknown> {
-  const resp = await fetch(url);
-  return resp.json();
-}
-
-function EvalPanel(): JSX.Element {
-  const [runs, setRuns] = useState<EvalRun[]>([]);
-  const [compare, setCompare] = useState<CompareResult | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const loadRuns = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = (await fetchJson(`${API_BASE}/runs?limit=20`)) as { runs: EvalRun[] };
-      setRuns(data.runs ?? []);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadCompare = useCallback(async () => {
-    if (runs.length < 2) return;
-    const versions = [...new Set(runs.map((r) => r.skill_version))].slice(0, 2);
-    if (versions.length < 2) return;
-    const data = (await fetchJson(
-      `${API_BASE}/versions/compare?skill_name=${runs[0].skill_name}&base_version=${versions[0]}&target_version=${versions[1]}`
-    )) as CompareResult;
-    setCompare(data);
-  }, [runs]);
-
-  useEffect(() => {
-    loadRuns();
-  }, [loadRuns]);
-
-  // 版本趋势折线图数据(completion_rate 随版本变化)
-  const trendPoints = runs
-    .filter((r) => r.metrics?.task_completion?.completion_rate !== undefined)
-    .map((r, i) => ({
-      x: 20 + i * 60,
-      y: 120 - r.metrics!.task_completion!.completion_rate * 100,
-      version: r.skill_version,
-      rate: r.metrics!.task_completion!.completion_rate,
-    }));
-
-  return (
-    <div style={{ marginTop: 24, padding: 16, border: "1px solid #ddd", borderRadius: 8 }}>
-      <h2 style={{ fontSize: 16, marginBottom: 12 }}>评估面板</h2>
-
-      {/* 运行列表 */}
-      <div style={{ marginBottom: 16 }}>
-        <h3 style={{ fontSize: 13, marginBottom: 8 }}>运行列表</h3>
-        <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ borderBottom: "1px solid #ddd", textAlign: "left" }}>
-              <th style={{ padding: 4 }}>run_id</th>
-              <th style={{ padding: 4 }}>skill</th>
-              <th style={{ padding: 4 }}>version</th>
-              <th style={{ padding: 4 }}>model</th>
-              <th style={{ padding: 4 }}>mode</th>
-              <th style={{ padding: 4 }}>status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((r) => (
-              <tr key={r.run_id} style={{ borderBottom: "1px solid #eee" }}>
-                <td style={{ padding: 4 }}>{r.run_id.slice(0, 8)}</td>
-                <td style={{ padding: 4 }}>{r.skill_name}</td>
-                <td style={{ padding: 4 }}>{r.skill_version}</td>
-                <td style={{ padding: 4 }}>{r.model_id}</td>
-                <td style={{ padding: 4 }}>{r.eval_mode}</td>
-                <td style={{ padding: 4 }}>{r.finished_at ? "completed" : "running"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {runs.length === 0 && <div style={{ fontSize: 12, color: "#999" }}>暂无运行记录</div>}
-      </div>
-
-      {/* 版本趋势折线图(SVG) */}
-      <div style={{ marginBottom: 16 }}>
-        <h3 style={{ fontSize: 13, marginBottom: 8 }}>版本趋势</h3>
-        {trendPoints.length >= 2 ? (
-          <svg width={400} height={140} style={{ border: "1px solid #eee" }}>
-            <line x1={20} y1={20} x2={20} y2={120} stroke="#ccc" />
-            <line x1={20} y1={120} x2={380} y2={120} stroke="#ccc" />
-            <polyline
-              points={trendPoints.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-              stroke="#1976d2"
-              strokeWidth={2}
-            />
-            {trendPoints.map((p, i) => (
-              <g key={i}>
-                <circle cx={p.x} cy={p.y} r={3} fill="#1976d2" />
-                <text x={p.x} y={135} fontSize={10} textAnchor="middle" fill="#666">
-                  {p.version}
-                </text>
-              </g>
-            ))}
-          </svg>
-        ) : (
-          <div style={{ fontSize: 12, color: "#999" }}>Insufficient data (需要 ≥2 个版本数据点)</div>
-        )}
-      </div>
-
-      {/* 版本对比表格 + 退化告警标记 */}
-      <div style={{ marginBottom: 16 }}>
-        <h3 style={{ fontSize: 13, marginBottom: 8 }}>版本对比</h3>
-        <button
-          onClick={loadCompare}
-          disabled={runs.length < 2 || loading}
-          style={{ fontSize: 12, padding: "4px 8px", marginBottom: 8 }}
-        >
-          对比最新两版本
-        </button>
-        {compare && (
-          <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid #ddd", textAlign: "left" }}>
-                <th style={{ padding: 4 }}>category</th>
-                <th style={{ padding: 4 }}>metric</th>
-                <th style={{ padding: 4 }}>delta</th>
-                <th style={{ padding: 4 }}>status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(compare.diff).flatMap(([cat, metrics]) =>
-                Object.entries(metrics).map(([metric, info]) => (
-                  <tr key={`${cat}-${metric}`} style={{ borderBottom: "1px solid #eee" }}>
-                    <td style={{ padding: 4 }}>{cat}</td>
-                    <td style={{ padding: 4 }}>{metric}</td>
-                    <td style={{ padding: 4 }}>{info.delta.toFixed(3)}</td>
-                    <td style={{ padding: 4 }}>
-                      {info.status === "degraded" ? (
-                        <span style={{ color: "#fff", background: "#f44336", padding: "2px 6px", borderRadius: 3, fontSize: 11 }}>
-                          degraded
-                        </span>
-                      ) : info.status === "improved" ? (
-                        <span style={{ color: "#fff", background: "#4caf50", padding: "2px 6px", borderRadius: 3, fontSize: 11 }}>
-                          improved
-                        </span>
-                      ) : (
-                        <span style={{ color: "#666", fontSize: 11 }}>stable</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  );
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 主组件
@@ -302,11 +139,10 @@ export default function App(): JSX.Element {
   const [events, setEvents] = useState<ReactEvent[]>([]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<ConnStatus>("disconnected");
-  const [sessionId] = useState<number>(() => getSessionIdFromUrl());
+  const [sessionId, setSessionId] = useState<number>(() => getSessionIdFromUrl());
   const [realSessionId, setRealSessionId] = useState<number | null>(null);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
-  const [view, setView] = useState<"skill_selection" | "chat">("skill_selection");
-  const [showEvalPanel, setShowEvalPanel] = useState(false);
+  const [view, setView] = useState<ViewKey>("home");
   // 每个 turn 的"推理过程"展开状态(默认收起)
   const [openThinkingTurns, setOpenThinkingTurns] = useState<Set<number>>(new Set());
 
@@ -331,6 +167,72 @@ export default function App(): JSX.Element {
       }
       return next;
     });
+  };
+
+  // 右栏产物: 从 tool_result 提取图片 + 文件(去重)
+  const artifacts = useMemo<Artifact[]>(() => {
+    const list: Artifact[] = [];
+    const fileRe =
+      /(?:\/?outputs\/)?[\w\-\.]+\.(?:xlsx|docx|csv|html|md|pdf|json|txt|pptx|zip)/gi;
+    for (const ev of events) {
+      if (ev.event_type !== "tool_result") continue;
+      const text = formatPayload("tool_result", ev.payload);
+      for (const p of extractImagePaths(text)) {
+        list.push({ type: "image", url: imagePathToUrl(p), name: p });
+      }
+      const files = text.match(fileRe) ?? [];
+      for (const f of files) {
+        const name = f.split("/").pop() ?? f;
+        list.push({ type: "file", url: `${FILES_BASE}/${name}`, name });
+      }
+    }
+    return Array.from(new Map(list.map((a) => [a.url, a])).values());
+  }, [events]);
+
+  const [artifactsOpen, setArtifactsOpen] = useState(true);
+
+  // HomeView 模式按钮: 激活 skill + 切换到对话视图
+  const handlePickMode = async (
+    skill: "office" | "data_analysis" | "frontend_design"
+  ): Promise<void> => {
+    const sid = realSessionId ?? sessionId;
+    try {
+      const resp = await fetch(
+        `http://127.0.0.1:8765/admin/sessions/${sid}/activate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ skill_name: skill }),
+        }
+      );
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail ?? `HTTP ${resp.status}`);
+      }
+      setActiveSkill(skill);
+      setView("chat");
+    } catch (e) {
+      // eslint-disable-next-line no-alert
+      window.alert(`激活 ${skill} 失败: ${String(e)}`);
+    }
+  };
+
+  // 任务树: 切换到历史会话 → 改 sessionId, 触发 connect 重连 + 后端 replay
+  const handleSwitchSession = (id: number): void => {
+    if (id === sessionId) return;
+    // 关闭当前 ws(connect effect 依赖 sessionId 会重连)
+    const ws = wsRef.current;
+    if (ws) {
+      ws.onclose = null;
+      ws.close();
+      wsRef.current = null;
+    }
+    setEvents([]);
+    setActiveSkill(null);
+    lastTurnRef.current = 0;
+    setRealSessionId(id);
+    setSessionId(id);
+    setView("home");
   };
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -396,9 +298,10 @@ export default function App(): JSX.Element {
 
       case "error":
         if (msg.message) {
-          // B2 P1-9: skill_not_found → 自动切回技能选择页
+          // B2 P1-9: skill_not_found → 自动切回首页(重新选择 Skill)
           if (/skill_not_found|skill not found/i.test(msg.message)) {
-            setView("skill_selection");
+            setActiveSkill(null);
+            setView("home");
           }
           const event: ReactEvent = {
             id: ++eventIdRef.current,
@@ -520,80 +423,94 @@ export default function App(): JSX.Element {
       }
       wsRef.current = null;
     };
-  }, [connect]);
+  }, [connect, sessionId]);
 
   // ── 渲染 ──────────────────────────────────────────────────────────────────
-  const statusColor =
-    status === "connected" ? "#4caf50" :
-    status === "reconnecting" ? "#ff9800" : "#f44336";
-
-  // B2 P1-9: 技能选择视图(首次进入 / skill_not_found 跳转)
-  if (view === "skill_selection") {
-    return (
-      <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 900, margin: "0 auto", padding: 16 }}>
-        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h1 style={{ fontSize: 20, margin: 0 }}>Private Agent</h1>
-          <span style={{ fontSize: 12, color: "#999" }}>session={realSessionId ?? sessionId}</span>
-        </header>
-        <div
-          style={{
-            border: "1px solid #ddd", borderRadius: 8, padding: 24,
-            backgroundColor: "#fafafa",
-          }}
-        >
-          <SkillSelectionPanel
-            sessionId={realSessionId ?? sessionId}
-            onActivated={(name) => {
-              setActiveSkill(name);
-              setView("chat");
-            }}
-          />
-        </div>
-      </div>
-    );
-  }
-
+  // ── 渲染: FlowSpace 布局(液体背景 + 侧边栏 + 顶栏 + 内容视图) ─────────
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 900, margin: "0 auto", padding: 16 }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h1 style={{ fontSize: 20, margin: 0 }}>Private Agent</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
-            style={{
-              display: "inline-block", width: 10, height: 10, borderRadius: "50%",
-              backgroundColor: statusColor,
-            }}
-          />
-          <span style={{ fontSize: 13, color: "#666" }}>{status}</span>
-          <span style={{ fontSize: 12, color: "#999" }}>session={sessionId}</span>
-          <span style={{ fontSize: 12, color: "#999" }}>last_turn={lastTurnRef.current}</span>
-          {activeSkill && (
-            <span style={{ fontSize: 12, color: "#1976d2" }}>skill={activeSkill}</span>
-          )}
-          <button
-            onClick={() => setShowEvalPanel(!showEvalPanel)}
-            style={{
-              fontSize: 12, padding: "4px 10px", borderRadius: 4, border: "1px solid #ddd",
-              background: showEvalPanel ? "#1976d2" : "#fff", color: showEvalPanel ? "#fff" : "#333",
-              cursor: "pointer",
-            }}
-          >
-            评估面板
-          </button>
-        </div>
-      </header>
-
+    <div
+      style={{
+        position: "relative",
+        minHeight: "100vh",
+        fontFamily: "var(--font-sans)",
+        color: "var(--text-primary)",
+        background:
+          "linear-gradient(160deg, #eef1f8 0%, #e6ebf6 40%, #ece7f7 100%)",
+        WebkitFontSmoothing: "antialiased",
+      }}
+    >
+      <LiquidBackground />
       <div
         style={{
-          border: "1px solid #ddd",
-          borderRadius: 8,
-          minHeight: 400,
-          maxHeight: "60vh",
-          overflowY: "auto",
-          padding: 12,
-          backgroundColor: "#fafafa",
+          position: "relative",
+          zIndex: 1,
+          display: "flex",
+          gap: 16,
+          padding: 16,
+          height: "100vh",
+          boxSizing: "border-box",
         }}
       >
+        <Sidebar
+          active={view}
+          onChange={setView}
+          currentSessionId={realSessionId ?? sessionId}
+          onSwitchSession={handleSwitchSession}
+          status={status}
+        />
+        <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 16, minHeight: 0 }}>
+          <main style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            {view === "home" && (
+              <HomeView
+                onPickMode={handlePickMode}
+                activeSkill={activeSkill}
+                sessionId={realSessionId ?? sessionId}
+              />
+            )}
+            {view === "chat" && activeSkill && (
+              <div
+                className="glass-panel"
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  flexDirection: "column",
+                  padding: 16,
+                  minHeight: 0,
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "0 4px 12px",
+                    flexShrink: 0,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 12,
+                      padding: "2px 10px",
+                      borderRadius: 10,
+                      background: "var(--success-bg)",
+                      color: "var(--success-text)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {activeSkill}
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                    session={realSessionId ?? sessionId}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    overflowY: "auto",
+                    padding: 4,
+                  }}
+                >
         {turnGroups.length === 0 && (
           <div style={{ color: "#999", textAlign: "center", paddingTop: 40 }}>
             发送一条消息开始对话
@@ -840,9 +757,20 @@ export default function App(): JSX.Element {
         >
           发送
         </button>
+          </div>
+          </div>
+          )}
+          {view === "settings" && <SettingsView />}
+          {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
+          {view === "memory" && <MemoryView sessionId={realSessionId ?? sessionId} />}
+        </main>
+        <ArtifactPanel
+          open={artifactsOpen}
+          artifacts={artifacts}
+          onToggle={() => setArtifactsOpen(!artifactsOpen)}
+        />
+        </div>
       </div>
-
-      {showEvalPanel && <EvalPanel />}
     </div>
   );
 }

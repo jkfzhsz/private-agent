@@ -90,4 +90,10 @@ async def get_output_file(filename: str):
 
     ext = file_path.suffix.lower()
     content_type = _EXT_CONTENT_TYPE.get(ext, "application/octet-stream")
-    return FileResponse(path=str(file_path), media_type=content_type)
+    # 产物/壁纸为运行时动态文件,文件名固定(如 wallpaper.jpeg),必须禁止浏览器缓存,
+    # 否则换图后 URL 不变,浏览器复用旧缓存导致永远显示第一张。
+    return FileResponse(
+        path=str(file_path),
+        media_type=content_type,
+        headers={"Cache-Control": "no-store"},
+    )

@@ -1,0 +1,246 @@
+/* FlowSpace 设计系统 v2.1 - Design Tokens（React 化落地）
+   来源: FlowSpace-Design-System.md §2/§3/§4/§12 */
+:root {
+  /* 语义色板 */
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-tertiary: #94a3b8;
+
+  /* 磨砂玻璃 */
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --glass-shadow: 0 8px 32px rgba(148, 163, 184, 0.15);
+
+  /* 圆角 */
+  --radius-lg: 24px;
+  --radius-md: 16px;
+  --radius-sm: 12px;
+
+  /* 品牌渐变(§2.5) */
+  --gradient-indigo: linear-gradient(135deg, #818cf8, #6366f1);
+  --gradient-violet: linear-gradient(135deg, #c084fc, #a855f7);
+  --gradient-pink: linear-gradient(135deg, #f472b6, #ec4899);
+  --gradient-logo: linear-gradient(135deg, #818cf8, #c084fc, #f472b6);
+
+  /* 功能色(§2.4) */
+  --success-bg: #d1fae5;
+  --success-text: #059669;
+  --warning-bg: #fef3c7;
+  --warning-text: #d97706;
+  --info-bg: #d1fae5;
+  --info-text: #059669;
+  --danger-text: #ef4444;
+  --neutral-bg: #f1f5f9;
+  --neutral-text: #64748b;
+
+  /* 液体 Blob 调色盘(§2.3) */
+  --blob-1: 168, 216, 255; /* Sky Blue */
+  --blob-2: 147, 197, 253; /* Blue */
+  --blob-3: 196, 181, 253; /* Purple */
+  --blob-4: 216, 180, 254; /* Violet */
+  --blob-5: 249, 168, 212; /* Pink */
+  --blob-6: 251, 191, 220; /* Light Pink */
+
+  /* 字体(§3.1) */
+  --font-sans: "Space Grotesk", system-ui, -apple-system, "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+
+  /* 间距(§4.1, 4px 基准) */
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  /* 动效(§8.1) */
+  --transition-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 磨砂玻璃面板(§5.1) + 厚度感(顶部受光高光 + 分层投影) */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: var(--space-6);
+}
+
+/* 侧边栏玻璃(§5.2): 更强模糊 + 厚度感 */
+.glass-sidebar {
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+}
+
+/* 统计卡片(§5.3) + 厚度感 */
+.stat-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: 20px 24px;
+  transition: transform 0.35s var(--transition-smooth),
+    box-shadow 0.35s var(--transition-smooth);
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 2px 6px rgba(148, 163, 184, 0.1),
+    0 12px 40px rgba(148, 163, 184, 0.22);
+}
+
+/* 导航项(§7.1) */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  width: 100%;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.25s var(--transition-smooth);
+  font-family: var(--font-sans);
+}
+.nav-item:hover {
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--text-primary);
+}
+.nav-item.active {
+  background: rgba(255, 255, 255, 0.8);
+  color: #7c3aed;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.1);
+}
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 3px;
+  height: 20px;
+  background: linear-gradient(180deg, #818cf8, #c084fc);
+  border-radius: 0 3px 3px 0;
+}
+
+/* 输入框(§7.3) */
+.flow-input {
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.6);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--text-primary);
+  transition: all 0.25s var(--transition-smooth);
+  outline: none;
+}
+.flow-input:focus {
+  border-color: #a78bfa;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.1);
+}
+
+/* 按钮变体(§7.2) */
+.btn-ghost {
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.25s var(--transition-smooth);
+}
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.8);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+.btn-primary {
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--gradient-indigo);
+  border: none;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: opacity 0.25s var(--transition-smooth);
+}
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+/* 入场动画(§8.2) */
+@keyframes flow-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-in {
+  animation: flow-slide-up 0.6s var(--transition-smooth) both;
+}
+.delay-1 { animation-delay: 0.05s; }
+.delay-2 { animation-delay: 0.10s; }
+.delay-3 { animation-delay: 0.15s; }
+.delay-4 { animation-delay: 0.20s; }
+
+/* 动效降级(§9.3) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 细滚动条(原始 Demo §content-scroll) */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}

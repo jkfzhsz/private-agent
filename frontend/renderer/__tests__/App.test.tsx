@@ -1,9 +1,7 @@
-// B2 P1-9 - App 集成测试(技能选择 → chat → skill_not_found 跳转)
-//
-// Source: plan/b2-remaining-features step 22-23 (修复计划 §2 P1-9)
-// - AC-17: 初始渲染技能选择视图
-// - AC-18: WS skill_not_found error → 自动切回技能选择
-// - AC-19: chat 视图显示 locked skill 名
+// B2 P1-9 + Phase 1.5 - App 集成测试
+//   AC-17: 初始渲染首页(HomeView), 三个模式按钮可见
+//   AC-18: WS skill_not_found error → 自动切回首页
+//   AC-19: 点击模式按钮 → 激活后进入 chat 视图并显示 skill 名
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,14 +34,19 @@ beforeEach(() => {
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockImplementation((url: string) => {
+    vi.fn().mockImplementation((url: string, options?: RequestInit) => {
       if (typeof url === "string" && url.includes("/skills")) {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(SKILLS) });
       }
       if (typeof url === "string" && url.includes("/activate")) {
+        const body = JSON.parse((options?.body as string) ?? "{}");
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ locked_version: "1.0.0", frozen_hash: "abc" }),
+          json: () => Promise.resolve({
+            locked_version: "1.0.0",
+            frozen_hash: "abc",
+            skill_name: body.skill_name,
+          }),
         });
       }
       return Promise.reject(new Error(`unexpected fetch: ${url}`));
@@ -62,31 +65,34 @@ function ws(): FakeWebSocket {
   return FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
 }
 
-async function activateSkill(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  await screen.findByText("办公");
-  await user.click(screen.getByText("办公"));
-  await waitFor(() => expect(screen.queryByText("发送")).toBeTruthy());
+async function pickMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  // HomeView 三个按钮: 工作模式 / 分析模式 / 设计模式
+  await screen.findByText("工作模式");
+  await user.click(screen.getByText("工作模式"));
+  // 激活后顶部应显示 skill 名(office)
+  await waitFor(() => expect(screen.getByText("office")).toBeInTheDocument());
 }
 
-describe("App 技能选择集成", () => {
-  it("初始渲染技能选择视图(AC-17)", async () => {
+describe("App 首页与模式选择集成", () => {
+  it("初始渲染首页与三个模式按钮(AC-17)", async () => {
     render(<App />);
-    await screen.findByText("选择技能场景");
-    expect(screen.getByText("办公")).toBeInTheDocument();
+    expect(await screen.findByText("工作模式")).toBeInTheDocument();
+    expect(screen.getByText("分析模式")).toBeInTheDocument();
+    expect(screen.getByText("设计模式")).toBeInTheDocument();
   });
 
-  it("激活技能后进入 chat 视图并显示 skill 名(AC-19)", async () => {
+  it("点击模式按钮后进入 chat 视图并显示 skill 名(AC-19)", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await activateSkill(user);
-
-    expect(screen.getByText("skill=office")).toBeInTheDocument();
+    await pickMode(user);
+    // 顶部 badge 显示当前激活的 skill
+    expect(screen.getByText("office")).toBeInTheDocument();
   });
 
-  it("WS skill_not_found error 自动切回技能选择(AC-18)", async () => {
+  it("WS skill_not_found error 自动切回首页(AC-18)", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await activateSkill(user);
+    await pickMode(user);
 
     act(() => {
       ws().onmessage?.({
@@ -94,22 +100,27 @@ describe("App 技能选择集成", () => {
       });
     });
 
-    await screen.findByText("选择技能场景");
+    // 回到首页: 三个模式按钮重新可见
+    expect(await screen.findByText("工作模式")).toBeInTheDocument();
   });
 
-  it("普通 error 不切回技能选择视图", async () => {
+  it("普通 error 不切回首页", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await activateSkill(user);
+    await pickMode(user);
 
     act(() => {
       ws().onmessage?.({
-        data: JSON.stringify({ type: "error", message: "model provider unavailable" }),
+        data: JSON.stringify({
+          type: "error",
+          message: "model provider unavailable",
+        }),
       });
     });
 
     await waitFor(() => {
-      expect(screen.queryByText("选择技能场景")).toBeNull();
+      // chat 视图不应包含首页的"工作模式"按钮
+      expect(screen.queryByText("工作模式")).toBeNull();
     });
   });
 });
