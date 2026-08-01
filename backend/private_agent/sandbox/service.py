@@ -8,6 +8,7 @@ from pathlib import Path
 
 from private_agent.errors import SandboxTimeoutError
 from private_agent.sandbox.executor import SandboxExecutor
+from private_agent.sandbox.resource_limiter import ResourceLimiter, disable_network
 from private_agent.sandbox.result import CodeWarning, SandboxResult
 from private_agent.sandbox.security import CodeScanner, EnvSanitizer
 from private_agent.sandbox.workspace import WorkspaceManager
@@ -43,6 +44,8 @@ class SandboxService:
         limits_cfg = sandbox_cfg.get("limits", {})
         self._default_timeout = limits_cfg.get("cpu_timeout_sec", 300)
         self._disk_limit_mb = limits_cfg.get("disk_limit_mb", 100)
+        memory_limit_mb = limits_cfg.get("memory_limit_mb", 512)
+        self._resource_limiter = ResourceLimiter(memory_limit_mb, self._default_timeout)
 
         lang_cfg = sandbox_cfg.get("languages", {}).get("python", {})
         python_cmd = lang_cfg.get("command", "python")
