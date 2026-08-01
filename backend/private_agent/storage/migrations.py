@@ -17,6 +17,18 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
 
     幂等:CREATE TABLE/INDEX 无 IF NOT EXISTS 时会在重复执行时报错;
     调用方应先 DROP SCHEMA public CASCADE 再调用(见 test_migrations.py fixture)。
+
+    M3: 末尾追加幂等 ALTER,为老部署(已有 sessions 表但无锁定列)补列。
     """
     sql = SCHEMA_FILE.read_text(encoding="utf-8")
     await conn.execute(sql)
+    # M3 §7.3 会话锁定列(老部署补列,新部署 schema.sql 已含)
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS locked_skill_name VARCHAR(100)"
+    )
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS locked_skill_version VARCHAR(20)"
+    )
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS frozen_hash VARCHAR(64)"
+    )

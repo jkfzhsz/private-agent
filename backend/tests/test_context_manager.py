@@ -22,6 +22,39 @@ TEST_DSN = os.environ.get(
 )
 
 
+class TestComputeFrozenHash:
+    """M3 AC-1: ContextManager.compute_frozen_hash 返回 SHA-256 hex。"""
+
+    def test_compute_frozen_hash_returns_hex_string(self):
+        """compute_frozen_hash 返回 64 位 hex 字符串。"""
+        cm = ContextManager(session_id=1, system_prompt="test prompt", tools=[])
+        h = cm.compute_frozen_hash()
+        assert isinstance(h, str)
+        assert len(h) == 64
+        int(h, 16)  # 是合法 hex
+
+    def test_hash_stable_for_same_content(self):
+        """相同 system_prompt + tools → 相同 hash。"""
+        cm1 = ContextManager(session_id=1, system_prompt="same", tools=[])
+        cm2 = ContextManager(session_id=2, system_prompt="same", tools=[])
+        assert cm1.compute_frozen_hash() == cm2.compute_frozen_hash()
+
+    def test_hash_changes_when_prompt_changes(self):
+        """system_prompt 变化 → hash 变化。"""
+        cm1 = ContextManager(session_id=1, system_prompt="prompt A", tools=[])
+        cm2 = ContextManager(session_id=1, system_prompt="prompt B", tools=[])
+        assert cm1.compute_frozen_hash() != cm2.compute_frozen_hash()
+
+    def test_hash_changes_when_tools_change(self):
+        """tools 变化 → hash 变化。"""
+        async def _h(args): ...
+        from private_agent.tools.defs import ToolDef
+        t1 = ToolDef(name="t1", description="t1", parameters_schema={"type": "object"}, handler=_h)
+        cm1 = ContextManager(session_id=1, system_prompt="same", tools=[t1])
+        cm2 = ContextManager(session_id=1, system_prompt="same", tools=[])
+        assert cm1.compute_frozen_hash() != cm2.compute_frozen_hash()
+
+
 def _setup_schema() -> None:
     """重建 schema + 跑 migrate_all。"""
     async def _run() -> None:

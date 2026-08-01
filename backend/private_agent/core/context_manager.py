@@ -15,6 +15,7 @@ M2 §4.5 扩展:ContextManager 接受可选的 memory_manager,在 ensure_initial
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -74,6 +75,15 @@ class ContextManager:
             ensure_ascii=False,
         )
         return f"{self._system_prompt}\n\n[TOOLS]\n{tools_json}"
+
+    def compute_frozen_hash(self) -> str:
+        """M3 §7.3 AC-1: 计算 Frozen Zone 内容的 SHA-256 hash。
+
+        hash 基于 system_prompt + 工具定义(与 _build_frozen_content 同源)。
+        用于会话锁定,存 sessions.frozen_hash。
+        """
+        content = self._build_frozen_content()
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     async def build_initial(self, conn: "asyncpg.Connection") -> None:
         """启动构建(蓝图 §3.3):持久化 Frozen Zone 到 messages 表。

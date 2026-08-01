@@ -24,6 +24,12 @@ from private_agent.storage.disk_alert import get_disk_status
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+def _build_compress_adapter(cfg):
+    """构造压缩模型适配器(蓝图 §4.2,spec AC-7),测试可 monkeypatch。"""
+    from private_agent.models.registry import build_compress_adapter
+    return build_compress_adapter(cfg)
+
+
 @router.get("/disk-status", response_model=None)
 async def disk_status():
     """返回磁盘占用分级状态(蓝图 §2.10 第 6 条)。
@@ -70,7 +76,7 @@ async def extract_memory(session_id: int):
             repo = MemoriesRepo(conn)
             mgr = MemoryManager(
                 memories_repo=repo,
-                compress_adapter=None,  # MVP 暂缺压缩模型适配器
+                compress_adapter=_build_compress_adapter(cfg),
                 extract_interval_turns=cfg.get("memory", {}).get(
                     "extract_interval_turns", 8
                 ),

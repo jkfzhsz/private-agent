@@ -34,6 +34,45 @@ class TestToolRegistry:
         names = [t.name for t in tools]
         assert "calculator" in names
 
+
+class TestListToolsForSession:
+    """M3 AC-3: list_tools_for_session 按 skill 白名单过滤。"""
+
+    @pytest.fixture
+    def registry_with_tools(self) -> ToolRegistry:
+        reg = ToolRegistry()
+        async def _h(args): return ToolResult(output="ok")
+        for name in ["calculator", "file_read", "file_write", "web_search", "http_request"]:
+            reg.register_builtin(name, ToolDef(
+                name=name, description=name, parameters_schema={"type": "object"}, handler=_h
+            ))
+        return reg
+
+    async def test_whitelist_none_returns_all(self, registry_with_tools: ToolRegistry) -> None:
+        """whitelist=None → 返回全部(保 M1 行为)。"""
+        tools = registry_with_tools.list_tools_for_session(None)
+        assert len(tools) == 5
+
+    async def test_whitelist_filters_tools(self, registry_with_tools: ToolRegistry) -> None:
+        """AC-3: whitelist 过滤,只返回白名单内工具。"""
+        whitelist = ["file_read", "file_write", "web_search"]
+        tools = registry_with_tools.list_tools_for_session(whitelist)
+        names = [t.name for t in tools]
+        assert set(names) == {"file_read", "file_write", "web_search"}
+        assert "http_request" not in names
+        assert "calculator" not in names
+
+    async def test_whitelist_unknown_tool_ignored(self, registry_with_tools: ToolRegistry) -> None:
+        """白名单含未注册工具 → 静默跳过(不报错)。"""
+        tools = registry_with_tools.list_tools_for_session(["file_read", "fake_tool"])
+        names = [t.name for t in tools]
+        assert names == ["file_read"]
+
+    async def test_whitelist_empty_returns_empty(self, registry_with_tools: ToolRegistry) -> None:
+        """空白名单 → 返回空列表。"""
+        tools = registry_with_tools.list_tools_for_session([])
+        assert tools == []
+
     async def test_get_tool_returns_registered_tool(
         self, registry: ToolRegistry, sample_tool: ToolDef
     ) -> None:

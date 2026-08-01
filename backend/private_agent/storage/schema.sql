@@ -19,7 +19,11 @@ CREATE TABLE sessions (
     summary         TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    archived_at     TIMESTAMPTZ
+    archived_at     TIMESTAMPTZ,
+    -- M3 §7.3 会话锁定:Skill 激活后锁定版本,运行中拒绝切换
+    locked_skill_name      VARCHAR(100),
+    locked_skill_version   VARCHAR(20),
+    frozen_hash            VARCHAR(64)
 );
 
 CREATE INDEX idx_sessions_status ON sessions(status) WHERE archived_at IS NULL;

@@ -29,6 +29,12 @@ def _build_adapter(cfg):
     return build_fallback_chain(cfg)
 
 
+def _build_compress_adapter(cfg):
+    """构造压缩模型适配器(蓝图 §4.2,spec AC-7),测试可 monkeypatch。"""
+    from private_agent.models.registry import build_compress_adapter
+    return build_compress_adapter(cfg)
+
+
 def _get_tools(cfg):
     """获取工具列表(M2:从 ToolRegistry 注册所有内置工具,测试可 monkeypatch)。
 
@@ -168,7 +174,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         memories_repo = MemoriesRepo(conn)
                         memory_mgr = MemoryManager(
                             memories_repo=memories_repo,
-                            compress_adapter=None,  # MVP 复用压缩模型,暂缺
+                            compress_adapter=_build_compress_adapter(cfg),
                             extract_interval_turns=cfg.get("memory", {}).get(
                                 "extract_interval_turns", 8
                             ),

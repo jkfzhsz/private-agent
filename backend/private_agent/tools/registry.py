@@ -57,6 +57,21 @@ class ToolRegistry:
                     seen.add(td.name)
         return result
 
+    def list_tools_for_session(self, whitelist: list[str] | None) -> list[ToolDef]:
+        """M3 §7.5: 按 Skill 工具白名单过滤(AC-3)。
+
+        Args:
+            whitelist: 允许的工具名列表;None 时返回全部(保 M1 行为)。
+
+        Returns:
+            过滤后的 ToolDef 列表(仅含白名单内且已注册的工具)。
+        """
+        all_tools = self.list_tools()
+        if whitelist is None:
+            return all_tools
+        whitelist_set = set(whitelist)
+        return [t for t in all_tools if t.name in whitelist_set]
+
     def get_tool(self, name: str) -> ToolDef | None:
         """按名查找工具。
 

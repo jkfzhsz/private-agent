@@ -73,3 +73,54 @@ def test_all_13_tables_exist():
     actual = _list_tables()
     missing = set(EXPECTED_TABLES) - actual
     assert not missing, f"Missing tables: {missing}. Got: {sorted(actual)}"
+
+
+def _sessions_columns() -> set[str]:
+    """返回 sessions 表的列名集合。"""
+    async def _run() -> set[str]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='sessions'"
+            )
+            return {r["column_name"] for r in rows}
+        finally:
+            await conn.close()
+
+    return asyncio.run(_run())
+
+
+def test_sessions_has_skill_lock_columns():
+    """M3 spec AC-1: sessions 表有 locked_skill_name/version/frozen_hash 三列。"""
+    _setup_schema()
+    cols = _sessions_columns()
+    assert "locked_skill_name" in cols, f"locked_skill_name missing. cols={sorted(cols)}"
+    assert "locked_skill_version" in cols, f"locked_skill_version missing"
+    assert "frozen_hash" in cols, f"frozen_hash missing"
+
+
+def test_sessions_lock_columns_nullable():
+    """M3: 锁定列默认 NULL(不破坏现有数据)。
+
+    INSERT 一行 sessions(不指定锁定列)后 SELECT,验证三列均为 NULL。
+    """
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval("INSERT INTO sessions DEFAULT VALUES RETURNING id")
+            row = await conn.fetchrow(
+                "SELECT locked_skill_name, locked_skill_version, frozen_hash "
+                "FROM sessions WHERE id = $1",
+                session_id,
+            )
+        finally:
+            await conn.close()
+        assert row is not None, "INSERT 的 session 未查到"
+        assert row["locked_skill_name"] is None
+        assert row["locked_skill_version"] is None
+        assert row["frozen_hash"] is None
+
+    asyncio.run(_run())

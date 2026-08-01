@@ -60,6 +60,30 @@ def build_fallback_chain(cfg: dict) -> FallbackChain:
     return FallbackChain(adapters)
 
 
+def build_compress_adapter(cfg: dict) -> ModelAdapter | None:
+    """按 cfg['models']['compress_model'] 构造单 GLM 压缩适配器(蓝图 §4.2,spec AC-7)。
+
+    compress_model 当前仅支持 glm 系列(如 'glm-4-flash')。
+    复用 glm provider 的 base_url + env api_key,但 model_name 用 compress_model 覆盖。
+
+    Returns:
+        GlmAdapter 实例;provider disabled 或无 compress_model 配置时返回 None。
+    """
+    models_cfg = cfg.get("models", {})
+    compress_model = models_cfg.get("compress_model")
+    if not compress_model:
+        return None
+    prov = models_cfg.get("providers", {}).get("glm", {})
+    if not prov.get("enabled", True):
+        return None
+    api_key = os.environ.get("PA_GLM_API_KEY", "test-key")
+    return GlmAdapter(
+        base_url=prov.get("base_url", ""),
+        api_key=api_key,
+        model_name=compress_model,
+    )
+
+
 class ManualRouter:
     """蓝图 §2.9 manual router(MVP 简化版:按名直选,不走 tag 协商)。
 
