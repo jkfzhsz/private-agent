@@ -11,7 +11,8 @@ const isWin = process.platform === "win32";
 const npxCmd = isWin ? "npx.cmd" : "npx";
 
 function run(cmd, args, opts = {}) {
-  const child = spawn(cmd, args, { stdio: "inherit", ...opts });
+  // Windows 下 .cmd 可执行文件必须经 shell 运行, 否则 spawn 抛 EINVAL
+  const child = spawn(cmd, args, { stdio: "inherit", shell: isWin, ...opts });
   return child;
 }
 
@@ -49,16 +50,26 @@ async function main() {
     });
   });
 
-  // 2) 启动 vite dev server
+  // 2) 启动 vite dev server(strictPort: 5173 被占用时报错而非静默换端口)
   console.log("[start] 启动 vite dev server ...");
-  const vite = run(npxCmd, ["vite"], { cwd: root });
+  const vite = run(npxCmd, ["vite", "--port", "5173", "--strictPort"], {
+    cwd: root,
+    env: { ...process.env, NODE_OPTIONS: undefined },
+  });
 
   try {
     await waitForPort("http://localhost:5173");
     console.log("[start] vite 就绪 → 启动 Electron");
     const electron = run(npxCmd, ["electron", "."], {
       cwd: root,
-      env: { ...process.env, VITE_DEV_SERVER_URL: "http://localhost:5173" },
+      env: {
+        ...process.env,
+        VITE_DEV_SERVER_URL: "http://localhost:5173",
+        // 关键: 清除可能导致 electron 以纯 Node 模式运行的变量
+        // (某些环境设置了 ELECTRON_RUN_AS_NODE=1, 会导致 require('electron') 拿不到真实 API)
+        ELECTRON_RUN_AS_NODE: undefined,
+        NODE_OPTIONS: undefined,
+      },
     });
     electron.on("exit", (code) => {
       console.log(`[start] Electron 退出 (code=${code}), 清理 vite ...`);
