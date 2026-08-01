@@ -8,6 +8,8 @@ export interface LoadedSidecarConfig {
   pythonCommand: string;
   moduleName: string;
   port: number;
+  /** backend 目录(用于注入 WORKSPACE 环境变量, 后端 workspace_root=${WORKSPACE}) */
+  workspaceRoot: string;
 }
 
 interface RawConfig {
@@ -24,6 +26,7 @@ export function loadSidecarConfig(configPath?: string): LoadedSidecarConfig {
     pythonCommand: sidecar.python_command ?? detectPythonCommand(resolved),
     moduleName: "private_agent.main",
     port: doc?.server?.http?.port ?? 8765,
+    workspaceRoot: dirname(dirname(resolved)), // backend/config/config.yaml → backend/
   };
 }
 

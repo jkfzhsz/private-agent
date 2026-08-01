@@ -75,6 +75,9 @@ async function bootstrap(): Promise<void> {
     moduleName: config.moduleName,
     port: config.port,
     healthUrl: `http://127.0.0.1:${config.port}/health`,
+    // 注入 WORKSPACE: 后端 config.yaml 的 workspace_root=${WORKSPACE},
+    // 缺失会导致日志/产物目录错位、DB 连接异常
+    env: { WORKSPACE: config.workspaceRoot },
   });
   await sidecarManager.start();
   console.log("[main] Sidecar health OK");
