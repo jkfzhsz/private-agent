@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "description": "Private Agent Electron + React frontend (蓝图 §2.15)",
-  "main": "main/index.ts",
+  "main": "dist-main/index.js",
   "scripts": {
-    "start": "echo \"TODO B2.1: electron .\"",
+    "start": "node scripts/start-dev.mjs",
     "dev": "vite",
-    "build": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run build:main && vite build",
     "preview": "vite preview",
     "test": "vitest run"
   },
