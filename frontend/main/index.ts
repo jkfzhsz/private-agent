@@ -15,10 +15,12 @@ let sidecarManager: SidecarManager | null = null;
 // 导致窗口被销毁并触发 window-all-closed → app.quit
 let mainWindow: BrowserWindow | null = null;
 
-// 无 GPU/远程桌面环境兜底: 禁用硬件加速与 GPU 进程, 避免崩溃导致窗口无法创建
-// (本地桌面应用此设置无感知, 渲染走软件合成)
-app.disableHardwareAcceleration();
-app.commandLine.appendSwitch("disable-gpu");
+// GPU 策略: 默认启用硬件加速(桌面流畅运行液体动效/玻璃模糊的关键)。
+// 仅当显式设置 PA_DISABLE_GPU=1 时禁用(无 GPU/远程桌面/沙箱验证场景)。
+if (process.env.PA_DISABLE_GPU === "1") {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu");
+}
 
 /** 轻量 .env 解析: 将 backend/.env 的 KEY=VALUE 并入 process.env(已存在的优先保留)。 */
 function loadDotEnv(filePath: string): void {

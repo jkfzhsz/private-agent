@@ -101,7 +101,7 @@ function TaskTree({
   onSwitchSession,
 }: {
   currentSessionId: number | null;
-  onSwitchSession: (id: number) => void;
+  onSwitchSession: (id: number, skillName?: string | null) => void;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
@@ -196,7 +196,7 @@ function TaskTree({
           {sessions.map((s) => (
             <button
               key={s.id}
-              onClick={() => onSwitchSession(s.id)}
+              onClick={() => onSwitchSession(s.id, s.locked_skill_name)}
               className="nav-item"
               style={{
                 width: "100%",
@@ -243,7 +243,7 @@ export default function Sidebar({
   active: ViewKey;
   onChange: (v: ViewKey) => void;
   currentSessionId: number | null;
-  onSwitchSession: (id: number) => void;
+  onSwitchSession: (id: number, skillName?: string | null) => void;
   status: "connected" | "disconnected" | "reconnecting";
 }): JSX.Element {
   const [collapsed, setCollapsed] = useState(false);

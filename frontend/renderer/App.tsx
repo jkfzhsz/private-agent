@@ -218,8 +218,8 @@ export default function App(): JSX.Element {
   };
 
   // 任务树: 切换到历史会话 → 改 sessionId, 触发 connect 重连 + 后端 replay
-  const handleSwitchSession = (id: number): void => {
-    if (id === sessionId) return;
+  const handleSwitchSession = (id: number, skillName?: string | null): void => {
+    if (id === sessionId && view === "chat") return;
     // 关闭当前 ws(connect effect 依赖 sessionId 会重连)
     const ws = wsRef.current;
     if (ws) {
@@ -228,11 +228,12 @@ export default function App(): JSX.Element {
       wsRef.current = null;
     }
     setEvents([]);
-    setActiveSkill(null);
+    setActiveSkill(skillName ?? null);
     lastTurnRef.current = 0;
     setRealSessionId(id);
     setSessionId(id);
-    setView("home");
+    // 进入对话视图(恢复该会话的 skill, 若无 skill 则回首页选模式)
+    setView(skillName ? "chat" : "home");
   };
 
   const wsRef = useRef<WebSocket | null>(null);

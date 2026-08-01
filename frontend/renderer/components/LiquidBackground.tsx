@@ -277,6 +277,14 @@ export default function LiquidBackground(): JSX.Element | null {
     };
 
     resize();
+    // 窗口不可见时暂停动画(切走/最小化不空转 CPU, 提升整体流畅度)
+    const onVisibility = (): void => {
+      if (document.hidden) {
+        window.cancelAnimationFrame(raf);
+      } else if (running) {
+        raf = window.requestAnimationFrame(frame);
+      }
+    };
     if (reduced) {
       for (const blob of blobs) drawWavyBlob(blob, blob.radius, 0);
       drawBottomWaves(0);
@@ -285,6 +293,7 @@ export default function LiquidBackground(): JSX.Element | null {
       document.addEventListener("click", onClick);
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseleave", onLeave);
+      document.addEventListener("visibilitychange", onVisibility);
     }
     window.addEventListener("resize", resize);
 
@@ -295,6 +304,7 @@ export default function LiquidBackground(): JSX.Element | null {
       document.removeEventListener("click", onClick);
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseleave", onLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
