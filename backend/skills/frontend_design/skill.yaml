@@ -1,0 +1,40 @@
+name: frontend_design
+version: "1.0.0"
+description: "前端设计场景助手 — HTML/React/Vue 代码生成 + 设计系统 RAG"
+scenario: frontend_design
+author: "private-agent"
+created_at: "2026-08-01"
+enabled: true
+
+dependencies:
+  tools:
+    - name: code_execution
+      safety_level_override: elevated
+    - name: datetime
+      safety_level_override: safe
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+    - name: search_knowledge
+      safety_level_override: safe
+    - name: web_search
+      safety_level_override: safe
+
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 20
+
+knowledge_base:
+  enabled: true
+  scenario: frontend_design
+  auto_retrieve: false
+
+examples:
+  enabled: true
+  max_examples: 2
+  inject_to: frozen_zone
+
+max_frozen_token: 4000
