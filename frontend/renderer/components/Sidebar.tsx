@@ -10,6 +10,7 @@ export interface SessionItem {
   status: string;
   locked_skill_name: string | null;
   last_turn: number;
+  user_msg_count?: number;
   updated_at: string | null;
 }
 
@@ -128,6 +129,15 @@ function TaskTree({
     }
   }, [expanded, sessions.length, loading, load]);
 
+  const deleteSession = async (id: number): Promise<void> => {
+    try {
+      await fetch(`http://127.0.0.1:8765/admin/sessions/${id}`, { method: "DELETE" });
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+    } catch (e) {
+      setError(`删除失败: ${String(e)}`);
+    }
+  };
+
   return (
     <div style={{ marginTop: 8 }}>
       <button
@@ -194,14 +204,19 @@ function TaskTree({
             </div>
           )}
           {sessions.map((s) => (
-            <button
+            <div
               key={s.id}
-              onClick={() => onSwitchSession(s.id, s.locked_skill_name)}
               className="nav-item"
+              onClick={() => onSwitchSession(s.id, s.locked_skill_name)}
               style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
                 width: "100%",
                 padding: "6px 8px",
                 fontSize: 12,
+                borderRadius: 6,
+                cursor: "pointer",
                 background:
                   currentSessionId === s.id
                     ? "rgba(255,255,255,0.8)"
@@ -212,20 +227,44 @@ function TaskTree({
                     : "var(--text-secondary)",
                 fontWeight: currentSessionId === s.id ? 600 : 400,
               }}
-              title={`turn ${s.last_turn} · ${s.locked_skill_name ?? "无 skill"}`}
+              title={`#${s.id} · ${s.last_turn} 轮 · ${s.user_msg_count ?? 0} 条用户消息`}
             >
               <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, flex: 1, minWidth: 0 }}>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>
-                  #{s.id}
-                  {s.last_turn > 0 ? ` · ${s.last_turn} 轮` : ""}
+                  {s.title || `#${s.id}`}
                 </span>
-                {s.locked_skill_name && (
-                  <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
-                    {s.locked_skill_name}
-                  </span>
-                )}
+                <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
+                  {s.locked_skill_name ?? "无 skill"}
+                  {s.last_turn > 0 ? ` · ${s.last_turn} 轮` : ""}
+                  {s.user_msg_count ? ` · ${s.user_msg_count} 条` : ""}
+                </span>
               </span>
-            </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`删除会话 #${s.id}?该会话的所有消息也会被删除(不可恢复)`)) {
+                    void deleteSession(s.id);
+                  }
+                }}
+                title="删除此会话"
+                style={{
+                  flexShrink: 0,
+                  width: 22, height: 22,
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--text-tertiary)",
+                  fontSize: 14,
+                  cursor: "pointer",
+                  borderRadius: 4,
+                  padding: 0,
+                  lineHeight: 1,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--danger-text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-tertiary)"; }}
+              >
+                ×
+              </button>
+            </div>
           ))}
         </div>
       )}

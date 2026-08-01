@@ -654,7 +654,19 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
                        COALESCE(
                            (SELECT MAX(turn) FROM messages WHERE session_id = s.id),
                            0
-                       ) AS last_turn
+                       ) AS last_turn,
+                       COALESCE(
+                           (SELECT msg_count FROM (
+                               SELECT COUNT(*) AS msg_count
+                               FROM messages m
+                               WHERE m.session_id = s.id AND m.role = 'user'
+                           ) t), 0
+                       ) AS user_msg_count,
+                       (
+                           SELECT content FROM messages m
+                           WHERE m.session_id = s.id AND m.role = 'user'
+                           ORDER BY m.id ASC LIMIT 1
+                       ) AS first_user_content
                 FROM sessions s
                 WHERE NOT $2::bool
                    OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
@@ -664,15 +676,21 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
                 min(max(int(limit), 1), 200),
                 bool(has_messages),
             )
-            return [
-                {
+            result = []
+            for r in rows:
+                title = r["title"] or r["summary"]
+                if not title:
+                    first = r["first_user_content"] or ""
+                    title = first[:30].replace("\n", " ") if first else f"#{r['id']}"
+                result.append({
                     "id": r["id"],
-                    "title": r["title"],
+                    "title": title,
                     "status": r["status"],
                     "model_id": r["model_id"],
                     "summary": r["summary"],
                     "locked_skill_name": r["locked_skill_name"],
                     "locked_skill_version": r["locked_skill_version"],
+                    "user_msg_count": r["user_msg_count"],
                     "created_at": (
                         r["created_at"].isoformat() if r["created_at"] else None
                     ),
@@ -680,15 +698,42 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
                         r["updated_at"].isoformat() if r["updated_at"] else None
                     ),
                     "last_turn": r["last_turn"],
-                }
-                for r in rows
-            ]
+                })
+            return result
         finally:
             await conn.close()
     except Exception:
         return JSONResponse(
             status_code=503,
             content={"error": "sessions_list_failed"},
+        )
+
+
+@router.delete("/sessions/{session_id}", response_model=None)
+async def delete_session(session_id: int):
+    """删除会话及其所有 messages(messages 表 FK ON DELETE CASCADE)。
+
+    用于清理历史任务树里的测试/遗留 session, 让任务树只保留真实对话。
+    """
+    try:
+        conn = await db.connect()
+        try:
+            # 不允许删当前活跃会话(简单保护, 防止误删正在用的会话)
+            row = await conn.fetchrow(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+        finally:
+            await conn.close()
+        return {"ok": True, "id": session_id}
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_delete_failed"},
         )
 
 
