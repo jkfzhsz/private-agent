@@ -87,6 +87,33 @@ async def run_ttl_cleanup(
     }
 
 
+async def cleanup_old_eval_runs(
+    conn: asyncpg.Connection,
+    *,
+    keep_recent: int = 100,
+) -> int:
+    """删除 eval_runs 表中超出 keep_recent 条数的历史记录(蓝图 §8.16)。
+
+    按 started_at DESC 排序保留最近 keep_recent 条,其余物理删除。
+    eval_runs 表无 TTL 字段,采用条数阈值策略(M4 spec AC-10)。
+
+    Args:
+        conn: Postgres 连接。
+        keep_recent: 保留最近多少条(默认 100)。
+
+    Returns:
+        删除的行数。
+    """
+    result = await conn.execute(
+        "DELETE FROM eval_runs "
+        "WHERE id NOT IN ("
+        "  SELECT id FROM eval_runs ORDER BY started_at DESC LIMIT $1"
+        ")",
+        keep_recent,
+    )
+    return _parse_row_count(result)
+
+
 async def _ttl_job(
     react_events_retention_days: int,
     messages_archive_retention_days: int,

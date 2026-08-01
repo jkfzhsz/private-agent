@@ -32,3 +32,12 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await conn.execute(
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS frozen_hash VARCHAR(64)"
     )
+    # M4 §8.4 eval_datasets.split 列(老部署补列,新部署 schema.sql 已含)
+    await conn.execute(
+        "ALTER TABLE eval_datasets ADD COLUMN IF NOT EXISTS "
+        "split VARCHAR(10) NOT NULL DEFAULT 'test' CHECK (split IN ('train', 'test'))"
+    )
+    # M4 §8.11/§8.16 eval_runs.sample_results 列(老部署补列,新部署 schema.sql 已含)
+    await conn.execute(
+        "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS sample_results JSONB"
+    )

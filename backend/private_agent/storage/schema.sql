@@ -167,6 +167,7 @@ CREATE TABLE eval_datasets (
     input                   TEXT NOT NULL,
     expected_react_trace    JSONB NOT NULL,
     expected_output         TEXT,
+    split                   VARCHAR(10) NOT NULL DEFAULT 'test' CHECK (split IN ('train', 'test')),
     created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- JSONB 结构强约束 (§8.3)
@@ -192,6 +193,7 @@ CREATE TABLE eval_runs (
     variant         VARCHAR(20),                 -- A/B 测试预留 (V2)
     mock_enabled    BOOLEAN DEFAULT FALSE,
     metrics         JSONB,
+    sample_results  JSONB,                       -- §8.16 list[{sample_id, metrics:{task_completion:{completion_rate}}}]
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at     TIMESTAMPTZ
 );

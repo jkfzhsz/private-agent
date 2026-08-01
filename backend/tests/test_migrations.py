@@ -11,6 +11,7 @@ import asyncio
 import os
 
 import asyncpg
+import pytest
 
 # 蓝图 §9.14 全表清单(13 张)
 EXPECTED_TABLES = [
@@ -122,5 +123,122 @@ def test_sessions_lock_columns_nullable():
         assert row["locked_skill_name"] is None
         assert row["locked_skill_version"] is None
         assert row["frozen_hash"] is None
+
+    asyncio.run(_run())
+
+
+# ── M4 §8.4 eval_datasets.split 列 ─────────────────────────────────────
+
+
+def _eval_datasets_columns() -> set[str]:
+    """返回 eval_datasets 表的列名集合。"""
+    async def _run() -> set[str]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='eval_datasets'"
+            )
+            return {r["column_name"] for r in rows}
+        finally:
+            await conn.close()
+
+    return asyncio.run(_run())
+
+
+def test_eval_datasets_has_split_column():
+    """M4 AC-1: eval_datasets 表含 split VARCHAR(10) NOT NULL 列。"""
+    _setup_schema()
+    cols = _eval_datasets_columns()
+    assert "split" in cols, f"split missing. cols={sorted(cols)}"
+
+
+def test_eval_datasets_split_defaults_to_test():
+    """M4 AC-1: split 列默认 'test'(不指定 split 入库后查得 'test')。"""
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            await conn.execute(
+                "INSERT INTO eval_datasets "
+                "(sample_id, scenario, skill_name, skill_version, case_type, difficulty, "
+                " input, expected_react_trace) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                "m4-default-test", "office", "office", "1.0.0",
+                "normal", "easy", "input",
+                '{"tool_calls": [], "expected_output_contains": []}',
+            )
+            row = await conn.fetchrow(
+                "SELECT split FROM eval_datasets WHERE sample_id = $1",
+                "m4-default-test",
+            )
+        finally:
+            await conn.close()
+        assert row is not None
+        assert row["split"] == "test"
+
+    asyncio.run(_run())
+
+
+def test_eval_datasets_split_check_rejects_invalid():
+    """M4 AC-1: split 列 CHECK 约束拒绝 'invalid' 值。"""
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(
+                    "INSERT INTO eval_datasets "
+                    "(sample_id, scenario, skill_name, skill_version, case_type, difficulty, "
+                    " input, expected_react_trace, split) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    "m4-invalid-test", "office", "office", "1.0.0",
+                    "normal", "easy", "input",
+                    '{"tool_calls": [], "expected_output_contains": []}',
+                    "invalid",
+                )
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_eval_datasets_split_accepts_train_and_test():
+    """M4 AC-1: split 列接受 'train' 与 'test' 两个合法值。"""
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            await conn.execute(
+                "INSERT INTO eval_datasets "
+                "(sample_id, scenario, skill_name, skill_version, case_type, difficulty, "
+                " input, expected_react_trace, split) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                "m4-train", "office", "office", "1.0.0",
+                "normal", "easy", "input",
+                '{"tool_calls": [], "expected_output_contains": []}',
+                "train",
+            )
+            await conn.execute(
+                "INSERT INTO eval_datasets "
+                "(sample_id, scenario, skill_name, skill_version, case_type, difficulty, "
+                " input, expected_react_trace, split) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                "m4-test", "office", "office", "1.0.0",
+                "normal", "easy", "input",
+                '{"tool_calls": [], "expected_output_contains": []}',
+                "test",
+            )
+            rows = await conn.fetch(
+                "SELECT split FROM eval_datasets "
+                "WHERE sample_id IN ('m4-train', 'm4-test') ORDER BY sample_id"
+            )
+        finally:
+            await conn.close()
+        assert len(rows) == 2
+        assert {r["split"] for r in rows} == {"train", "test"}
 
     asyncio.run(_run())

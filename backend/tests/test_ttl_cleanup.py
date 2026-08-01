@@ -188,3 +188,75 @@ def test_run_ttl_cleanup_runs_both_and_returns_summary():
     summary = asyncio.run(_run())
     assert summary["react_events_deleted"] == 1
     assert summary["messages_archive_deleted"] == 1
+
+
+# ── M4 §8.16 eval_runs TTL 清理 ────────────────────────────────────────
+
+
+def test_cleanup_old_eval_runs_keeps_recent_deletes_old():
+    """AC-10: cleanup_old_eval_runs 保留最近 100 条,删除超出部分。
+
+    插入 105 条 eval_runs,keep_recent=100,应删除 5 条,剩余 100 条。
+    """
+    _setup_schema()
+
+    async def _run() -> tuple[int, int]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            # 插入 105 条 eval_runs(各字段均合法)
+            for i in range(105):
+                await conn.execute(
+                    "INSERT INTO eval_runs (skill_name, skill_version, model_id, "
+                    "dataset_version, eval_mode, mock_enabled) "
+                    "VALUES ($1, $2, $3, $4, $5, $6)",
+                    "office", "1.0.0", "glm-4-flash", "v1", "offline", False,
+                )
+            deleted = await ttl_cleanup.cleanup_old_eval_runs(conn, keep_recent=100)
+            remaining = await conn.fetchval("SELECT COUNT(*) FROM eval_runs")
+            return deleted, remaining
+        finally:
+            await conn.close()
+
+    deleted, remaining = asyncio.run(_run())
+    assert deleted == 5, f"应删除 5 条旧记录,实际删除 {deleted}"
+    assert remaining == 100, f"应保留 100 条,实际剩余 {remaining}"
+
+
+def test_cleanup_old_eval_runs_zero_when_under_threshold():
+    """AC-10: eval_runs 数量 < keep_recent 时返回 0,不删除。"""
+    _setup_schema()
+
+    async def _run() -> tuple[int, int]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            for i in range(10):
+                await conn.execute(
+                    "INSERT INTO eval_runs (skill_name, skill_version, model_id, "
+                    "dataset_version, eval_mode, mock_enabled) "
+                    "VALUES ($1, $2, $3, $4, $5, $6)",
+                    "office", "1.0.0", "glm-4-flash", "v1", "offline", False,
+                )
+            deleted = await ttl_cleanup.cleanup_old_eval_runs(conn, keep_recent=100)
+            remaining = await conn.fetchval("SELECT COUNT(*) FROM eval_runs")
+            return deleted, remaining
+        finally:
+            await conn.close()
+
+    deleted, remaining = asyncio.run(_run())
+    assert deleted == 0, f"应删除 0 条,实际删除 {deleted}"
+    assert remaining == 10, f"应保留 10 条,实际剩余 {remaining}"
+
+
+def test_cleanup_old_eval_runs_empty_table_returns_zero():
+    """AC-10: 空表时返回 0。"""
+    _setup_schema()
+
+    async def _run() -> int:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            return await ttl_cleanup.cleanup_old_eval_runs(conn, keep_recent=100)
+        finally:
+            await conn.close()
+
+    deleted = asyncio.run(_run())
+    assert deleted == 0
