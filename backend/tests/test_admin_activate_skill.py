@@ -2,7 +2,7 @@
 
 Source: plan/m3-skills-office step 19, spec AC-1/4/5
 - 200 成功: {locked_version, frozen_hash}
-- 404 session 不存在
+- session 不存在时懒创建(与 WS user_message 一致)
 - 409 锁定冲突 (SkillSwitchNotAllowedError)
 - 400 校验失败 (SkillValidationError)
 - 404 skill 不存在 (SkillNotFoundError)
@@ -23,15 +23,19 @@ def _make_app() -> FastAPI:
 
 
 class _FakeConn:
-    """mock asyncpg.Connection,只实现 fetchrow 用于 session 存在检查。"""
+    """mock asyncpg.Connection:fetchrow 用于 session 存在检查,execute 记录懒创建。"""
 
     def __init__(self, session_exists: bool = True):
         self._session_exists = session_exists
+        self.executed: list[tuple] = []
 
     async def fetchrow(self, query, *args):
         if "FROM sessions WHERE id" in query:
             return {"id": args[0]} if self._session_exists else None
         return None
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
 
     async def close(self):
         pass
@@ -61,6 +65,7 @@ def _patch_deps(monkeypatch, session_exists=True, skill_mgr_result=None, skill_m
 
     fake_mgr = _FakeSkillManager(result=skill_mgr_result, exc=skill_mgr_exc)
     monkeypatch.setattr(admin, "_build_skill_manager", lambda cfg: fake_mgr)
+    return fake_conn
 
 
 class TestActivateSkillEndpoint:
@@ -88,16 +93,28 @@ class TestActivateSkillEndpoint:
         assert body["locked_version"] == "1.0.0"
         assert body["frozen_hash"] == "a" * 64
 
-    def test_activate_session_not_found_returns_404(self, monkeypatch):
-        """404 session 不存在。"""
-        _patch_deps(monkeypatch, session_exists=False)
+    def test_activate_lazily_creates_session(self, monkeypatch):
+        """session 不存在时懒创建(与 WS user_message 一致),激活成功而非 404。"""
+        fake_conn = _patch_deps(
+            monkeypatch,
+            session_exists=False,
+            skill_mgr_result={
+                "locked_version": "1.0.0",
+                "frozen_hash": "b" * 64,
+                "filtered_tools": [],
+                "system_prompt": "test",
+            },
+        )
         client = TestClient(_make_app())
         resp = client.post(
             "/admin/sessions/999/activate",
             json={"skill_name": "office"},
         )
-        assert resp.status_code == 404
-        assert resp.json()["detail"] == "session_not_found"
+        assert resp.status_code == 200
+        assert resp.json()["locked_version"] == "1.0.0"
+        # 懒创建 INSERT 已执行
+        inserts = [q for q, _ in fake_conn.executed if "INSERT INTO sessions" in q]
+        assert len(inserts) == 1
 
     def test_activate_lock_conflict_returns_409(self, monkeypatch):
         """409 已锁定不同 skill → SkillSwitchNotAllowedError。"""

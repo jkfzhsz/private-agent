@@ -133,6 +133,51 @@ def test_deepseek_adapter_chat_parses_tool_calls():
     assert result.tool_calls[0]["function"]["name"] == "echo"
 
 
+def test_deepseek_adapter_chat_falls_back_to_reasoning_content():
+    """纯推理模型(deepseek-v4-pro)content 为空时回落 reasoning_content。"""
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "思维链...最终回复:收到",
+                }
+            }
+        ]
+    }
+    client = _make_mock_client(_openai_ok_handler(payload), "http://ds.test")
+    adapter = DeepSeekAdapter(base_url="http://ds.test", api_key="k", client=client)
+
+    result = asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
+
+    assert result.used_provider == "deepseek"
+    assert result.content == "思维链...最终回复:收到"
+
+
+def test_glm_adapter_chat_ignores_reasoning_when_content_present():
+    """content 非空时 reasoning_content 不参与结果(正常模型不受影响)。"""
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "正常回复",
+                    "reasoning_content": "不应被使用",
+                }
+            }
+        ]
+    }
+    client = _make_mock_client(_openai_ok_handler(payload), "http://glm.test")
+    from private_agent.models.adapters.glm import GlmAdapter
+
+    adapter = GlmAdapter(base_url="http://glm.test", api_key="k", client=client)
+
+    result = asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
+
+    assert result.content == "正常回复"
+
+
 def test_kimi_adapter_chat_returns_content():
     """kimi mock 200 → ChatResult.content 非空。"""
     payload = {

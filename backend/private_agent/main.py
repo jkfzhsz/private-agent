@@ -8,6 +8,7 @@ import logging
 import os
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 from private_agent.api import admin, eval, files
 from private_agent.config import loader
@@ -20,6 +21,14 @@ from private_agent.observability.logging import setup_logger
 from private_agent.storage import db, ws_offset
 
 app = FastAPI(title="Private Agent Sidecar", version="0.1.0")
+# 浏览器模式(vite dev)跨域访问 8765:允许 localhost 任意端口来源
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(admin.router)
 app.include_router(eval.router)
 app.include_router(files.router)
@@ -199,6 +208,16 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     cfg = loader.load_config()
                     conn = await db.connect()
                     try:
+                        # 会话懒创建(蓝图 §2.10):WS 收到首条 user_message 时,
+                        # sessions 无该行则插入,保证 ensure_initial 外键不失败
+                        exists = await conn.fetchval(
+                            "SELECT 1 FROM sessions WHERE id=$1", session_id
+                        )
+                        if exists is None:
+                            await conn.execute(
+                                "INSERT INTO sessions (id, title) VALUES ($1, $2)",
+                                session_id, f"session-{session_id}",
+                            )
                         tools = await _get_tools(cfg, session_id, conn)
                         # 构造 MemoryManager(蓝图 §4.2-§4.5)
                         memories_repo = MemoriesRepo(conn)

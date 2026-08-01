@@ -72,6 +72,8 @@ class ReactLoop:
         self._context_manager = context_manager
         self._adapter = adapter
         self._tools = tools
+        # adapter.chat 期望 OpenAI tools schema dict(非 ToolDef 对象)
+        self._tool_schemas = [t.to_openai_schema() for t in tools]
         self._conn = conn
         self._max_iterations = max_iterations
         self._turn = 0
@@ -165,7 +167,9 @@ class ReactLoop:
 
             # 调用模型
             try:
-                result: ChatResult = await self._adapter.chat(messages, self._tools)
+                result: ChatResult = await self._adapter.chat(
+                    messages, self._tool_schemas
+                )
             except AllProvidersFailedError as e:
                 await self._emit_event(
                     "error",

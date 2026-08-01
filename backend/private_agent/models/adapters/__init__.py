@@ -79,6 +79,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
         choices = data.get("choices") or []
         message = choices[0]["message"] if choices else {}
         content = message.get("content") or ""
+        # 纯推理模型(如 deepseek-v4-pro)content 恒为空,输出在 reasoning_content
+        if not content:
+            content = message.get("reasoning_content") or ""
         tool_calls = message.get("tool_calls") or []
         # tool_calls 透传 OpenAI 结构:{id, type, function:{name, arguments}}
         return ChatResult(

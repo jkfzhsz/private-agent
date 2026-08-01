@@ -264,7 +264,7 @@ async def activate_skill(session_id: int, body: ActivateSkillRequest):
 
     Returns:
         200: {"locked_version": str, "frozen_hash": str}
-        404: {"detail": "session_not_found" | "skill_not_found"}
+        404: {"detail": "skill_not_found"}
         409: {"detail": "skill_switch_not_allowed"}
         400: {"detail": "skill_validation_failed"}
     """
@@ -277,13 +277,15 @@ async def activate_skill(session_id: int, body: ActivateSkillRequest):
     try:
         conn = await db.connect()
         try:
-            # 验证会话存在
+            # 会话懒创建(与 WS user_message 一致):前端随机/首次 session_id
+            # 激活时 sessions 无该行则插入,避免 session_not_found
             row = await conn.fetchrow(
                 "SELECT id FROM sessions WHERE id = $1", session_id,
             )
             if row is None:
-                raise HTTPException(
-                    status_code=404, detail="session_not_found"
+                await conn.execute(
+                    "INSERT INTO sessions (id, title) VALUES ($1, $2)",
+                    session_id, f"session-{session_id}",
                 )
             cfg = loader.load_config()
             mgr = _build_skill_manager(cfg)
