@@ -1,17 +1,14 @@
-"""M1 Phase 2 Behavior 2 - models/adapters/{glm,deepseek,kimi}.py 三家 mock 适配器。
+"""M1 Phase 2 Behavior 2 / V2 P3 - OpenAICompatibleAdapter 通用适配器测试。
 
-Source: plan/m1-react-loop step 8 (蓝图 §2.7)
-- 用 httpx.MockTransport mock HTTP,不依赖真实 API
-- OpenAI 兼容响应:choices[0].message.content + tool_calls
+V2 P3 去预置化: 删除 glm/deepseek/kimi 专用 adapter 类, 统一 OpenAICompatibleAdapter
+(动态注册时传 provider_name)。本文件用通用类 + provider_name 覆盖原三家行为测试。
 """
 import asyncio
 import json
 
 import httpx
 
-from private_agent.models.adapters.deepseek import DeepSeekAdapter
-from private_agent.models.adapters.glm import GlmAdapter
-from private_agent.models.adapters.kimi import KimiAdapter
+from private_agent.models.adapters import OpenAICompatibleAdapter
 from private_agent.models.base import (
     ChatResult,
     ModelAdapter,
@@ -25,28 +22,20 @@ from private_agent.models.base import (
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_glm_adapter_has_correct_capability():
-    """GlmAdapter.capability == (streaming=T, function_calling=T, vision=F, json_mode=T)。"""
-    adapter = GlmAdapter(base_url="http://glm.test", api_key="k")
+def test_openai_adapter_has_correct_capability():
+    """OpenAICompatibleAdapter.capability == (streaming=T, function_calling=T)。"""
+    adapter = OpenAICompatibleAdapter(base_url="http://glm.test", api_key="k")
     assert adapter.capability == ModelCapability(
-        streaming=True, function_calling=True, vision=False, json_mode=True
+        streaming=True, function_calling=True, vision=False, json_mode=False
     )
 
 
-def test_deepseek_adapter_has_correct_capability():
-    """DeepSeekAdapter.capability 同 glm。"""
-    adapter = DeepSeekAdapter(base_url="http://ds.test", api_key="k")
-    assert adapter.capability == ModelCapability(
-        streaming=True, function_calling=True, vision=False, json_mode=True
+def test_provider_name_override():
+    """动态注册传入 provider_name → 覆盖类默认值。"""
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://x.test", api_key="k", provider_name="my-llm"
     )
-
-
-def test_kimi_adapter_has_correct_capability():
-    """KimiAdapter.capability == (streaming=T, function_calling=T, vision=T, json_mode=F)。"""
-    adapter = KimiAdapter(base_url="http://kimi.test", api_key="k")
-    assert adapter.capability == ModelCapability(
-        streaming=True, function_calling=True, vision=True, json_mode=False
-    )
+    assert adapter.provider_name == "my-llm"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -67,42 +56,46 @@ def _openai_ok_handler(payload: dict):
     return handler
 
 
-def test_glm_adapter_chat_returns_chat_result_with_provider_name():
-    """glm mock 200 → ChatResult.used_provider='glm'。"""
+def test_adapter_chat_returns_chat_result_with_provider_name():
+    """mock 200 → ChatResult.used_provider=provider_name。"""
     payload = {
         "choices": [
-            {"message": {"role": "assistant", "content": "hello from glm"}}
+            {"message": {"role": "assistant", "content": "hello from model"}}
         ]
     }
-    client = _make_mock_client(_openai_ok_handler(payload), "http://glm.test")
-    adapter = GlmAdapter(base_url="http://glm.test", api_key="k", client=client)
+    client = _make_mock_client(_openai_ok_handler(payload), "http://m.test")
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://m.test", api_key="k", client=client, provider_name="m"
+    )
 
     result = asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
 
     assert isinstance(result, ChatResult)
-    assert result.used_provider == "glm"
-    assert result.content == "hello from glm"
+    assert result.used_provider == "m"
+    assert result.content == "hello from model"
 
 
-def test_glm_adapter_chat_503_raises_provider_error():
-    """glm mock 503 → 抛 ProviderError(provider='glm')。"""
+def test_adapter_chat_503_raises_provider_error():
+    """mock 503 → 抛 ProviderError(provider=provider_name)。"""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": "service unavailable"})
 
-    client = _make_mock_client(handler, "http://glm.test")
-    adapter = GlmAdapter(base_url="http://glm.test", api_key="k", client=client)
+    client = _make_mock_client(handler, "http://m.test")
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://m.test", api_key="k", client=client, provider_name="m"
+    )
 
     raised = False
     try:
         asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
     except ProviderError as e:
         raised = True
-        assert e.provider == "glm"
+        assert e.provider == "m"
     assert raised, "503 应抛 ProviderError"
 
 
-def test_deepseek_adapter_chat_parses_tool_calls():
-    """deepseek mock 返回含 tool_calls → ChatResult.tool_calls 非空。"""
+def test_adapter_chat_parses_tool_calls():
+    """mock 返回含 tool_calls → ChatResult.tool_calls 非空。"""
     payload = {
         "choices": [
             {
@@ -123,18 +116,20 @@ def test_deepseek_adapter_chat_parses_tool_calls():
             }
         ]
     }
-    client = _make_mock_client(_openai_ok_handler(payload), "http://ds.test")
-    adapter = DeepSeekAdapter(base_url="http://ds.test", api_key="k", client=client)
+    client = _make_mock_client(_openai_ok_handler(payload), "http://m.test")
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://m.test", api_key="k", client=client, provider_name="m"
+    )
 
     result = asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
 
-    assert result.used_provider == "deepseek"
+    assert result.used_provider == "m"
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0]["function"]["name"] == "echo"
 
 
-def test_deepseek_adapter_chat_falls_back_to_reasoning_content():
-    """纯推理模型(deepseek-v4-pro)content 为空时回落 reasoning_content。"""
+def test_adapter_chat_falls_back_to_reasoning_content():
+    """推理模型 content 为空时回落 reasoning_content。"""
     payload = {
         "choices": [
             {
@@ -146,16 +141,18 @@ def test_deepseek_adapter_chat_falls_back_to_reasoning_content():
             }
         ]
     }
-    client = _make_mock_client(_openai_ok_handler(payload), "http://ds.test")
-    adapter = DeepSeekAdapter(base_url="http://ds.test", api_key="k", client=client)
+    client = _make_mock_client(_openai_ok_handler(payload), "http://m.test")
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://m.test", api_key="k", client=client, provider_name="m"
+    )
 
     result = asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
 
-    assert result.used_provider == "deepseek"
+    assert result.used_provider == "m"
     assert result.content == "思维链...最终回复:收到"
 
 
-def test_glm_adapter_chat_ignores_reasoning_when_content_present():
+def test_adapter_chat_ignores_reasoning_when_content_present():
     """content 非空时 reasoning_content 不参与结果(正常模型不受影响)。"""
     payload = {
         "choices": [
@@ -168,44 +165,26 @@ def test_glm_adapter_chat_ignores_reasoning_when_content_present():
             }
         ]
     }
-    client = _make_mock_client(_openai_ok_handler(payload), "http://glm.test")
-    from private_agent.models.adapters.glm import GlmAdapter
-
-    adapter = GlmAdapter(base_url="http://glm.test", api_key="k", client=client)
+    client = _make_mock_client(_openai_ok_handler(payload), "http://m.test")
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://m.test", api_key="k", client=client, provider_name="m"
+    )
 
     result = asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
 
     assert result.content == "正常回复"
 
 
-def test_kimi_adapter_chat_returns_content():
-    """kimi mock 200 → ChatResult.content 非空。"""
-    payload = {
-        "choices": [
-            {"message": {"role": "assistant", "content": "kimi says hi"}}
-        ]
-    }
-    client = _make_mock_client(_openai_ok_handler(payload), "http://kimi.test")
-    adapter = KimiAdapter(base_url="http://kimi.test", api_key="k", client=client)
-
-    result = asyncio.run(adapter.chat(messages=[{"role": "user", "content": "hi"}]))
-
-    assert result.used_provider == "kimi"
-    assert result.content == "kimi says hi"
-
-
 def test_adapter_uses_injected_client():
-    """适配器构造函数接受 client=None,默认用 httpx.AsyncClient;测试可注入 mock client。"""
-    # 默认构造不报错(用真实 AsyncClient,不发起请求)
-    default_adapter = GlmAdapter(base_url="http://glm.test", api_key="k")
+    """构造函数接受 client=None,默认用 httpx.AsyncClient;测试可注入 mock client。"""
+    default_adapter = OpenAICompatibleAdapter(base_url="http://m.test", api_key="k")
     assert default_adapter.capability is not None
     assert isinstance(default_adapter, ModelAdapter)
 
-    # 注入 mock client
     payload = {"choices": [{"message": {"role": "assistant", "content": "x"}}]}
-    mock_client = _make_mock_client(_openai_ok_handler(payload), "http://glm.test")
-    injected_adapter = GlmAdapter(
-        base_url="http://glm.test", api_key="k", client=mock_client
+    mock_client = _make_mock_client(_openai_ok_handler(payload), "http://m.test")
+    injected_adapter = OpenAICompatibleAdapter(
+        base_url="http://m.test", api_key="k", client=mock_client
     )
     result = asyncio.run(injected_adapter.chat(messages=[{"role": "user", "content": "hi"}]))
     assert result.content == "x"

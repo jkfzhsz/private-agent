@@ -83,7 +83,8 @@ export default function SettingsView(): JSX.Element {
           ))}
           {providers.length === 0 && (
             <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
-              当前未配置模型 provider
+              ⚠️ 尚未配置任何模型。<b>在下方向"添加模型"填入你的模型服务即可开始对话</b>
+              (任意 OpenAI 兼容服务: 名称 + Base URL + 模型名 + API Key)
             </div>
           )}
           <ProviderAddForm onAdded={load} />

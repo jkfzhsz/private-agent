@@ -43,25 +43,17 @@ server:
 
 # ------------------------------------------------------------------------------
 # 3. 模型配置(2.7、2.9、2.12)
+#
+# V2 P3 去预置化: providers 不预置任何"指名道姓"的模型, 全量从设置页
+# /config_runtime 管理(用户有什么模型就接什么, 统一 OpenAI 兼容协议)。
+# 示例(从设置页添加, 勿在此硬编码):
+#   providers:
+#     my-llm:
+#       base_url: "https://api.example.com/v1"
+#       model_name: "my-model-1"
+#       enabled: true
 # ------------------------------------------------------------------------------
 models:
-  providers:
-    glm:
-      base_url: "https://open.bigmodel.cn/api/paas/v4"
-      model_name: "glm-4"
-      enabled: true  # [runtime]
-    deepseek:
-      base_url: "https://tokenrhythm.studio/v1"
-      model_name: "deepseek-v4-pro"
-      enabled: true  # [runtime]
-    agnes:
-      base_url: "待确认"
-      model_name: "待确认"
-      enabled: false  # [runtime]
-    kimi:
-      base_url: "https://api.moonshot.cn/v1"
-      model_name: "moonshot-v1-8k"
-      enabled: true  # [runtime]
   # 对话参数上限(设置页可手工调整, runtime > yaml)
   limits:
     max_input_tokens: 8192   # 最大输入(上下文) tokens
@@ -70,9 +62,11 @@ models:
 
   router:
     type: "manual"                         # MVP: manual / V2: tag_based [runtime]
-    fallback_chain: ["glm", "deepseek", "kimi"]
+    # fallback_chain 由设置页添加 provider 时自动维护(runtime), 不在 yaml 写死
 
-  compress_model: "glm-4-flash"            # [runtime]
+  # 压缩/评测模型按"模型名"匹配 providers(设置页配置的 model_name),
+  # 不配置则压缩/评测功能优雅降级(不生效不崩溃)。
+  compress_model: ""                       # [runtime]
 
 # ------------------------------------------------------------------------------
 # 4. 上下文工程配置(3.5、3.7、3.9、3.10、3.13)
@@ -123,7 +117,8 @@ kb:
   embedding:
     local_default: "BAAI/bge-m3"
     local_light: "BAAI/bge-small-zh-v1.5"  # [runtime]
-    fallback_cloud: "glm-embedding"
+    # V2 P3 去预置化: 云端 embedding 兜底按模型名匹配 providers, 空则禁用
+    fallback_cloud: ""
     auto_switch_memory_gb: 6  # [runtime]
     lru_cache_size: 512
   hnsw:
@@ -213,7 +208,8 @@ skills:
 # 10. 评估配置(8.8、8.9)
 # ------------------------------------------------------------------------------
 eval:
-  judge_model: "glm-4-flash"  # [runtime]
+  # V2 P3 去预置化: judge 模型按模型名匹配 providers, 空则评测降级
+  judge_model: ""  # [runtime]
   judge_prompt_dir: "./config/judge_prompts"
   datasets_per_scenario: 20  # [runtime]
   regression_subset: 5  # [runtime]

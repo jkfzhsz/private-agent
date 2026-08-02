@@ -22,26 +22,43 @@ from private_agent.models.base import ChatResult, ProviderError
 
 
 def test_build_judge_adapter():
-    """AC-6: cfg 读 judge_model 构造 GlmAdapter,model_name=glm-4-flash。"""
+    """AC-6(V2 P3): judge_model 按模型名匹配 provider 构造 adapter。"""
     cfg = {
-        "eval": {"judge_model": "glm-4-flash"},
+        "eval": {"judge_model": "judge-m"},
         "models": {
             "providers": {
-                "glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "enabled": True}
+                "my-llm": {
+                    "base_url": "https://api.example.com/v1",
+                    "model_name": "judge-m",
+                    "enabled": True,
+                }
             }
         },
     }
     adapter = build_judge_adapter(cfg)
     assert adapter is not None
-    assert adapter.model_name == "glm-4-flash"
-    assert adapter.provider_name == "glm"
+    assert adapter.model_name == "judge-m"
+    assert adapter.provider_name == "my-llm"
 
 
 def test_build_judge_adapter_disabled_returns_none():
-    """glm provider disabled 时返回 None。"""
+    """model_name 匹配但 provider disabled 时返回 None。"""
     cfg = {
-        "eval": {"judge_model": "glm-4-flash"},
-        "models": {"providers": {"glm": {"enabled": False}}},
+        "eval": {"judge_model": "judge-m"},
+        "models": {"providers": {"my-llm": {"model_name": "judge-m", "enabled": False}}},
+    }
+    assert build_judge_adapter(cfg) is None
+
+
+def test_build_judge_adapter_no_match_returns_none():
+    """V2 P3: judge_model 无匹配 provider → None(去预置化, 不隐式绑定)。"""
+    cfg = {
+        "eval": {"judge_model": "ghost-model"},
+        "models": {
+            "providers": {
+                "my-llm": {"base_url": "http://x", "model_name": "other-m", "enabled": True}
+            }
+        },
     }
     assert build_judge_adapter(cfg) is None
 

@@ -3,13 +3,11 @@
 M1 Phase 2 导出:
 - ModelAdapter / ModelCapability / ChatResult:Protocol 与数据类
 - FallbackChain / ProviderError / AllProvidersFailedError:降级执行与异常
-- GlmAdapter / DeepSeekAdapter / KimiAdapter:三家具体适配器
+- OpenAICompatibleAdapter:通用 OpenAI 兼容适配器(V2 P3 去预置化后唯一 adapter)
 - register_adapter / get_adapter / build_fallback_chain:注册表
 - ManualRouter:手动路由(MVP)
 """
-from private_agent.models.adapters.deepseek import DeepSeekAdapter
-from private_agent.models.adapters.glm import GlmAdapter
-from private_agent.models.adapters.kimi import KimiAdapter
+from private_agent.models.adapters import OpenAICompatibleAdapter
 from private_agent.models.base import (
     AllProvidersFailedError,
     ChatResult,
@@ -32,9 +30,7 @@ __all__ = [
     "FallbackChain",
     "ProviderError",
     "AllProvidersFailedError",
-    "GlmAdapter",
-    "DeepSeekAdapter",
-    "KimiAdapter",
+    "OpenAICompatibleAdapter",
     "register_adapter",
     "get_adapter",
     "build_fallback_chain",

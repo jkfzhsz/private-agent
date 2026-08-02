@@ -1,9 +1,9 @@
-"""蓝图 §2.7/§2.9 - provider 注册表 + ManualRouter。
+"""蓝图 §2.7/§2.9 - provider 注册表 + ManualRouter(V2 P3 去预置化)。
 
 Source: plan/m1-react-loop step 9
 - _REGISTRY: provider 名 → factory(cfg) -> ModelAdapter
 - register_adapter / get_adapter / build_fallback_chain
-- 启动时自动注册 glm/deepseek/kimi
+- 不预置任何 provider: 全量运行时动态注册(设置页添加, OpenAI 兼容)
 - API Key 从环境变量 PA_{NAME}_API_KEY 读(蓝图 §2.7),默认 "test-key"(测试用)
 """
 from __future__ import annotations
@@ -11,9 +11,6 @@ from __future__ import annotations
 import os
 from typing import Callable
 
-from private_agent.models.adapters.deepseek import DeepSeekAdapter
-from private_agent.models.adapters.glm import GlmAdapter
-from private_agent.models.adapters.kimi import KimiAdapter
 from private_agent.models.base import FallbackChain, ModelAdapter
 
 # provider 名 → 构造工厂 factory(cfg) -> ModelAdapter
@@ -74,28 +71,46 @@ def build_fallback_chain(cfg: dict) -> FallbackChain:
     return FallbackChain(adapters)
 
 
-def build_compress_adapter(cfg: dict) -> ModelAdapter | None:
-    """按 cfg['models']['compress_model'] 构造单 GLM 压缩适配器(蓝图 §4.2,spec AC-7)。
+def build_adapter_for_model_name(
+    cfg: dict, model_name: str
+) -> ModelAdapter | None:
+    """按模型名(非 provider 名)匹配 provider 并构造 OpenAI 兼容 adapter。
 
-    compress_model 当前仅支持 glm 系列(如 'glm-4-flash')。
-    复用 glm provider 的 base_url + env api_key,但 model_name 用 compress_model 覆盖。
+    V2 P3 去预置化: compress_model / judge_model 等按"模型名"配置,
+    遍历 providers 找 model_name 相等的 enabled provider 动态注册构造。
+    无匹配 → None(优雅降级, 压缩/评测功能禁用而非崩溃)。
+
+    Args:
+        cfg: 配置 dict(含 models.providers)。
+        model_name: 目标模型名(如 "deepseek-v4-flash-0731")。
 
     Returns:
-        GlmAdapter 实例;provider disabled 或无 compress_model 配置时返回 None。
+        ModelAdapter;无匹配/未配置时 None。
     """
-    models_cfg = cfg.get("models", {})
-    compress_model = models_cfg.get("compress_model")
+    if not model_name:
+        return None
+    providers = cfg.get("models", {}).get("providers", {})
+    for name, prov in providers.items():
+        if not prov.get("enabled", True):
+            continue
+        if prov.get("model_name") == model_name:
+            return get_adapter(name, cfg)
+    return None
+
+
+def build_compress_adapter(cfg: dict) -> ModelAdapter | None:
+    """按 cfg['models']['compress_model'] 构造压缩适配器(蓝图 §4.2,spec AC-7)。
+
+    V2 P3: 不再硬编码 glm/PA_GLM_API_KEY, 按 compress_model(model 名)匹配
+    任意 provider。无匹配(未配置/模型不存在) → None, 压缩优雅降级。
+
+    Returns:
+        ModelAdapter 实例;无匹配配置时返回 None。
+    """
+    compress_model = cfg.get("models", {}).get("compress_model")
     if not compress_model:
         return None
-    prov = models_cfg.get("providers", {}).get("glm", {})
-    if not prov.get("enabled", True):
-        return None
-    api_key = os.environ.get("PA_GLM_API_KEY", "test-key")
-    return GlmAdapter(
-        base_url=prov.get("base_url", ""),
-        api_key=api_key,
-        model_name=compress_model,
-    )
+    return build_adapter_for_model_name(cfg, compress_model)
 
 
 def build_default_adapter(cfg: dict) -> ModelAdapter | None:
@@ -144,7 +159,7 @@ class ManualRouter:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 启动时自动注册三家 provider(蓝图 §2.7)
+# provider factory(V2 P3: 不预置任何 provider, 全量动态注册)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -165,8 +180,3 @@ def _make_factory(
         )
 
     return factory
-
-
-register_adapter("glm", _make_factory("glm", GlmAdapter))
-register_adapter("deepseek", _make_factory("deepseek", DeepSeekAdapter))
-register_adapter("kimi", _make_factory("kimi", KimiAdapter))

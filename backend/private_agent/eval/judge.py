@@ -1,11 +1,11 @@
 """M4 §8.8 LLM-as-Judge 模块(蓝图 §8.8)。
 
 Source: plan/m4-metrics-judge step 7 (AC-6..AC-8)
-- build_judge_adapter: 工厂函数,读 cfg["eval"]["judge_model"] 构造 GlmAdapter
+- build_judge_adapter: 工厂函数,按 cfg["eval"]["judge_model"] 匹配 provider
 - load_judge_prompt: 加载 judge_prompts/general.md 模板
 - LLMJudge: 调用 Judge 模型,解析 JSON,降级返回 0 分
 
-Judge 模型固定 glm-4-flash,与主模型分离(规避同模型自评偏见)。
+Judge 模型与主模型分离(规避同模型自评偏见)。
 Judge 调用失败(网络/超时/解析失败)降级返回 0 分,不阻塞评估流程。
 """
 from __future__ import annotations
@@ -16,36 +16,28 @@ import re
 from pathlib import Path
 from typing import Any
 
-from private_agent.models.adapters.glm import GlmAdapter
 from private_agent.models.base import ModelAdapter, ProviderError
+from private_agent.models.registry import build_adapter_for_model_name
 
 __all__ = ["LLMJudge", "build_judge_adapter", "load_judge_prompt"]
 
 
 def build_judge_adapter(cfg: dict) -> ModelAdapter | None:
-    """工厂函数:读 cfg["eval"]["judge_model"](glm-4-flash)构造 GlmAdapter(蓝图 §8.8)。
+    """工厂函数:按 cfg["eval"]["judge_model"] 匹配 provider 构造 adapter(蓝图 §8.8)。
 
-    复用 build_compress_adapter 模式(models/registry.py:63-84),读 PA_GLM_API_KEY +
-    cfg.models.providers.glm.base_url,但 model_name 用 judge_model 覆盖。
+    V2 P3 去预置化: 不再硬编码 glm/PA_GLM_API_KEY, 按 judge_model(模型名)
+    匹配任意 enabled provider; 无匹配 → None(评测优雅降级)。
 
     Args:
-        cfg: 配置 dict,需含 eval.judge_model + models.providers.glm。
+        cfg: 配置 dict,需含 eval.judge_model + models.providers。
 
     Returns:
-        GlmAdapter 实例;glm provider disabled 或无 judge_model 时返回 None。
+        ModelAdapter 实例;无匹配/未配置时返回 None。
     """
     judge_model = cfg.get("eval", {}).get("judge_model")
     if not judge_model:
         return None
-    prov = cfg.get("models", {}).get("providers", {}).get("glm", {})
-    if not prov.get("enabled", True):
-        return None
-    api_key = os.environ.get("PA_GLM_API_KEY", "test-key")
-    return GlmAdapter(
-        base_url=prov.get("base_url", ""),
-        api_key=api_key,
-        model_name=judge_model,
-    )
+    return build_adapter_for_model_name(cfg, judge_model)
 
 
 def load_judge_prompt(cfg: dict) -> str:
@@ -68,7 +60,7 @@ class LLMJudge:
     """LLM-as-Judge 模块:调用 Judge 模型评分(蓝图 §8.8)。
 
     Args:
-        adapter: 模型适配器(GlmAdapter,model_name=glm-4-flash)。
+        adapter: 模型适配器(按 judge_model 匹配的任意 provider adapter)。
         prompt_template: Judge prompt 模板,含 {user_input}/{agent_response}/{expected_output}。
     """
 
