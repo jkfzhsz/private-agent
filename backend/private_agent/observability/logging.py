@@ -28,6 +28,9 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "trace_id": getattr(record, "trace_id", None),  # MVP 默认 null
         }
+        # exception() 调用时附完整堆栈(调试必需)
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(log_entry, ensure_ascii=False)
 
 

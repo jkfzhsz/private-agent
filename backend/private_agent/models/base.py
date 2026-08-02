@@ -33,6 +33,7 @@ class ChatResult:
     tool_calls: list[dict] = field(default_factory=list)
     used_provider: str = ""
     failed_providers: list[str] = field(default_factory=list)
+    reasoning_content: str = ""  # 模型推理过程(deepseek 等 reasoning 模型)
 
 
 class ProviderError(Exception):
@@ -127,6 +128,7 @@ class FallbackChain:
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         on_delta=None,
+        on_reasoning=None,
     ) -> ChatResult:
         """流式 chat 降级执行: 逐 adapter 尝试流式, 无流式能力则用非流式兜底。"""
         failed: list[str] = []
@@ -136,7 +138,8 @@ class FallbackChain:
             if capability is not None and getattr(capability, "streaming", False):
                 try:
                     result = await adapter.chat_stream(
-                        messages, tools, max_tokens=max_tokens, on_delta=on_delta
+                        messages, tools, max_tokens=max_tokens,
+                        on_delta=on_delta, on_reasoning=on_reasoning,
                     )
                     result.failed_providers = failed
                     return result

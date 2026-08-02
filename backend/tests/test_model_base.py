@@ -50,6 +50,7 @@ class _DummyAdapter:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         return ChatResult(
             content="ok",
@@ -87,6 +88,7 @@ class _StubAdapter:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         if self.behavior == "fail":
             raise ProviderError(self.provider_name, "mock failure")

@@ -87,6 +87,7 @@ class ReactLoop:
         self._max_output_tokens = limits.get("max_output_tokens")
         self._max_input_tokens = limits.get("max_input_tokens")
         self._turn = 0
+        self._turn_initialized = False  # run_turn 首次调用时从历史最大 turn 续号
         self._state = ReactLoopState.IDLE
         self._iteration = 0
         self.event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -159,6 +160,18 @@ class ReactLoop:
         Args:
             user_message: 用户消息文本。
         """
+        # 历史会话续聊: 首次调用时从 messages 表最大 turn 续号(新消息 turn 不
+        # 与历史冲突, 否则前端分组合并、上下文错乱)
+        if not self._turn_initialized:
+            try:
+                max_turn = await self._conn.fetchval(
+                    "SELECT COALESCE(MAX(turn), 0) FROM messages WHERE session_id = $1",
+                    self._session_id,
+                )
+                self._turn = int(max_turn or 0)
+            except Exception:
+                self._logger.exception("load max turn failed, 从 0 开始")
+            self._turn_initialized = True
         self._turn += 1
         self._iteration = 0
         self._transition(ReactLoopState.THINKING)
@@ -178,6 +191,19 @@ class ReactLoop:
             # 构建消息列表
             messages = await self._context_manager.build_messages()
 
+            # 推理增量累积器(跨 iteration 的 thinking 事件流, 前端逐段展示)
+            reasoning_acc: list[str] = []
+
+            async def _emit_reasoning(text: str) -> None:
+                """推理增量回调: 产出 thinking 事件(前端'查看推理过程'逐段展示)。"""
+                if not text:
+                    return
+                reasoning_acc.append(text)
+                await self._emit_event(
+                    "thinking",
+                    payload={"turn": self._turn, "reasoning": text},
+                )
+
             # 调用模型(流式优先: adapter 支持 chat_stream 时使用)
             try:
                 if hasattr(self._adapter, "chat_stream"):
@@ -186,6 +212,7 @@ class ReactLoop:
                         self._tool_schemas,
                         max_tokens=self._max_output_tokens,
                         on_delta=self._emit_delta,
+                        on_reasoning=_emit_reasoning,
                     )
                 else:
                     result = await self._adapter.chat(
@@ -219,15 +246,24 @@ class ReactLoop:
             except Exception:
                 self._logger.exception("billing record_usage failed")
 
-            # 首次模型调用后产出 thinking event
+            # 首次模型调用后产出 thinking event(推理过程)
+            # 流式已通过 on_reasoning 逐段推送; 非流式/无 reasoning 时补发完整内容
+            # (始终发: 纯 tool_call 无文本时也保留 thinking 事件, 事件序列稳定)
             if not has_emitted_thinking:
-                await self._emit_event(
-                    "thinking",
-                    payload={
-                        "content": result.content,
-                        "turn": self._turn,
-                    },
-                )
+                if not reasoning_acc:
+                    reason_text = (
+                        getattr(result, "reasoning_content", None)
+                        or result.content
+                        or ""
+                    )
+                    await self._emit_event(
+                        "thinking",
+                        payload={
+                            "turn": self._turn,
+                            "reasoning": reason_text,
+                            "content": result.content or "",
+                        },
+                    )
                 has_emitted_thinking = True
 
             if result.tool_calls:

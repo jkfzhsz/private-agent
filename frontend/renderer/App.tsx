@@ -118,7 +118,8 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
     case "user":
       return String(payload.content ?? "");
     case "thinking":
-      return String(payload.content ?? "");
+      // 推理过程: reasoning 增量优先, 兼容旧版 content 字段
+      return String(payload.reasoning ?? payload.content ?? "");
     case "tool_call": {
       const name = payload.tool_name ?? payload.name ?? "unknown";
       const args = payload.arguments ?? payload.args ?? "";
@@ -596,9 +597,11 @@ export default function App(): JSX.Element {
           // 有用户消息但还没有最终文本 → AI 正在思考
           const isPending = !!userEv && !finalText && !errorEv;
           const thinkingOpen = openThinkingTurns.has(turn);
-          const thinkingText = thinkingEv
-            ? formatPayload("thinking", thinkingEv.payload)
-            : "";
+          // 推理过程: 拼接该 turn 全部 thinking 事件(reasoning 逐段增量)
+          const thinkingText = evs
+            .filter((e) => e.event_type === "thinking")
+            .map((e) => formatPayload("thinking", e.payload))
+            .join("");
 
           return (
             <div key={turn} style={{ marginBottom: 14 }}>

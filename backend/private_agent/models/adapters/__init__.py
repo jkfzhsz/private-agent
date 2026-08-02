@@ -110,12 +110,15 @@ class OpenAICompatibleAdapter(ModelAdapter):
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         on_delta: Any | None = None,
+        on_reasoning: Any | None = None,
     ) -> ChatResult:
         """OpenAI 兼容流式 chat: 边收边回调 on_delta(delta 文本), 返回完整 ChatResult。
 
         - body 带 stream: true + stream_options.include_usage
-        - 累积 content(或 reasoning_content)增量与 tool_calls 分片(index 合并)
-        - on_delta: async (text: str) -> None, 每段增量回调(用于 WS 推送 delta 事件)
+        - 累积 content 增量与 tool_calls 分片(index 合并)
+        - on_delta: async (text: str) -> None, 正文增量回调(WS 推送 delta 事件)
+        - on_reasoning: async (text: str) -> None, 推理增量回调(reasoning_content,
+          用于前端"查看推理过程"逐段展示; 无则 None)
 
         Raises:
             ProviderError: 非 2xx 响应或连接失败。
@@ -134,6 +137,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_calls_acc: dict[int, dict[str, Any]] = {}
 
         async with self._client.stream("POST", url, json=body, headers=headers) as resp:
@@ -157,7 +161,13 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 if not choices:
                     continue
                 delta = choices[0].get("delta", {}) or {}
-                text = delta.get("content") or delta.get("reasoning_content") or ""
+                # 推理与正文分离: reasoning_content → on_reasoning, content → on_delta
+                reasoning = delta.get("reasoning_content") or ""
+                text = delta.get("content") or ""
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    if on_reasoning is not None:
+                        await on_reasoning(reasoning)
                 if text:
                     content_parts.append(text)
                     if on_delta is not None:
@@ -180,6 +190,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         tool_calls = [v for _, v in sorted(tool_calls_acc.items())]
         return ChatResult(
             content="".join(content_parts),
+            reasoning_content="".join(reasoning_parts),
             tool_calls=tool_calls,
             used_provider=self.provider_name,
             failed_providers=[],
@@ -189,9 +200,11 @@ class OpenAICompatibleAdapter(ModelAdapter):
         choices = data.get("choices") or []
         message = choices[0]["message"] if choices else {}
         content = message.get("content") or ""
-        # 纯推理模型(如 deepseek-v4-pro)content 恒为空,输出在 reasoning_content
+        # reasoning_content 单独保留(前端'查看推理过程'); content 为空时
+        # 兼容纯推理模型, 用 reasoning_content 兜底 content
+        reasoning = message.get("reasoning_content") or ""
         if not content:
-            content = message.get("reasoning_content") or ""
+            content = reasoning
         tool_calls = message.get("tool_calls") or []
         # tool_calls 透传 OpenAI 结构:{id, type, function:{name, arguments}}
         return ChatResult(
@@ -199,4 +212,5 @@ class OpenAICompatibleAdapter(ModelAdapter):
             tool_calls=list(tool_calls),
             used_provider=self.provider_name,
             failed_providers=[],
+            reasoning_content=reasoning,
         )

@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from private_agent.api import admin, eval, files
 from private_agent.config import loader
 from private_agent.core.checkpoint import CheckpointManager
-from private_agent.core.context_manager import ContextManager
+from private_agent.core.context_manager import ContextManager, FrozenHashMismatchError
 from private_agent.core.react_loop import ReactLoop
 from private_agent.memory.manager import MemoryManager
 from private_agent.memory.memories_repo import MemoriesRepo
@@ -297,7 +297,25 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             tools=frozen_tools,
                             memory_manager=memory_mgr,
                         )
-                        await cm.ensure_initial(conn)
+                        try:
+                            await cm.ensure_initial(conn)
+                        except FrozenHashMismatchError:
+                            # 工具/提示词演进导致 frozen_hash 变化(旧会话续聊):
+                            # 自动用当前 system_prompt + tools 重建 frozen zone 并
+                            # 更新 sessions.frozen_hash, 无需人工干预
+                            _logger.warning(
+                                "frozen_hash mismatch → rebuild frozen zone "
+                                "(工具/提示词演进, session=%s)", session_id,
+                            )
+                            await cm.replace_frozen_zone(
+                                conn,
+                                system_prompt=cm._system_prompt,
+                                tools=cm._tools,
+                            )
+                        # 续聊: 完整重放历史消息到内存(ensure_initial 只加载
+                        # Frozen Zone, active 历史对话需 reload_from_db 重建,
+                        # 否则模型看不到历史上下文)
+                        await cm.reload_from_db(conn)
                         adapter = _build_adapter(cfg)
                         # per-provider 对话参数上限: 取 session.model_id 或 fallback 首选
                         from private_agent.config.loader import resolve_provider_limits
