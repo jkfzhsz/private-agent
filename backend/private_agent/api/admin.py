@@ -922,13 +922,23 @@ async def list_mcp_servers():
     """返回 MCP servers 配置列表(蓝图 §5.3/§5.4)。
 
     Returns:
-        200: {"servers": [{id, type, command, args, url, tags, timeout_sec}],
+        200: {"servers": [{id, type, command, args, url, tags, timeout_sec, has_auth}],
               "protocol_version": str}
+        has_auth: 是否已配置 Bearer token(不返回 token 明文)。
     """
     cfg = await _load_cfg()
     mcp_cfg = cfg.get("tools", {}).get("mcp", {})
+    servers = []
+    for s in mcp_cfg.get("servers", []):
+        item = dict(s)
+        if "auth_token_encrypted" in item:
+            item["has_auth"] = True
+            item.pop("auth_token_encrypted", None)
+        else:
+            item["has_auth"] = False
+        servers.append(item)
     return {
-        "servers": mcp_cfg.get("servers", []),
+        "servers": servers,
         "protocol_version": mcp_cfg.get("protocol_version", ""),
     }
 
@@ -943,6 +953,7 @@ class McpServerRequest(BaseModel):
     url: str | None = None  # http 用
     enabled: bool = True
     timeout_sec: float = 30.0
+    auth_token: str | None = None  # Bearer 认证 token(提供才更新, AES 加密存库)
 
 
 @router.post("/settings/mcp", response_model=None)
@@ -951,6 +962,7 @@ async def upsert_mcp_server(body: McpServerRequest):
 
     MCP servers 是列表结构, 存 config_runtime 的 tools.mcp.servers(整体列表,
     runtime > yaml 整体覆盖)。MCP client 在启动时加载, 改动后重启后端生效。
+    auth_token 提供时 AES-256-GCM 加密存储(auth_token_encrypted), 不落明文。
     """
     import json as _json
 
@@ -967,6 +979,14 @@ async def upsert_mcp_server(body: McpServerRequest):
         value["type"] = "stdio"
         value["command"] = body.command or ""
         value["args"] = body.args or []
+
+    if body.auth_token is not None and body.auth_token.strip():
+        master = _ensure_master_key()
+        from private_agent.config import secrets
+
+        value["auth_token_encrypted"] = secrets.encrypt_api_key(
+            body.auth_token.strip(), master
+        )
 
     conn = await db.connect()
     try:
@@ -1024,7 +1044,7 @@ async def delete_mcp_server(name: str):
 
 @router.post("/settings/mcp/{name}/test", response_model=None)
 async def test_mcp_server(name: str):
-    """MCP server 连通性测试: HTTP 发 initialize, stdio spawn 握手。"""
+    """MCP server 连通性测试: HTTP 发 tools/list, stdio spawn(2026-07-28 无状态, 带认证)。"""
     cfg = await _load_cfg()
     servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
     svc = next(
@@ -1033,16 +1053,32 @@ async def test_mcp_server(name: str):
     )
     if not svc:
         return {"ok": False, "server": name, "error": "server_not_found"}
+    # 解密 Bearer token(配置时 AES 加密存储, 探活时还原)
+    auth_token = _decrypt_server_auth(svc)
     try:
         if svc.get("type") == "http" or svc.get("url"):
-            return await _test_mcp_http(name, svc["url"])
-        return await _test_mcp_stdio(name, svc.get("command", ""), svc.get("args", []))
+            return await _test_mcp_http(name, svc["url"], auth_token)
+        return await _test_mcp_stdio(name, svc.get("command", ""), svc.get("args", []), auth_token)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}
 
 
-async def _test_mcp_http(name: str, url: str) -> dict:
-    """2026-07-28 无状态协议探活: 发 tools/list(带协议头), 而非旧版 initialize 握手。"""
+def _decrypt_server_auth(svc: dict) -> str:
+    """解密 MCP server 的 Bearer token(无则返回空串)。"""
+    encrypted = svc.get("auth_token_encrypted")
+    if not encrypted:
+        return ""
+    try:
+        from private_agent.config import secrets
+
+        master = _ensure_master_key()
+        return secrets.decrypt_api_key(encrypted, master)
+    except Exception:  # noqa: BLE001 - 解密失败按无 token 处理(探活会报 401 提示)
+        return ""
+
+
+async def _test_mcp_http(name: str, url: str, auth_token: str = "") -> dict:
+    """2026-07-28 无状态协议探活: 发 tools/list(带协议头 + Bearer 认证)。"""
     import httpx
 
     payload = {
@@ -1065,6 +1101,8 @@ async def _test_mcp_http(name: str, url: str) -> dict:
         "Mcp-Method": "tools/list",
         "Content-Type": "application/json",
     }
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(url, json=payload, headers=headers)
         if resp.status_code != 200:
@@ -1081,7 +1119,7 @@ async def _test_mcp_http(name: str, url: str) -> dict:
         }
 
 
-async def _test_mcp_stdio(name: str, command: str, args: list[str]) -> dict:
+async def _test_mcp_stdio(name: str, command: str, args: list[str], auth_token: str = "") -> dict:
     import asyncio
 
     if not command:

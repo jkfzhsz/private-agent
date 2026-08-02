@@ -58,6 +58,7 @@ class MCPClientConfig:
     timeout_sec: float = 30.0
     protocol_version: str = PROTOCOL_VERSION
     health_check_interval_sec: float = 30.0
+    auth_token: str = ""  # Bearer token(http 模式认证, 请求带 Authorization 头)
 
 
 @dataclass
@@ -286,10 +287,10 @@ class MCPClient:
                 resp = await self._http_client.post(
                     self._endpoint(),
                     json=payload,
-                    headers={
+                    headers=self._auth_headers({
                         "MCP-Protocol-Version": self._config.protocol_version,
                         "Mcp-Method": "ping",
-                    },
+                    }),
                     timeout=self._config.timeout_sec,
                 )
                 self._latency_ms = (time.monotonic() - start) * 1000
@@ -384,6 +385,13 @@ class MCPClient:
         """HTTP MCP 端点: 2026-07-28 无状态协议直接使用 config.url(不拼接 /rpc)。"""
         return self._config.url.rstrip("/")
 
+    def _auth_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        """组合请求头, 有 auth_token 时附加 Authorization: Bearer。"""
+        headers = dict(extra or {})
+        if self._config.auth_token:
+            headers["Authorization"] = f"Bearer {self._config.auth_token}"
+        return headers
+
     async def _http_post(
         self, method: str, params: dict[str, Any] | None = None, name: str | None = None
     ) -> dict:
@@ -406,7 +414,7 @@ class MCPClient:
         resp = await self._http_client.post(
             self._endpoint(),
             json=payload,
-            headers=headers,
+            headers=self._auth_headers(headers),
             timeout=self._config.timeout_sec,
         )
         resp.raise_for_status()

@@ -348,6 +348,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
   const [url, setUrl] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
+  const [authToken, setAuthToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -379,6 +380,9 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
         body.command = command.trim();
         body.args = args.split(/\s+/).filter(Boolean);
       }
+      if (authToken.trim()) {
+        body.auth_token = authToken.trim();
+      }
       const resp = await fetch(`${API_BASE}/settings/mcp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -390,6 +394,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
       setUrl("");
       setCommand("");
       setArgs("");
+      setAuthToken("");
       setMsg("已添加(重启后端后生效)");
       onAdded();
     } catch (err) {
@@ -467,6 +472,16 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           </div>
         </>
       )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>API Key</span>
+        <input
+          type="password"
+          value={authToken}
+          onChange={(e) => setAuthToken(e.target.value)}
+          placeholder="可选, 服务器要求 Bearer 认证时填写(AES 加密存储)"
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+        />
+      </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void submit()} disabled={busy}>
           添加
