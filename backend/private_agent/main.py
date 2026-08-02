@@ -455,7 +455,15 @@ async def _restore_keys_from_runtime() -> None:
             continue
         prov_name = parts[2]
         try:
-            plain = secrets.decrypt_api_key(row["value"], master)
+            # asyncpg JSONB 返回 JSON 字符串, 需先解析为 dict(decrypt 期望 dict)
+            import json as _json
+
+            encrypted = (
+                _json.loads(row["value"])
+                if isinstance(row["value"], str)
+                else row["value"]
+            )
+            plain = secrets.decrypt_api_key(encrypted, master)
         except Exception:  # noqa: BLE001
             continue
         os.environ[f"PA_{prov_name.upper()}_API_KEY"] = plain

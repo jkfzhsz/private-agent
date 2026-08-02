@@ -418,7 +418,7 @@ function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
     <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.4)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>名称</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如 qwen / zhipu-v2" style={inputStyle} />
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如 deepseek-flash / glm-4（仅字母/数字/下划线/连字符）" style={inputStyle} />
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API 地址</span>

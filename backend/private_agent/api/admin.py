@@ -582,6 +582,7 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
     providers = cfg.get("models", {}).get("providers", {})
     if name not in providers:
         raise HTTPException(status_code=404, detail=f"provider '{name}' not found")
+    _validate_provider_name(name)
 
     conn = await db.connect()
     try:
@@ -628,6 +629,24 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
     return {"ok": True, "name": name}
 
 
+def _validate_provider_name(name: str) -> None:
+    """校验 provider 名称为合法标识符(字母/数字/下划线/连字符)。
+
+    provider 名会映射为环境变量 PA_{NAME}_API_KEY 与 config_runtime 点分 key,
+    含空格/中文等非法字符会导致 API key 无法生效、配置错乱。
+    """
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"模型名称 '{name}' 不合法: 只能包含字母/数字/下划线/连字符, "
+                "且不能以数字或符号开头(如 deepseek-flash, glm-4)"
+            ),
+        )
+
+
 class ProviderCreateRequest(BaseModel):
     """POST /settings/providers 请求体: 新增模型 provider。"""
 
@@ -654,6 +673,7 @@ async def create_provider(body: ProviderCreateRequest):
     name = body.name.strip()
     if not name or not body.base_url.strip():
         raise HTTPException(status_code=400, detail="name 与 base_url 必填")
+    _validate_provider_name(name)
     import json as _json
 
     conn = await db.connect()
