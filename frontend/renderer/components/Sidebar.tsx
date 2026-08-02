@@ -12,6 +12,7 @@ export interface SessionItem {
   last_turn: number;
   user_msg_count?: number;
   updated_at: string | null;
+  model_id?: string | null; // 会话选择的模型(auto 为 null/空)
 }
 
 const stroke = {
@@ -102,7 +103,7 @@ function TaskTree({
   onSwitchSession,
 }: {
   currentSessionId: number | null;
-  onSwitchSession: (id: number, skillName?: string | null) => void;
+  onSwitchSession: (id: number, skillName?: string | null, modelId?: string | null) => void;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
@@ -207,7 +208,7 @@ function TaskTree({
             <div
               key={s.id}
               className="nav-item"
-              onClick={() => onSwitchSession(s.id, s.locked_skill_name)}
+              onClick={() => onSwitchSession(s.id, s.locked_skill_name, s.model_id)}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -282,7 +283,7 @@ export default function Sidebar({
   active: ViewKey;
   onChange: (v: ViewKey) => void;
   currentSessionId: number | null;
-  onSwitchSession: (id: number, skillName?: string | null) => void;
+  onSwitchSession: (id: number, skillName?: string | null, modelId?: string | null) => void;
   status: "connected" | "disconnected" | "reconnecting";
 }): JSX.Element {
   const [collapsed, setCollapsed] = useState(false);

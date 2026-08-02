@@ -915,6 +915,65 @@ async def delete_session(session_id: int):
         )
 
 
+class SessionModelRequest(BaseModel):
+    """POST /sessions/{id}/model 请求体: 会话级模型选择。
+
+    model_id: "auto"(fallback 链, 自动降级) 或具体 provider 名(手动锁定, 不降级)。
+    """
+
+    model_id: str
+
+
+@router.post("/sessions/{id}/model", response_model=None)
+async def set_session_model(id: int, body: SessionModelRequest):
+    """设置会话使用的模型(自动/手动模式)。
+
+    - model_id = "auto" → sessions.model_id 置 NULL(自动模式, fallback 链)
+    - model_id = provider 名 → 校验存在且未删除, 存入 sessions.model_id(手动锁定)
+
+    对话时 WS 处理按 model_id 构建 adapter(见 main._build_session_adapter)。
+    """
+    import os
+
+    model_id = (body.model_id or "").strip()
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                "SELECT id FROM sessions WHERE id = $1", id
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+
+            if not model_id or model_id == "auto":
+                await conn.execute(
+                    "UPDATE sessions SET model_id = NULL WHERE id = $1", id
+                )
+                return {"ok": True, "id": id, "model_id": "auto"}
+
+            # 校验 provider 存在且未删除
+            cfg = await _load_cfg()
+            prov = cfg.get("models", {}).get("providers", {}).get(model_id)
+            if prov is None or prov.get("deleted"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"provider '{model_id}' 不存在或已删除",
+                )
+            await conn.execute(
+                "UPDATE sessions SET model_id = $1 WHERE id = $2", model_id, id
+            )
+            return {"ok": True, "id": id, "model_id": model_id}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_model_set_failed"},
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 首页壁纸上传/查询/移除(V1.5, 前端 HomeView)
 # ══════════════════════════════════════════════════════════════════════════

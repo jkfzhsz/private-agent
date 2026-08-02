@@ -157,6 +157,9 @@ export default function App(): JSX.Element {
   const [view, setView] = useState<ViewKey>("home");
   // 每个 turn 的"推理过程"展开状态(默认收起)
   const [openThinkingTurns, setOpenThinkingTurns] = useState<Set<number>>(new Set());
+  // 会话级模型选择: "auto"(fallback 链) 或 provider 名(手动锁定)
+  const [sessionModel, setSessionModel] = useState<string>("auto");
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
 
   // 按 turn 分组事件:同一轮对话合并为一个 AI 回复块
   const turnGroups = useMemo(() => {
@@ -230,7 +233,11 @@ export default function App(): JSX.Element {
   };
 
   // 任务树: 切换到历史会话 → 改 sessionId, 触发 connect 重连 + 后端 replay
-  const handleSwitchSession = (id: number, skillName?: string | null): void => {
+  const handleSwitchSession = (
+    id: number,
+    skillName?: string | null,
+    modelId?: string | null
+  ): void => {
     if (id === sessionId && view === "chat") return;
     // 关闭当前 ws(connect effect 依赖 sessionId 会重连)
     const ws = wsRef.current;
@@ -244,6 +251,7 @@ export default function App(): JSX.Element {
     lastTurnRef.current = 0;
     // 切换历史会话: 全量加载(忽略服务端 ws_offset, 否则 offset=1 会跳过第 1 轮)
     fullReloadRef.current = true;
+    setSessionModel(modelId ?? "auto");
     setRealSessionId(id);
     setSessionId(id);
     // 进入对话视图(恢复该会话的 skill, 若无 skill 则回首页选模式)
@@ -487,6 +495,48 @@ export default function App(): JSX.Element {
     };
   }, [connect, sessionId]);
 
+  // 加载可用模型列表(模型选择器用)
+  useEffect(() => {
+    let cancelled = false;
+    fetch("http://localhost:8765/admin/settings/providers")
+      .then((r) => r.json())
+      .then((data) => {
+        if (!cancelled) {
+          const names = (data.providers ?? [])
+            .filter((p: { enabled: boolean }) => p.enabled)
+            .map((p: { name: string }) => p.name);
+          setModelOptions(names);
+        }
+      })
+      .catch(() => {
+        // 后端未就绪时静默, 选择器只显示"自动"
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 切换会话模型选择(自动/手动)
+  const changeSessionModel = async (modelId: string): Promise<void> => {
+    const target = realSessionId ?? sessionId;
+    if (target <= 0) return;
+    try {
+      const resp = await fetch(
+        `http://localhost:8765/admin/sessions/${target}/model`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model_id: modelId }),
+        }
+      );
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setSessionModel(modelId);
+    } catch (err) {
+      window.alert(`切换模型失败: ${String(err)}`);
+    }
+  };
+
   // ── 渲染 ──────────────────────────────────────────────────────────────────
   // ── 渲染: FlowSpace 布局(液体背景 + 侧边栏 + 顶栏 + 内容视图) ─────────
   return (
@@ -564,6 +614,30 @@ export default function App(): JSX.Element {
                   <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                     session={realSessionId ?? sessionId}
                   </span>
+                  <span style={{ flex: 1 }} />
+                  {/* 会话级模型选择: 自动(fallback 链) / 手动锁定单模型 */}
+                  <select
+                    value={sessionModel}
+                    onChange={(e) => void changeSessionModel(e.target.value)}
+                    style={{
+                      fontSize: 11,
+                      padding: "4px 8px",
+                      borderRadius: 6,
+                      border: "1px solid rgba(148,163,184,0.3)",
+                      background: "rgba(255,255,255,0.6)",
+                      color: "var(--text-primary)",
+                      outline: "none",
+                    }}
+                    title="选择本会话使用的模型: 自动=fallback 链降级; 手动=全程使用所选模型"
+                  >
+                    <option value="auto">🤖 自动(fallback 链)</option>
+                    {modelOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                        {sessionModel === m ? " ✓" : ""}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div
                   style={{

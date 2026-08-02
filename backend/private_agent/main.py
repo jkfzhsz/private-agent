@@ -57,6 +57,22 @@ def _build_adapter(cfg):
     return build_fallback_chain(cfg)
 
 
+def _build_session_adapter(cfg, model_id: str | None):
+    """按会话选择的模型构建 adapter(对话级模型选择)。
+
+    - model_id 为空或 'auto' → fallback 链(自动模式, 可降级)
+    - model_id 为具体 provider → 单模型 FallbackChain(手动模式, 锁定该模型,
+      失败不降级, 直接报错提示)
+    """
+    from private_agent.models.base import FallbackChain
+    from private_agent.models.registry import build_fallback_chain, get_adapter
+
+    if not model_id or model_id == "auto":
+        return build_fallback_chain(cfg)
+    adapter = get_adapter(model_id, cfg)
+    return FallbackChain([adapter])
+
+
 def _build_compress_adapter(cfg):
     """构造压缩模型适配器(蓝图 §4.2,spec AC-7),测试可 monkeypatch。"""
     from private_agent.models.registry import build_compress_adapter
@@ -316,13 +332,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         # Frozen Zone, active 历史对话需 reload_from_db 重建,
                         # 否则模型看不到历史上下文)
                         await cm.reload_from_db(conn)
-                        adapter = _build_adapter(cfg)
-                        # per-provider 对话参数上限: 取 session.model_id 或 fallback 首选
-                        from private_agent.config.loader import resolve_provider_limits
-
+                        # 会话级模型选择: auto(fallback 链) / 具体 provider(手动锁定)
                         model_id = await conn.fetchval(
                             "SELECT model_id FROM sessions WHERE id = $1", session_id
                         )
+                        adapter = _build_session_adapter(cfg, model_id)
+                        # per-provider 对话参数上限: 取 session.model_id 或 fallback 首选
+                        from private_agent.config.loader import resolve_provider_limits
+
                         chain = cfg.get("models", {}).get("router", {}).get(
                             "fallback_chain", []
                         )

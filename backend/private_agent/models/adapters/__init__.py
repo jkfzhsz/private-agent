@@ -30,8 +30,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
     """
 
     provider_name: str = ""
+    # 通用 OpenAI 兼容 adapter 支持流式 + 函数调用(chat_stream/tool_calls 均已实现)
     capability: ModelCapability = ModelCapability(
-        streaming=False, function_calling=False, vision=False, json_mode=False
+        streaming=True, function_calling=True, vision=False, json_mode=False
     )
     default_model_name: str = ""
 
@@ -41,10 +42,14 @@ class OpenAICompatibleAdapter(ModelAdapter):
         api_key: str,
         model_name: str | None = None,
         client: httpx.AsyncClient | None = None,
+        provider_name: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_name = model_name or self.default_model_name
+        # 动态注册的 provider 传入真实名(错误信息/降级记录用, 默认类属性)
+        if provider_name:
+            self.provider_name = provider_name
         # V1.5:推理模型(reasoning)复杂请求思考时间可能远超 httpx 默认 5s,
         # 放宽读超时至 120s,避免 ReadTimeout 误杀正常推理(连接 15s)
         self._timeout = httpx.Timeout(120.0, connect=15.0)

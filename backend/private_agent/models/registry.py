@@ -161,6 +161,7 @@ def _make_factory(
             base_url=prov.get("base_url", ""),
             api_key=api_key,
             model_name=prov.get("model_name"),
+            provider_name=name,
         )
 
     return factory
