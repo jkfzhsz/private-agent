@@ -95,6 +95,7 @@ class FallbackChain:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         failed: list[str] = []
         last_error: Exception | None = None
@@ -103,7 +104,7 @@ class FallbackChain:
             while True:
                 attempts += 1
                 try:
-                    result = await adapter.chat(messages, tools)
+                    result = await adapter.chat(messages, tools, max_tokens=max_tokens)
                 except ProviderError as e:
                     last_error = e
                     # 可重试错误:退避后重试一次;认证类(401/400/403)重试无意义
@@ -115,6 +116,42 @@ class FallbackChain:
                 # 成功:回填 failed_providers(适配器自身不感知降级上下文)
                 result.failed_providers = failed
                 return result
+        detail = f" | last: {last_error}" if last_error else ""
+        raise AllProvidersFailedError(
+            f"all {len(self._adapters)} providers failed: {failed}{detail}"
+        ) from last_error
+
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+        on_delta=None,
+    ) -> ChatResult:
+        """流式 chat 降级执行: 逐 adapter 尝试流式, 无流式能力则用非流式兜底。"""
+        failed: list[str] = []
+        last_error: Exception | None = None
+        for adapter in self._adapters:
+            capability = getattr(adapter, "capability", None)
+            if capability is not None and getattr(capability, "streaming", False):
+                try:
+                    result = await adapter.chat_stream(
+                        messages, tools, max_tokens=max_tokens, on_delta=on_delta
+                    )
+                    result.failed_providers = failed
+                    return result
+                except ProviderError as e:
+                    failed.append(adapter.provider_name)
+                    last_error = e
+                    continue
+            # 无流式能力: 用非流式 chat 兜底(前端无逐句效果但可用)
+            try:
+                result = await adapter.chat(messages, tools, max_tokens=max_tokens)
+                result.failed_providers = failed
+                return result
+            except ProviderError as e:
+                failed.append(adapter.provider_name)
+                last_error = e
         detail = f" | last: {last_error}" if last_error else ""
         raise AllProvidersFailedError(
             f"all {len(self._adapters)} providers failed: {failed}{detail}"

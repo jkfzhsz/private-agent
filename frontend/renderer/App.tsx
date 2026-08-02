@@ -15,6 +15,7 @@ import HomeView from "./views/HomeView";
 import KnowledgeView from "./views/KnowledgeView";
 import MemoryView from "./views/MemoryView";
 import SettingsView from "./views/SettingsView";
+import { deAIfy } from "./utils/deAIfy";
 import "./styles/design-tokens.css";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -23,7 +24,14 @@ import "./styles/design-tokens.css";
 
 type ConnStatus = "connected" | "disconnected" | "reconnecting";
 
-type EventType = "user" | "thinking" | "tool_call" | "tool_result" | "final" | "error";
+type EventType =
+  | "user"
+  | "thinking"
+  | "tool_call"
+  | "tool_result"
+  | "delta"
+  | "final"
+  | "error";
 
 interface ReactEvent {
   id: number;
@@ -59,6 +67,7 @@ const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string 
   thinking: { bg: "#f5f5f5", label: "Thinking", icon: "💭" },
   tool_call: { bg: "#e3f2fd", label: "Tool Call", icon: "🔧" },
   tool_result: { bg: "#e8f5e9", label: "Tool Result", icon: "✅" },
+  delta: { bg: "#e8eaf6", label: "Streaming", icon: "…" },
   final: { bg: "#e8eaf6", label: "Final", icon: "🎯" },
   error: { bg: "#ffebee", label: "Error", icon: "❌" },
 };
@@ -118,7 +127,9 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
     case "tool_result":
       return String(payload.output ?? payload.result ?? JSON.stringify(payload));
     case "final":
-      return String(payload.content ?? "");
+      return deAIfy(String(payload.content ?? ""));
+    case "delta":
+      return deAIfy(String(payload.content ?? ""));
     case "error":
       return String(payload.message ?? JSON.stringify(payload));
     default:
@@ -262,6 +273,50 @@ export default function App(): JSX.Element {
           // 从后端回传更新真实 session_id(B2 P1-9:activate 需要真实 session)
           if (msg.session_id && msg.session_id !== sessionId) {
             setRealSessionId(msg.session_id);
+          }
+          // 流式增量: 追加到该 turn 的最后一条 delta 事件(累积显示, 不刷爆列表)
+          if (msg.event_type === "delta") {
+            const deltaText = String(msg.payload.content ?? "");
+            if (deltaText) {
+              setEvents((prev) => {
+                const last = [...prev]
+                  .reverse()
+                  .find(
+                    (e) =>
+                      e.turn === msg.turn &&
+                      (e.event_type === "delta" || e.event_type === "final")
+                  );
+                if (last && last.event_type === "delta") {
+                  return prev.map((e) =>
+                    e.id === last.id
+                      ? {
+                          ...e,
+                          payload: {
+                            turn: msg.turn,
+                            content:
+                              String(e.payload.content ?? "") + deltaText,
+                          },
+                        }
+                      : e
+                  );
+                }
+                // final 已存在则忽略增量(final 为完整文本)
+                if (last && last.event_type === "final") return prev;
+                const t = msg.turn as number;
+                return [
+                  ...prev,
+                  {
+                    id: ++eventIdRef.current,
+                    session_id: msg.session_id ?? sessionId,
+                    turn: t,
+                    event_type: "delta" as EventType,
+                    payload: { turn: t, content: deltaText },
+                    ts: Date.now(),
+                  },
+                ];
+              });
+            }
+            return;
           }
           const event: ReactEvent = {
             id: ++eventIdRef.current,
@@ -525,8 +580,16 @@ export default function App(): JSX.Element {
           const toolEvents = evs.filter(
             (e) => e.event_type === "tool_call" || e.event_type === "tool_result"
           );
-          // 有用户消息但还没有 final → AI 正在思考
-          const isPending = !!userEv && !finalEv && !errorEv;
+          // 流式增量(无 final 时显示累积的 delta 文本, 有 final 用完整文本)
+          const deltaText = evs
+            .filter((e) => e.event_type === "delta")
+            .map((e) => formatPayload("delta", e.payload))
+            .join("");
+          const finalText = finalEv
+            ? formatPayload("final", finalEv.payload)
+            : deltaText;
+          // 有用户消息但还没有最终文本 → AI 正在思考
+          const isPending = !!userEv && !finalText && !errorEv;
           const thinkingOpen = openThinkingTurns.has(turn);
           const thinkingText = thinkingEv
             ? formatPayload("thinking", thinkingEv.payload)
@@ -685,7 +748,7 @@ export default function App(): JSX.Element {
                         );
                       })}
 
-                    {finalEv && (
+                    {finalText ? (
                       <div
                         style={{
                           backgroundColor: "#ffffff",
@@ -704,10 +767,12 @@ export default function App(): JSX.Element {
                             lineHeight: 1.6,
                           }}
                         >
-                          {formatPayload("final", finalEv.payload)}
+                          {finalText}
                         </pre>
                       </div>
-                    )}
+                    ) : isPending && !thinkingEv ? (
+                      <div style={{ color: "#9ca3af", fontSize: 13 }}>💭 思考中…</div>
+                    ) : null}
 
                     {errorEv && (
                       <div

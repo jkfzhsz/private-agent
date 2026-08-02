@@ -63,20 +63,14 @@ def _build_compress_adapter(cfg):
     return build_compress_adapter(cfg)
 
 
-async def _get_tools(cfg, session_id: int, conn):
-    """获取工具列表(M3:按 session locked_skill 过滤 + MCP 外轨装配)。
+async def _get_frozen_tools(cfg, session_id: int, conn):
+    """内置工具按 skill 白名单过滤(与 activate_skill 完全同源)。
 
-    - session 未 activate (locked_skill_name IS NULL) → 返回全部内置工具(M1 行为)
-    - session 已 activate → 按 skill manifest.dependencies.tools 白名单过滤(AC-3)
-    - MCP 工具(mcp__{server}__{name})默认全量可用(双轨架构外轨, 扩展能力)
+    用于 ContextManager 的 Frozen Zone hash 计算——MCP 工具属运行时扩展,
+    不参与锁定 hash, 保证 activate 时与 WS 处理时 hash 一致。
 
-    Args:
-        cfg: 配置 dict。
-        session_id: 会话 ID。
-        conn: asyncpg.Connection。
-
-    Returns:
-        ToolDef 列表(内置过滤后 + MCP 全量)。
+    - session 未 activate → 全部内置工具
+    - session 已 activate → skill manifest.dependencies.tools 白名单过滤(AC-3)
     """
     from private_agent.skills.loader import SkillLoader
     from private_agent.tools.builtins import register_all_builtins
@@ -90,16 +84,23 @@ async def _get_tools(cfg, session_id: int, conn):
         session_id,
     )
     if not locked_skill:
-        base_tools = registry.list_tools()
-    else:
-        loader = SkillLoader.from_cfg(cfg)
-        skill = await loader.load(locked_skill, conn)
-        whitelist = [t.name for t in skill.manifest.dependencies.tools if t.enabled]
-        base_tools = registry.list_tools_for_session(whitelist)
+        return registry.list_tools()
 
-    # MCP 外轨: 装配 MCP server 工具(懒连接 + 缓存, 失败跳过)
+    loader = SkillLoader.from_cfg(cfg)
+    skill = await loader.load(locked_skill, conn)
+    whitelist = [t.name for t in skill.manifest.dependencies.tools if t.enabled]
+    return registry.list_tools_for_session(whitelist)
+
+
+async def _get_tools(cfg, session_id: int, conn):
+    """获取全量工具列表: 内置白名单(frozen 同源) + MCP 外轨(全量)。
+
+    - frozen_tools 供 ContextManager hash 锁定(与 activate 一致)
+    - 全部工具供 ReactLoop 调用(内置 + mcp__ 前缀工具)
+    """
+    frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
     mcp_tools = await _get_mcp_manager().get_tools(cfg)
-    return base_tools + mcp_tools
+    return frozen_tools + mcp_tools
 
 
 async def _get_system_prompt(cfg, session_id: int, conn):
@@ -262,7 +263,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
                                 "INSERT INTO sessions (id, title) VALUES ($1, $2)",
                                 session_id, f"session-{session_id}",
                             )
-                        tools = await _get_tools(cfg, session_id, conn)
+                        # frozen_tools: 内置白名单(与 activate 同源, hash 锁定)
+                        # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
+                        frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
+                        tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
                         # 构造 MemoryManager(蓝图 §4.2-§4.5)
                         memories_repo = MemoriesRepo(conn)
                         memory_mgr = MemoryManager(
@@ -287,7 +291,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             system_prompt=await _get_system_prompt(
                                 cfg, session_id, conn
                             ),
-                            tools=tools,
+                            tools=frozen_tools,
                             memory_manager=memory_mgr,
                         )
                         await cm.ensure_initial(conn)

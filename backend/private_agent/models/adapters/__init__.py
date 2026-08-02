@@ -57,6 +57,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         body: dict[str, Any] = {
             "model": self.model_name,
@@ -64,6 +65,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         }
         if tools:
             body["tools"] = tools
+        if max_tokens:
+            body["max_tokens"] = max_tokens
         url = f"{self.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         # V1.5:httpx AsyncClient 长连接可能被上游服务端断开(keep-alive 超时),
@@ -100,6 +103,87 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
         data = resp.json()
         return self._parse_openai_response(data)
+
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+        on_delta: Any | None = None,
+    ) -> ChatResult:
+        """OpenAI 兼容流式 chat: 边收边回调 on_delta(delta 文本), 返回完整 ChatResult。
+
+        - body 带 stream: true + stream_options.include_usage
+        - 累积 content(或 reasoning_content)增量与 tool_calls 分片(index 合并)
+        - on_delta: async (text: str) -> None, 每段增量回调(用于 WS 推送 delta 事件)
+
+        Raises:
+            ProviderError: 非 2xx 响应或连接失败。
+        """
+        body: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            body["tools"] = tools
+        if max_tokens:
+            body["max_tokens"] = max_tokens
+        url = f"{self.base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        content_parts: list[str] = []
+        tool_calls_acc: dict[int, dict[str, Any]] = {}
+
+        async with self._client.stream("POST", url, json=body, headers=headers) as resp:
+            if resp.status_code >= 400:
+                text = (await resp.aread()).decode("utf-8", "ignore")
+                raise ProviderError(
+                    self.provider_name,
+                    f"upstream {resp.status_code}: {text[:200]}",
+                )
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {}) or {}
+                text = delta.get("content") or delta.get("reasoning_content") or ""
+                if text:
+                    content_parts.append(text)
+                    if on_delta is not None:
+                        await on_delta(text)
+                # 流式 tool_calls 分片: 按 index 合并 id/name/arguments
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    acc = tool_calls_acc.setdefault(idx, {
+                        "id": "", "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    })
+                    if tc.get("id"):
+                        acc["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        acc["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        acc["function"]["arguments"] += fn["arguments"]
+
+        tool_calls = [v for _, v in sorted(tool_calls_acc.items())]
+        return ChatResult(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            used_provider=self.provider_name,
+            failed_providers=[],
+        )
 
     def _parse_openai_response(self, data: dict) -> ChatResult:
         choices = data.get("choices") or []

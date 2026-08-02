@@ -62,6 +62,11 @@ models:
       base_url: "https://api.moonshot.cn/v1"
       model_name: "moonshot-v1-8k"
       enabled: true  # [runtime]
+  # 对话参数上限(设置页可手工调整, runtime > yaml)
+  limits:
+    max_input_tokens: 8192   # 最大输入(上下文) tokens
+    max_output_tokens: 2048  # 最大输出 tokens(单次模型响应)
+    max_turns: 20            # 最大对话轮次(单轮对话内工具迭代上限)
 
   router:
     type: "manual"                         # MVP: manual / V2: tag_based [runtime]

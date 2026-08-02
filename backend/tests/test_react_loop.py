@@ -66,6 +66,7 @@ class _MockAdapter:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         self.chat_calls.append((list(messages), list(tools) if tools else None))
         if self._idx >= len(self._responses):
@@ -517,7 +518,7 @@ class _MockAdapter:
         self._idx = 0
         self.chat_calls: list[tuple[list[dict], list[dict] | None]] = []
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, max_tokens=None):
         self.chat_calls.append((list(messages), list(tools) if tools else None))
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock exhausted: idx={self._idx}")
@@ -534,7 +535,7 @@ class _FailingAdapter:
         streaming=False, function_calling=False, vision=False, json_mode=False
     )
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, max_tokens=None):
         raise ProviderError("failing", "always fails")
 
 
@@ -1005,7 +1006,7 @@ def test_run_turn_all_providers_failed_produces_error_event():
                     streaming=False, function_calling=False, vision=False, json_mode=False
                 )
 
-                async def chat(self, messages, tools=None):
+                async def chat(self, messages, tools=None, max_tokens=None):
                     raise AllProvidersFailedError("all 3 providers failed")
 
             loop = ReactLoop(
@@ -1103,7 +1104,7 @@ def test_run_turn_error_event_payload_contains_message():
                     streaming=False, function_calling=False, vision=False, json_mode=False
                 )
 
-                async def chat(self, messages, tools=None):
+                async def chat(self, messages, tools=None, max_tokens=None):
                     raise AllProvidersFailedError("simulated failure")
 
             loop = ReactLoop(

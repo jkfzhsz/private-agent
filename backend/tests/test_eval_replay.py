@@ -54,7 +54,7 @@ class _MockAdapter:
         self._responses = list(responses)
         self._idx = 0
 
-    async def chat(self, messages, tools=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")
         result = self._responses[self._idx]
@@ -299,7 +299,7 @@ def test_run_replay_cleans_up_session_on_exception(tmp_path):
                     streaming=False, function_calling=True, vision=False, json_mode=False
                 )
 
-                async def chat(self, messages, tools=None):
+                async def chat(self, messages, tools=None, max_tokens=None):
                     raise AllProvidersFailedError("all providers failed: boom")
 
             executor = ReplayExecutor(

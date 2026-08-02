@@ -29,6 +29,12 @@ export default function SettingsView(): JSX.Element {
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [protocol, setProtocol] = useState("");
   const [error, setError] = useState("");
+  // LLM 对话参数上限
+  const [maxInput, setMaxInput] = useState(8192);
+  const [maxOutput, setMaxOutput] = useState(2048);
+  const [maxTurns, setMaxTurns] = useState(20);
+  const [limitsMsg, setLimitsMsg] = useState<string | null>(null);
+  const [limitsBusy, setLimitsBusy] = useState(false);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -42,6 +48,10 @@ export default function SettingsView(): JSX.Element {
       setFallbackChain(provData.fallback_chain ?? []);
       setMcpServers(mcpData.servers ?? []);
       setProtocol(mcpData.protocol_version ?? "");
+      const limits = provData.limits ?? {};
+      if (limits.max_input_tokens) setMaxInput(limits.max_input_tokens);
+      if (limits.max_output_tokens) setMaxOutput(limits.max_output_tokens);
+      if (limits.max_turns) setMaxTurns(limits.max_turns);
       setError("");
     } catch (e) {
       setError(String(e));
@@ -51,6 +61,29 @@ export default function SettingsView(): JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const saveLimits = async (): Promise<void> => {
+    setLimitsBusy(true);
+    setLimitsMsg(null);
+    try {
+      const resp = await fetch(`${API_BASE}/settings/models/limits`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          max_input_tokens: Number(maxInput),
+          max_output_tokens: Number(maxOutput),
+          max_turns: Number(maxTurns),
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setLimitsMsg("已保存(对后续对话生效)");
+    } catch (err) {
+      setLimitsMsg(`保存失败: ${String(err)}`);
+    } finally {
+      setLimitsBusy(false);
+    }
+  };
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
@@ -65,6 +98,43 @@ export default function SettingsView(): JSX.Element {
           {providers.map((p) => (
             <ProviderRow key={p.name} provider={p} onSaved={load} />
           ))}
+        </div>
+        {/* 对话参数上限 */}
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 14, marginTop: 16, paddingTop: 14, borderTop: "1px solid rgba(148,163,184,0.15)", flexWrap: "wrap" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>最大输入 tokens</span>
+            <input
+              type="number"
+              min={256}
+              value={maxInput}
+              onChange={(e) => setMaxInput(Number(e.target.value))}
+              style={{ width: 110, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>最大输出 tokens</span>
+            <input
+              type="number"
+              min={64}
+              value={maxOutput}
+              onChange={(e) => setMaxOutput(Number(e.target.value))}
+              style={{ width: 110, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>最大轮次</span>
+            <input
+              type="number"
+              min={1}
+              value={maxTurns}
+              onChange={(e) => setMaxTurns(Number(e.target.value))}
+              style={{ width: 110, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+          </label>
+          <button className="btn-primary" style={{ fontSize: 12, padding: "6px 16px" }} onClick={() => void saveLimits()} disabled={limitsBusy}>
+            保存参数
+          </button>
+          {limitsMsg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{limitsMsg}</span>}
         </div>
       </div>
 

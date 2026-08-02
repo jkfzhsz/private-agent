@@ -497,7 +497,32 @@ async def get_providers():
         "fallback_chain": cfg.get("models", {}).get("router", {}).get(
             "fallback_chain", []
         ),
+        "limits": cfg.get("models", {}).get("limits", {}),
     }
+
+
+class LimitsUpdateRequest(BaseModel):
+    """PUT /settings/models/limits 请求体: 对话参数上限(至少一项)。"""
+
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_turns: int | None = None
+
+
+@router.put("/settings/models/limits", response_model=None)
+async def update_limits(body: LimitsUpdateRequest):
+    """更新对话参数上限(models.limits, config_runtime runtime > yaml)。"""
+    conn = await db.connect()
+    try:
+        if body.max_input_tokens is not None:
+            await _set_runtime(conn, "models.limits.max_input_tokens", max(256, int(body.max_input_tokens)))
+        if body.max_output_tokens is not None:
+            await _set_runtime(conn, "models.limits.max_output_tokens", max(64, int(body.max_output_tokens)))
+        if body.max_turns is not None:
+            await _set_runtime(conn, "models.limits.max_turns", max(1, int(body.max_turns)))
+    finally:
+        await conn.close()
+    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Awaitable, Callable
@@ -99,7 +100,7 @@ class MCPToolManager:
             )
         )
         try:
-            await client.connect()
+            await asyncio.wait_for(client.connect(), timeout=8)
         except Exception as e:  # noqa: BLE001
             logger.warning("MCP '%s' connect failed: %s", sid, e)
             return None
@@ -111,50 +112,63 @@ class MCPToolManager:
     # --------------------------------------------------------------------------
 
     async def get_tools(self, cfg: dict) -> list[ToolDef]:
-        """从配置装配全部 MCP 工具(懒连接 + 缓存)。
+        """从配置装配全部 MCP 工具(懒连接 + 缓存 + 并发装配)。
+
+        所有启用的 server **并发**连接与发现(单个失败/超时跳过, 不阻塞其余),
+        避免 17 个 server 串行连接拖慢首条消息处理。
 
         Args:
             cfg: 合并后的配置 dict(含 tools.mcp.servers)。
 
         Returns:
             ToolDef 列表(名称为 mcp__{server_id}__{original})。
-            连接/发现失败的非启用 server 被跳过, 不影响其余。
         """
         servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
+        enabled = [s for s in servers if s.get("enabled", True) and (s.get("id") or s.get("name"))]
+        if not enabled:
+            return []
+
+        results = await asyncio.gather(
+            *(self._load_server_tools(svc) for svc in enabled),
+            return_exceptions=True,
+        )
         tools: list[ToolDef] = []
-        for svc in servers:
-            if not svc.get("enabled", True):
+        for r in results:
+            if isinstance(r, BaseException):
                 continue
-            sid = svc.get("id") or svc.get("name")
-            if not sid:
-                continue
-            if sid in self._tools_cache:
-                tools.extend(self._tools_cache[sid])
-                continue
-            client = await self._get_client(svc)
-            if client is None or not client.connected:
-                continue
-            try:
-                mcp_tools = await client.discover_tools()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("MCP '%s' discover_tools failed: %s", sid, e)
-                continue
-            defs: list[ToolDef] = []
-            for mt in mcp_tools:
-                base = mcp_tool_to_tooldef(mt)
-                original_name = base.name
-                defs.append(
-                    ToolDef(
-                        name=f"mcp__{sid}__{original_name}",
-                        description=base.description,
-                        parameters_schema=base.parameters_schema,
-                        handler=self._make_handler(client, original_name),
-                    )
-                )
-            self._tools_cache[sid] = defs
-            logger.info("MCP '%s' loaded %d tools", sid, len(defs))
-            tools.extend(defs)
+            tools.extend(r)
         return tools
+
+    async def _load_server_tools(self, svc: dict) -> list[ToolDef]:
+        """单个 server 的工具加载(带缓存与超时, 供并发装配调用)。"""
+        sid = svc.get("id") or svc.get("name")
+        if sid in self._tools_cache:
+            return self._tools_cache[sid]
+        client = await self._get_client(svc)
+        if client is None or not client.connected:
+            return []
+        try:
+            mcp_tools = await asyncio.wait_for(
+                client.discover_tools(), timeout=10
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("MCP '%s' discover_tools failed: %s", sid, e)
+            return []
+        defs: list[ToolDef] = []
+        for mt in mcp_tools:
+            base = mcp_tool_to_tooldef(mt)
+            original_name = base.name
+            defs.append(
+                ToolDef(
+                    name=f"mcp__{sid}__{original_name}",
+                    description=base.description,
+                    parameters_schema=base.parameters_schema,
+                    handler=self._make_handler(client, original_name),
+                )
+            )
+        self._tools_cache[sid] = defs
+        logger.info("MCP '%s' loaded %d tools", sid, len(defs))
+        return defs
 
     def _make_handler(
         self, client: MCPClient, original_name: str

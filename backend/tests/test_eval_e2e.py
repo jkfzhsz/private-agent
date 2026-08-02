@@ -126,7 +126,7 @@ class _SequentialAdapter:
         self._responses = list(responses)
         self._idx = 0
 
-    async def chat(self, messages, tools=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
         if self._idx >= len(self._responses):
             # 超出预设序列时返回 final(防止无限循环)
             return ChatResult(content="fallback final", used_provider="mock-seq")

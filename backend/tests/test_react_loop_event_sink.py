@@ -63,6 +63,7 @@ class _MockAdapter:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")

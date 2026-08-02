@@ -26,6 +26,8 @@ _VALID_EVENT_TYPES = frozenset(
         "injection_alert",
         "injection_blocked",
         "tool_error",
+        # 流式输出增量(逐句/逐字返回, Phase 2 流式对话)
+        "delta",
     }
 )
 

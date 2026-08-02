@@ -75,7 +75,12 @@ class ReactLoop:
         # adapter.chat 期望 OpenAI tools schema dict(非 ToolDef 对象)
         self._tool_schemas = [t.to_openai_schema() for t in tools]
         self._conn = conn
-        self._max_iterations = max_iterations
+        # 最大迭代轮次: 优先配置 models.limits.max_turns(设置页可调)
+        limits = (cfg or {}).get("models", {}).get("limits", {}) if cfg else {}
+        self._max_iterations = int(
+            limits.get("max_turns") or max_iterations
+        )
+        self._max_output_tokens = limits.get("max_output_tokens")
         self._turn = 0
         self._state = ReactLoopState.IDLE
         self._iteration = 0
@@ -165,11 +170,21 @@ class ReactLoop:
             # 构建消息列表
             messages = await self._context_manager.build_messages()
 
-            # 调用模型
+            # 调用模型(流式优先: adapter 支持 chat_stream 时使用)
             try:
-                result: ChatResult = await self._adapter.chat(
-                    messages, self._tool_schemas
-                )
+                if hasattr(self._adapter, "chat_stream"):
+                    result = await self._adapter.chat_stream(
+                        messages,
+                        self._tool_schemas,
+                        max_tokens=self._max_output_tokens,
+                        on_delta=self._emit_delta,
+                    )
+                else:
+                    result = await self._adapter.chat(
+                        messages,
+                        self._tool_schemas,
+                        max_tokens=self._max_output_tokens,
+                    )
             except AllProvidersFailedError as e:
                 await self._emit_event(
                     "error",
@@ -343,6 +358,15 @@ class ReactLoop:
         )
         self._transition(ReactLoopState.ERROR)
         await self._save_checkpoint()
+
+    async def _emit_delta(self, text: str) -> None:
+        """流式增量回调: 产出 delta 事件(前端逐句/逐字渲染)。"""
+        if not text:
+            return
+        await self._emit_event(
+            "delta",
+            payload={"turn": self._turn, "content": text},
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Internal helpers
