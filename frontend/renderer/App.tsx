@@ -241,6 +241,8 @@ export default function App(): JSX.Element {
     setEvents([]);
     setActiveSkill(skillName ?? null);
     lastTurnRef.current = 0;
+    // 切换历史会话: 全量加载(忽略服务端 ws_offset, 否则 offset=1 会跳过第 1 轮)
+    fullReloadRef.current = true;
     setRealSessionId(id);
     setSessionId(id);
     // 进入对话视图(恢复该会话的 skill, 若无 skill 则回首页选模式)
@@ -249,6 +251,7 @@ export default function App(): JSX.Element {
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastTurnRef = useRef<number>(0);
+  const fullReloadRef = useRef<boolean>(false);
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventIdRef = useRef<number>(0);
@@ -342,7 +345,8 @@ export default function App(): JSX.Element {
       }
 
       case "replay_end":
-        // 补发完成,标记后续事件不再特殊处理
+        // 补发完成: 全量加载标记复位, 后续同会话重连走增量
+        fullReloadRef.current = false;
         break;
 
       case "ack_confirm":
@@ -387,11 +391,12 @@ export default function App(): JSX.Element {
       ws.onopen = () => {
         setStatus("connected");
         reconnectAttemptRef.current = 0;
-        // 重连后发送 replay(首次连接 last_turn=0,后端返回空补发)
+        // 重连后发送 replay(首次连接 last_turn=0; 切换历史会话 full=true 全量加载)
         sendWs({
           type: "replay",
           session_id: sessionId,
           last_turn: lastTurnRef.current,
+          full: fullReloadRef.current,
         });
       };
 

@@ -168,6 +168,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 try:
                     session_id = int(msg["session_id"])
                     last_turn = int(msg.get("last_turn", 0))
+                    full = bool(msg.get("full", False))
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
@@ -185,6 +186,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     try:
                         messages = await ws_offset.build_replay_messages(
                             conn, session_id=session_id, last_turn=last_turn,
+                            full=full,
                         )
                     finally:
                         await conn.close()

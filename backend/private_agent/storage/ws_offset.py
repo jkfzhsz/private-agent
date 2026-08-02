@@ -138,6 +138,7 @@ async def build_replay_messages(
     *,
     session_id: int,
     last_turn: int,
+    full: bool = False,
 ) -> list[dict[str, Any]]:
     """构造 WS replay 消息序列(蓝图 §2.3 line 449 + M1 服务端权威)。
 
@@ -149,18 +150,26 @@ async def build_replay_messages(
         conn: Postgres 连接。
         session_id: 会话 ID。
         last_turn: 客户端最大已接收 turn 值(fallback)。
+        full: 全量加载(切换历史会话场景)。True 时忽略服务端 ws_offset,
+            从 last_turn(客户端传 0)开始拉取, 并把 messages 表的 user 消息
+            合并为 user 事件补进事件流(react_events 不存 user 事件)。
 
     Returns:
         WS 消息 dict 列表:
         - 前 N 条:{"type": "react_event", "session_id": ..., "turn": ..., "event_type": ..., "payload": ...}
         - 末 1 条:{"type": "replay_end", "session_id": ..., "count": N, "effective_offset": M}
     """
-    config_offset = await get_ws_offset(conn, session_id=session_id)
-    effective_offset = max(config_offset, last_turn)
+    if full:
+        # 全量: 忽略服务端权威 offset, 客户端 last_turn=0 即从第一轮拉
+        effective_offset = last_turn
+    else:
+        config_offset = await get_ws_offset(conn, session_id=session_id)
+        effective_offset = max(config_offset, last_turn)
     events = await fetch_react_events_since_turn(
         conn, session_id=session_id, last_turn=effective_offset,
     )
-    messages: list[dict[str, Any]] = [
+    # 包装为 WS react_event 消息(原始 events 无 type 字段)
+    event_msgs: list[dict[str, Any]] = [
         {
             "type": "react_event",
             "session_id": e["session_id"],
@@ -170,10 +179,37 @@ async def build_replay_messages(
         }
         for e in events
     ]
+    # 补 user 事件(messages 表 user 消息, turn > offset) —— react_events 不存 user
+    user_rows = await conn.fetch(
+        """
+        SELECT turn, content FROM messages
+        WHERE session_id = $1 AND role = 'user' AND turn > $2
+        ORDER BY id ASC
+        """,
+        session_id,
+        effective_offset,
+    )
+    user_events = [
+        {
+            "type": "react_event",
+            "session_id": session_id,
+            "turn": r["turn"],
+            "event_type": "user",
+            "payload": {"content": r["content"], "turn": r["turn"]},
+        }
+        for r in user_rows
+    ]
+    # 合并排序: user 事件位于该轮最前(渲染分组需要 user 在 turn 组内)
+    merged: list[tuple[int, int, dict[str, Any]]] = [
+        (e["turn"], 1, e) for e in event_msgs
+    ]
+    merged.extend((u["turn"], 0, u) for u in user_events)
+    merged.sort(key=lambda x: (x[0], x[1]))
+    messages: list[dict[str, Any]] = [item[2] for item in merged]
     messages.append({
         "type": "replay_end",
         "session_id": session_id,
-        "count": len(events),
+        "count": len(events) + len(user_events),
         "effective_offset": effective_offset,
     })
     return messages
