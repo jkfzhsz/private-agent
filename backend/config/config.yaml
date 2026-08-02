@@ -149,8 +149,8 @@ tools:
     cache_ttl_ms: 30000  # [runtime] V2 启用
     enable_server_discover: true  # [runtime] 2026-07-28 server/discover 能力探测
   web_search:
-    backend: "duckduckgo"  # duckduckgo(国际,无 key) | bocha(国内,需 PA_BOCHA_API_KEY) | bing(HTML 解析)
-    # 提示: 国内网络下 duckduckgo 不可达, 建议 bocha(bochaai.com 免费注册)并设 PA_WEB_SEARCH_BACKEND=bocha
+    backend: "duckduckgo"  # duckduckgo(国际,无 key) | bocha(已停用) | bing(HTML 解析, 当前默认 .env)
+    # 外部服务统一从前端接入(MCP), 专用搜索 API(如 bocha)不再后端配置
   permission:
     cache_ttl_sec: 3600  # [runtime]
     elevated_require_ws_confirm: true  # [runtime]
