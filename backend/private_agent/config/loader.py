@@ -20,8 +20,10 @@ from private_agent.errors import ConfigNotSupportedInMVP
 # 蓝图 §9.13 config.yaml 位置:backend/config/config.yaml
 CONFIG_FILE = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
 
-# 蓝图 §9.13:MVP 锁定的 protocol_version
-MVP_SUPPORTED_PROTOCOL_VERSIONS = {"2025-11-25"}
+# 蓝图 §9.13:支持的 protocol_version
+# 2026-07-28: 无状态协议(Phase 2 协议升级, 默认)
+# 2025-11-25: 旧有状态协议(向后兼容, 12 个月宽限期内仍可用)
+MVP_SUPPORTED_PROTOCOL_VERSIONS = {"2025-11-25", "2026-07-28"}
 
 # MVP 支持的 MCP 通信类型
 MCP_SUPPORTED_TYPES = {"stdio", "http"}

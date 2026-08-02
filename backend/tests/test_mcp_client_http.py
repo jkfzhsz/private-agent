@@ -1,7 +1,7 @@
-"""B2 P1-6 - MCP HTTP transport 实现。
+"""B2 P1-6 + Phase 2 - MCP HTTP transport 实现(2026-07-28 无状态协议)。
 
-Source: plan/b2-remaining-features step 5-8 (修复计划 §2 P1-6)
-- HTTP 模式用 httpx.AsyncClient,JSON-RPC 2.0 over POST /rpc
+- HTTP 模式用 httpx.AsyncClient,JSON-RPC 2.0 POST 到 config.url(MCP 端点, 不拼 /rpc)
+- 请求带 MCP-Protocol-Version / Mcp-Method / Mcp-Name 头 + _meta(无状态)
 - connect 成功后自动 ping,失败抛 McpConnectError
 """
 from __future__ import annotations
@@ -10,7 +10,12 @@ import httpx
 import pytest
 
 from private_agent.errors import McpConnectError
-from private_agent.tools.mcp_client import MCPClient, MCPClientConfig
+from private_agent.tools.mcp_client import (
+    CLIENT_INFO,
+    PROTOCOL_VERSION,
+    MCPClient,
+    MCPClientConfig,
+)
 
 
 @pytest.fixture
@@ -33,7 +38,7 @@ def _mock_client(handler, config: MCPClientConfig) -> MCPClient:
 
 
 class TestMCPClientHttp:
-    """P1-6: HTTP 模式 connect/discover/call/disconnect。"""
+    """P1-6: HTTP 模式 connect/discover/call/disconnect(2026-07-28 无状态)。"""
 
     async def test_connect_pings_and_marks_connected(self, http_config: MCPClientConfig) -> None:
         """connect(http) 应建 httpx client + 自动 ping,成功则 connected=True。"""
@@ -41,7 +46,7 @@ class TestMCPClientHttp:
 
         def handler(request: httpx.Request) -> httpx.Response:
             nonlocal ping_count
-            if request.url.path == "/rpc" and "ping" in request.content.decode():
+            if request.url.path == "/" and "ping" in request.content.decode():
                 ping_count += 1
                 return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
             return httpx.Response(404, json={"error": "not found"})
@@ -63,15 +68,18 @@ class TestMCPClientHttp:
             await client.connect()
         assert client.connected is False
 
-    async def test_discover_tools_returns_list(self, http_config: MCPClientConfig) -> None:
-        """discover_tools(http) 经 POST /rpc tools/list 返回工具列表。"""
+    async def test_discover_tools_uses_stateless_headers(self, http_config: MCPClientConfig) -> None:
+        """discover_tools(http) 应携带 2026-07-28 无状态头(Mcp-Method/MCP-Protocol-Version)。"""
         tools = [{"name": "read", "description": "Read file", "inputSchema": {"type": "object"}}]
 
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/rpc"
+            assert request.url.path == "/"
             assert request.method == "POST"
+            assert request.headers.get("MCP-Protocol-Version") == PROTOCOL_VERSION
+            assert request.headers.get("Mcp-Method") == "tools/list"
             body = request.content.decode()
             assert "tools/list" in body
+            assert CLIENT_INFO["name"] in body  # _meta 注入 clientInfo
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})
 
         client = _mock_client(handler, http_config)
@@ -79,18 +87,27 @@ class TestMCPClientHttp:
         result = await client.discover_tools()
         assert result == tools
 
-    async def test_call_tool_returns_result(self, http_config: MCPClientConfig) -> None:
-        """call_tool(http) 经 POST /rpc tools/call 返回结果。"""
+    async def test_call_tool_uses_stateless_headers_and_meta(
+        self, http_config: MCPClientConfig
+    ) -> None:
+        """call_tool(http) 应携带 Mcp-Name 头 + _meta(无状态)。"""
         def handler(request: httpx.Request) -> httpx.Response:
             body = request.content.decode()
             assert "tools/call" in body
             assert "calculate" in body
+            # 无状态头
+            assert request.headers.get("Mcp-Method") == "tools/call"
+            assert request.headers.get("Mcp-Name") == "calculate"
+            assert request.headers.get("MCP-Protocol-Version") == PROTOCOL_VERSION
+            # _meta 注入
+            assert '"protocolVersion"' in body
+            assert "io.modelcontextprotocol/clientInfo" in body
             return httpx.Response(
                 200,
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
-                    "result": {"content": [{"type": "text", "text": "42"}]},
+                    "result": {"resultType": "result", "content": [{"type": "text", "text": "42"}]},
                 },
             )
 
@@ -98,6 +115,32 @@ class TestMCPClientHttp:
         client._connected = True
         result = await client.call_tool("calculate", {"expr": "6*7"})
         assert result["content"][0]["text"] == "42"
+
+    async def test_call_tool_mrtr_input_required_passthrough(
+        self, http_config: MCPClientConfig
+    ) -> None:
+        """MRTR: 服务器返回 inputRequired 时原样透传(不当作错误)。"""
+        mrtr_result = {
+            "resultType": "inputRequired",
+            "inputRequests": {
+                "confirm": {
+                    "type": "elicitation",
+                    "message": "确定删除 3 个文件?",
+                    "schema": {"type": "boolean"},
+                }
+            },
+            "requestState": "eyJzdGVwIjoxfQ==",
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": mrtr_result})
+
+        client = _mock_client(handler, http_config)
+        client._connected = True
+        result = await client.call_tool("delete_files", {"paths": ["a", "b", "c"]})
+        assert result.get("resultType") == "inputRequired"
+        assert "inputRequests" in result
+        assert "requestState" in result
 
     async def test_disconnect_closes_http_client(self, http_config: MCPClientConfig) -> None:
         """disconnect(http) 应关闭 httpx client 并幂等。"""

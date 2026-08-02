@@ -138,11 +138,11 @@ tools:
   mcp:
     config_source: "hybrid"  # [runtime]
     probe_interval_sec: 60  # [runtime]
-    servers: []  # MCP 服务声明列表:每项含 id/type/command/args/tags/timeout;http 类型含 url,可选 health_check_interval_sec(默认 30)
-    # MCP 2026-07-28 协议版本协商(MVP 锁定旧协议,V2 启用新协议)
-    protocol_version: "2025-11-25"  # [runtime] MVP 仅支持 2025-11-25;loader 对 2026-07-28 抛 ConfigNotSupportedInMVP
+    servers: []  # MCP 服务声明列表:每项含 id/type/command/args/tags/timeout;http 类型含 url(MCP 端点, 如 http://host:port/mcp)
+    # MCP 2026-07-28 无状态协议(Phase 2 协议升级): 移除握手/会话, 请求带 _meta + MCP-Protocol-Version/Mcp-Method/Mcp-Name 头
+    protocol_version: "2026-07-28"  # [runtime] 支持: 2026-07-28(无状态,默认) | 2025-11-25(旧有状态,兼容)
     cache_ttl_ms: 30000  # [runtime] V2 启用
-    enable_server_discover: false  # [runtime] V2 启用
+    enable_server_discover: true  # [runtime] 2026-07-28 server/discover 能力探测
   web_search:
     backend: "duckduckgo"  # duckduckgo(国际,无 key) | bocha(国内,需 PA_BOCHA_API_KEY) | bing(HTML 解析)
     # 提示: 国内网络下 duckduckgo 不可达, 建议 bocha(bochaai.com 免费注册)并设 PA_WEB_SEARCH_BACKEND=bocha

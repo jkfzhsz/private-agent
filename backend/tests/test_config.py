@@ -29,10 +29,10 @@ def test_config_system_version():
     assert cfg["system"]["version"] == "0.1.0"
 
 
-def test_mcp_protocol_version_locked_to_2025_11_25():
-    """tools.mcp.protocol_version == '2025-11-25'(蓝图 §9.13 MVP 锁定)。"""
+def test_mcp_protocol_version_is_2026_07_28():
+    """tools.mcp.protocol_version == '2026-07-28'(Phase 2 协议升级: 无状态默认)。"""
     cfg = loader.load_config()
-    assert cfg["tools"]["mcp"]["protocol_version"] == "2025-11-25"
+    assert cfg["tools"]["mcp"]["protocol_version"] == "2026-07-28"
 
 
 def test_mcp_servers_defaults_to_empty_list():
@@ -168,10 +168,11 @@ def test_mcp_servers_stdio_without_command_raises(tmp_path, monkeypatch):
         loader.load_config()
 
 
-def test_loader_raises_on_unsupported_protocol_2026_07_28(tmp_path, monkeypatch):
-    """当 config.yaml 的 protocol_version == '2026-07-28' 时,load_config() 抛 ConfigNotSupportedInMVP。
+def test_loader_raises_on_unsupported_protocol_future(tmp_path, monkeypatch):
+    """当 config.yaml 的 protocol_version 为不支持的版本时,load_config() 抛 ConfigNotSupportedInMVP。
 
-    蓝图 §9.13:loader 对 2026-07-28 抛 ConfigNotSupportedInMVP,防止 UI 误改静默失败。
+    2026-07-28(无状态)与 2025-11-25(旧有状态)均受支持(Phase 2 协议升级);
+    不在支持列表的未来版本仍应抛错,防止 UI 误改静默失败。
     """
     # 构造一个最小的不合法 config.yaml
     bad_config = tmp_path / "config_bad.yaml"
@@ -183,7 +184,7 @@ def test_loader_raises_on_unsupported_protocol_2026_07_28(tmp_path, monkeypatch)
               version: "0.1.0"
             tools:
               mcp:
-                protocol_version: "2026-07-28"
+                protocol_version: "2027-01-01"
             """
         ).strip(),
         encoding="utf-8",

@@ -1042,29 +1042,42 @@ async def test_mcp_server(name: str):
 
 
 async def _test_mcp_http(name: str, url: str) -> dict:
+    """2026-07-28 无状态协议探活: 发 tools/list(带协议头), 而非旧版 initialize 握手。"""
     import httpx
 
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "initialize",
+        "method": "tools/list",
         "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {"name": "private-agent-test", "version": "0.1"},
+            "_meta": {
+                "protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "private-agent-test",
+                    "version": "0.1",
+                },
+                "capabilities": {},
+            }
         },
     }
+    headers = {
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list",
+        "Content-Type": "application/json",
+    }
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=payload, headers=headers)
         if resp.status_code != 200:
             return {"ok": False, "server": name, "error": f"HTTP {resp.status_code}"}
         data = resp.json()
         result = data.get("result", {})
+        tools = result.get("tools", [])
         return {
             "ok": True,
             "server": name,
-            "protocol": result.get("protocolVersion", ""),
+            "protocol": "2026-07-28",
             "server_info": result.get("serverInfo", {}).get("name", ""),
+            "tools_count": len(tools),
         }
 
 
@@ -1083,11 +1096,16 @@ async def _test_mcp_stdio(name: str, command: str, args: list[str]) -> dict:
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "initialize",
+            "method": "tools/list",
             "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "private-agent-test", "version": "0.1"},
+                "_meta": {
+                    "protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "private-agent-test",
+                        "version": "0.1",
+                    },
+                    "capabilities": {},
+                }
             },
         }
         import json as _json
@@ -1097,11 +1115,13 @@ async def _test_mcp_stdio(name: str, command: str, args: list[str]) -> dict:
         line = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
         data = _json.loads(line.decode("utf-8"))
         result = data.get("result", {})
+        tools = result.get("tools", [])
         return {
             "ok": True,
             "server": name,
-            "protocol": result.get("protocolVersion", ""),
+            "protocol": "2026-07-28",
             "server_info": result.get("serverInfo", {}).get("name", ""),
+            "tools_count": len(tools),
         }
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}

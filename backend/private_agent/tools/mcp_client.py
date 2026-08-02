@@ -1,8 +1,12 @@
 """蓝图 §5.x / spec m2-tools-lifecycle - MCPClient MCP 协议客户端。
 
-MCP 2025-11-25 协议实现:
-- stdio 模式:全量实现(子进程管理、JSON-RPC 通信)
-- HTTP 模式(B2 P1-6):JSON-RPC 2.0 over HTTP(POST /rpc)+ ping/health_check/liveness_loop 双探活
+MCP 2026-07-28 无状态协议实现(Phase 2 协议升级):
+- 移除 initialize/initialized 握手与 Mcp-Session-Id(无会话, 每请求自包含)
+- HTTP 请求携带 MCP-Protocol-Version / Mcp-Method / Mcp-Name 头
+- JSON-RPC body 注入 _meta(clientInfo + protocolVersion + capabilities)
+- HTTP POST 直接发往 config.url(MCP 端点, 不再拼接 /rpc)
+- 支持 MRTR 检测: resultType == "inputRequired" 时透传 inputRequests/requestState
+- stdio 模式同步注入 _meta(子进程管理 + JSON-RPC 通信保持)
 """
 from __future__ import annotations
 
@@ -21,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["MCPClient", "MCPClientConfig", "McpHealthStatus"]
 
+# 2026-07-28 无状态协议版本
+PROTOCOL_VERSION = "2026-07-28"
+# 旧协议(兼容, 未接入具体 server 时保留)
+LEGACY_PROTOCOL_VERSION = "2025-11-25"
+# 客户端信息(_meta 中携带)
+CLIENT_INFO = {"name": "private-agent", "version": "0.1.0"}
+
 
 @dataclass
 class MCPClientConfig:
@@ -31,9 +42,10 @@ class MCPClientConfig:
         server_type: 通信类型(stdio/http)。
         command: 启动命令(stdio 模式)。
         args: 启动参数(stdio 模式)。
-        url: HTTP 服务地址(http 模式,如 http://127.0.0.1:3000)。
+        url: HTTP 服务地址(http 模式, 为完整 MCP 端点, 如 http://127.0.0.1:3000/mcp)。
         tags: 服务标签列表(用于 ManualRouter 路由)。
         timeout_sec: 通信超时秒数。
+        protocol_version: MCP 协议版本(默认 2026-07-28 无状态)。
         health_check_interval_sec: liveness_loop 探活间隔秒数。
     """
 
@@ -44,6 +56,7 @@ class MCPClientConfig:
     url: str = ""
     tags: list[str] = field(default_factory=list)
     timeout_sec: float = 30.0
+    protocol_version: str = PROTOCOL_VERSION
     health_check_interval_sec: float = 30.0
 
 
@@ -65,7 +78,7 @@ class McpHealthStatus:
 
 
 class MCPClient:
-    """MCP 协议客户端。
+    """MCP 2026-07-28 无状态协议客户端。
 
     管理 MCP 服务器子进程的生命周期和 JSON-RPC 通信。
     """
@@ -105,7 +118,8 @@ class MCPClient:
         """建立与 MCP 服务器的连接。
 
         stdio: 启动子进程 + 后台读循环。
-        http: 创建 httpx.AsyncClient,连接后立即 ping 探活。
+        http: 创建 httpx.AsyncClient + 立即 ping 探活(无状态协议无握手,
+            请求自包含, connect 仅验证可达性)。
 
         Raises:
             McpConnectError: HTTP 模式 ping 失败。
@@ -137,8 +151,13 @@ class MCPClient:
         logger.info("MCP server '%s' connected (pid=%d)", self._config.server_id, self._process.pid)
 
     async def _connect_http(self) -> None:
-        """HTTP 模式:创建 httpx client + 立即 ping 探活(B2 P1-6)。"""
-        logger.info("Connecting to MCP HTTP server '%s': %s", self._config.server_id, self._config.url)
+        """HTTP 模式:创建 httpx client + 立即 ping 探活(2026-07-28 无状态)。"""
+        logger.info(
+            "Connecting to MCP HTTP server '%s': %s (protocol %s)",
+            self._config.server_id,
+            self._config.url,
+            self._config.protocol_version,
+        )
         if self._http_client is None:
             # 允许测试预注入 mock client;默认创建真实 httpx client
             self._http_client = httpx.AsyncClient(timeout=self._config.timeout_sec)
@@ -196,7 +215,7 @@ class MCPClient:
         await self.disconnect()
 
     # --------------------------------------------------------------------------
-    # MCP Protocol: discover / call
+    # MCP Protocol: discover / call (2026-07-28 无状态)
     # --------------------------------------------------------------------------
 
     async def discover_tools(self) -> list[dict]:
@@ -219,14 +238,15 @@ class MCPClient:
         return response.get("result", {}).get("tools", [])
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict:
-        """调用 MCP tools/call 执行工具。
+        """调用 MCP tools/call 执行工具(2026-07-28 无状态)。
 
         Args:
             name: 工具名称。
             arguments: 工具参数字典。
 
         Returns:
-            MCP 工具调用结果 dict。
+            MCP 工具调用结果 dict。若服务器返回 MRTR(InputRequiredResult),
+            result 含 resultType="inputRequired" + inputRequests/requestState, 原样透传。
 
         Raises:
             RuntimeError: 未连接时调用。
@@ -235,7 +255,9 @@ class MCPClient:
             raise RuntimeError(f"MCP server '{self._config.server_id}' not connected")
 
         if self._config.server_type == "http":
-            return await self._http_post("tools/call", {"name": name, "arguments": arguments})
+            return await self._http_post(
+                "tools/call", {"name": name, "arguments": arguments}, name=name
+            )
 
         response = await self._send_request({
             "method": "tools/call",
@@ -248,10 +270,10 @@ class MCPClient:
     # --------------------------------------------------------------------------
 
     async def ping(self) -> bool:
-        """MCP JSON-RPC ping 探活。
+        """MCP JSON-RPC ping 探活(2026-07-28 下 ping 仍受支持)。
 
         stdio: 发送 {"method":"ping"} 请求,收到 result 视为健康。
-        http: POST /rpc ping,200 + 有 result 视为健康。
+        http: POST 端点 ping,200 + 有 result 视为健康。
 
         Returns:
             True 表示服务器可达且响应正常。
@@ -262,7 +284,7 @@ class MCPClient:
                 start = time.monotonic()
                 payload = self._build_request("ping")
                 resp = await self._http_client.post(
-                    self._rpc_url(), json=payload, timeout=self._config.timeout_sec
+                    self._endpoint(), json=payload, timeout=self._config.timeout_sec
                 )
                 self._latency_ms = (time.monotonic() - start) * 1000
                 if resp.status_code >= 400:
@@ -328,46 +350,74 @@ class MCPClient:
             await asyncio.sleep(interval)
 
     # --------------------------------------------------------------------------
-    # Internal: JSON-RPC over HTTP (B2 P1-6)
+    # Internal: JSON-RPC over HTTP (2026-07-28 无状态)
     # --------------------------------------------------------------------------
 
     def _build_request(self, method: str, params: dict[str, Any] | None = None) -> dict:
-        """构造 JSON-RPC 2.0 请求体。"""
+        """构造 JSON-RPC 2.0 请求体, 注入 2026-07-28 无状态 _meta。"""
         self._request_id += 1
         request: dict[str, Any] = {"jsonrpc": "2.0", "id": self._request_id, "method": method}
         if params is not None:
             request["params"] = params
         return request
 
-    def _rpc_url(self) -> str:
-        """HTTP JSON-RPC 端点(POST {url}/rpc)。"""
-        return f"{self._config.url.rstrip('/')}/rpc"
+    def _inject_meta(self, params: dict[str, Any] | None) -> dict[str, Any] | None:
+        """向 params 注入 2026-07-28 无状态 _meta(协议版本/客户端信息/能力)。"""
+        if params is None:
+            params = {}
+        meta = params.get("_meta")
+        if meta is None:
+            meta = {}
+            params["_meta"] = meta
+        meta.setdefault("protocolVersion", self._config.protocol_version)
+        meta.setdefault("io.modelcontextprotocol/clientInfo", CLIENT_INFO)
+        meta.setdefault("capabilities", {})
+        return params
 
-    async def _http_post(self, method: str, params: dict[str, Any] | None = None) -> dict:
-        """POST /rpc 发送 JSON-RPC 请求并返回 result dict。"""
+    def _endpoint(self) -> str:
+        """HTTP MCP 端点: 2026-07-28 无状态协议直接使用 config.url(不拼接 /rpc)。"""
+        return self._config.url.rstrip("/")
+
+    async def _http_post(
+        self, method: str, params: dict[str, Any] | None = None, name: str | None = None
+    ) -> dict:
+        """POST MCP 端点发送 JSON-RPC 请求, 携带无状态协议头, 返回 result dict。
+
+        Args:
+            method: JSON-RPC method(如 tools/call), 同时作为 Mcp-Method 头。
+            params: 请求参数(注入 _meta)。
+            name: 具名目标(工具名), 作为 Mcp-Name 头(tools/call 等)。
+        """
         assert self._http_client is not None
+        params = self._inject_meta(params)
         payload = self._build_request(method, params)
-        resp = await self._http_client.post(self._rpc_url(), json=payload)
+        headers: dict[str, str] = {
+            "MCP-Protocol-Version": self._config.protocol_version,
+            "Mcp-Method": method,
+        }
+        if name is not None:
+            headers["Mcp-Name"] = name
+        resp = await self._http_client.post(
+            self._endpoint(),
+            json=payload,
+            headers=headers,
+            timeout=self._config.timeout_sec,
+        )
         resp.raise_for_status()
         return resp.json().get("result", {})
 
     # --------------------------------------------------------------------------
-    # Internal: JSON-RPC communication
+    # Internal: JSON-RPC communication (stdio, 注入 _meta)
     # --------------------------------------------------------------------------
 
     async def _send_request(self, msg: dict) -> dict:
-        """发送 JSON-RPC 请求并等待响应。
-
-        Args:
-            msg: 请求体(method/params)。
-
-        Returns:
-            完整 JSON-RPC 响应 dict。
-
-        Raises:
-            asyncio.TimeoutError: 超时未收到响应。
-        """
+        """发送 JSON-RPC 请求并等待响应(stdio, body 注入 _meta)。"""
         self._request_id += 1
+        # 注入 2026-07-28 无状态 _meta 到 params
+        if "params" in msg and isinstance(msg["params"], dict):
+            msg = {**msg, "params": self._inject_meta(dict(msg["params"]))}
+        elif msg.get("method") in {"tools/list", "tools/call", "ping"}:
+            msg = {**msg, "params": self._inject_meta({})}
         request = {
             "jsonrpc": "2.0",
             "id": self._request_id,
