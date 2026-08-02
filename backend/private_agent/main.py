@@ -37,6 +37,18 @@ app.include_router(files.router)
 _logger = logging.getLogger("private_agent.main")
 
 _scheduler = None  # APScheduler 单例(startup 创建,shutdown 停止)
+# MCP 外轨工具管理器(进程级单例, 懒连接 + 缓存, shutdown 时关闭)
+_mcp_manager = None  # type: ignore[assignment]
+
+
+def _get_mcp_manager():
+    """惰性初始化 MCPToolManager(避免 import 时产生循环依赖)。"""
+    global _mcp_manager
+    if _mcp_manager is None:
+        from private_agent.tools.mcp_tools import MCPToolManager
+
+        _mcp_manager = MCPToolManager()
+    return _mcp_manager
 
 
 def _build_adapter(cfg):
@@ -52,10 +64,11 @@ def _build_compress_adapter(cfg):
 
 
 async def _get_tools(cfg, session_id: int, conn):
-    """获取工具列表(M3:按 session locked_skill 过滤,测试可 monkeypatch)。
+    """获取工具列表(M3:按 session locked_skill 过滤 + MCP 外轨装配)。
 
     - session 未 activate (locked_skill_name IS NULL) → 返回全部内置工具(M1 行为)
     - session 已 activate → 按 skill manifest.dependencies.tools 白名单过滤(AC-3)
+    - MCP 工具(mcp__{server}__{name})默认全量可用(双轨架构外轨, 扩展能力)
 
     Args:
         cfg: 配置 dict。
@@ -63,7 +76,7 @@ async def _get_tools(cfg, session_id: int, conn):
         conn: asyncpg.Connection。
 
     Returns:
-        ToolDef 列表(过滤后)。
+        ToolDef 列表(内置过滤后 + MCP 全量)。
     """
     from private_agent.skills.loader import SkillLoader
     from private_agent.tools.builtins import register_all_builtins
@@ -77,12 +90,16 @@ async def _get_tools(cfg, session_id: int, conn):
         session_id,
     )
     if not locked_skill:
-        return registry.list_tools()
+        base_tools = registry.list_tools()
+    else:
+        loader = SkillLoader.from_cfg(cfg)
+        skill = await loader.load(locked_skill, conn)
+        whitelist = [t.name for t in skill.manifest.dependencies.tools if t.enabled]
+        base_tools = registry.list_tools_for_session(whitelist)
 
-    loader = SkillLoader.from_cfg(cfg)
-    skill = await loader.load(locked_skill, conn)
-    whitelist = [t.name for t in skill.manifest.dependencies.tools if t.enabled]
-    return registry.list_tools_for_session(whitelist)
+    # MCP 外轨: 装配 MCP server 工具(懒连接 + 缓存, 失败跳过)
+    mcp_tools = await _get_mcp_manager().get_tools(cfg)
+    return base_tools + mcp_tools
 
 
 async def _get_system_prompt(cfg, session_id: int, conn):
@@ -428,10 +445,15 @@ def _configure_logger(cfg: dict) -> None:
 
 @app.on_event("shutdown")
 async def _on_shutdown() -> None:
-    """关闭钩子:停止 scheduler + 关闭连接池。"""
+    """关闭钩子:停止 scheduler + 关闭 MCP 客户端 + 关闭连接池。"""
     global _scheduler
     if _scheduler is not None and _scheduler.running:
         _scheduler.shutdown(wait=False)
+    # 断开 MCP 客户端(进程级单例, 装配用)
+    try:
+        await _mcp_manager.close_all()
+    except Exception:  # noqa: BLE001
+        pass
     await db.close_pool()
 
 
