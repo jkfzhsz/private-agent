@@ -191,6 +191,12 @@ def test_react_loop_compression_marks_old_messages():
             api_msgs = cm.get_messages()
             meta_msgs = cm.get_messages_with_meta()
             assert len(api_msgs) < len(meta_msgs)
+            # §3.10 [MVP] 压缩存档: 被压缩消息归档到 messages_archive
+            n_archived = await conn.fetchval(
+                "SELECT COUNT(*) FROM messages_archive WHERE session_id=$1",
+                session_id,
+            )
+            assert n_archived == n_compressed
         finally:
             await conn.close()
 

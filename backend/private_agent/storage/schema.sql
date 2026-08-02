@@ -82,7 +82,7 @@ CREATE TABLE react_events (
     turn        INT NOT NULL,
     event_type  TEXT NOT NULL CHECK (event_type IN (
         'thinking', 'tool_call', 'tool_result', 'final', 'error', 'checkpoint',
-        'sandbox_execution', 'memory_extracted',
+        'sandbox_execution', 'memory_extracted', 'memory_evicted',
         'compress', 'token_usage',
         'injection_alert', 'injection_blocked',
         'tool_error', 'delta',
@@ -158,7 +158,7 @@ CREATE INDEX idx_kb_chunks_embedding_hnsw ON kb_chunks
 -- ==============================================================================
 CREATE TABLE version_snapshots (
     id          BIGSERIAL PRIMARY KEY,
-    scope       VARCHAR(20) NOT NULL CHECK (scope IN ('prompt', 'skill', 'harness', 'config', 'kb')),
+    scope       VARCHAR(20) NOT NULL CHECK (scope IN ('prompt', 'skill', 'harness', 'config', 'kb', 'stable_zone')),
     version     VARCHAR(20) NOT NULL,            -- 语义化版本
     payload     JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -279,6 +279,39 @@ def test_extract_and_evict_records_event(manager: MemoryManager, repo: _MockRepo
     assert "evicted" in event["payload"]
 
 
+def test_extract_and_evict_records_memory_evicted_event():
+    """§4.4 [MVP]: 淘汰发生时单独记录 memory_evicted 事件。"""
+    recorder = _MockEventsRecorder()
+    repo = _MockRepo()
+    repo.active_count = 250  # 超过 eviction_max_active=200 → 触发淘汰
+    mgr = MemoryManager(
+        memories_repo=repo,
+        compress_adapter=_MockCompressAdapter(),
+        react_events_insert=recorder,
+        eviction_max_active=200,
+    )
+    asyncio_run(mgr._extract_and_evict(session_id=1, current_turn=8))
+    types = [e["event_type"] for e in recorder.events]
+    assert "memory_evicted" in types
+    evicted_ev = next(e for e in recorder.events if e["event_type"] == "memory_evicted")
+    assert evicted_ev["session_id"] == 1
+    assert evicted_ev["turn"] == 8
+    assert evicted_ev["payload"]["count"] > 0
+
+
+def test_extract_and_evict_no_evicted_event_when_nothing_evicted():
+    """无淘汰发生时(memory_extracted 的 evicted=0)不产生 memory_evicted 事件。"""
+    recorder = _MockEventsRecorder()
+    mgr = MemoryManager(
+        memories_repo=_MockRepo(),  # active_count=1 < 200, 无淘汰
+        compress_adapter=_MockCompressAdapter(),
+        react_events_insert=recorder,
+    )
+    asyncio_run(mgr._extract_and_evict(session_id=1, current_turn=8))
+    types = [e["event_type"] for e in recorder.events]
+    assert types == ["memory_extracted"]
+
+
 # ── 无 compress_adapter 时的行为 ────────────────────────────────────────
 
 

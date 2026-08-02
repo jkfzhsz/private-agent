@@ -106,8 +106,14 @@ def test_reload_from_db_rebuilds_three_zones():
     # Frozen Zone 一致
     assert f2 == f1
     assert f2[0]["role"] == "system"
-    # Stable Zone 一致(reload_from_db 必须补全 M1 遗留的 Stable reload)
-    assert s2 == s1
+    # Stable Zone 语义一致(reload_from_db 恢复 role/content + 内部字段
+    # turn/msg_id/zone, 供 §4.15 KB 计数与 §3.10.3 合并使用)
+    assert len(s2) == len(s1)
+    for before, after in zip(s1, s2):
+        assert after["role"] == before["role"]
+        assert after["content"] == before["content"]
+        assert after["msg_id"] is not None
+        assert after["zone"] == "stable"
     assert s2[0]["role"] == "user"
     assert s2[0]["content"] == "stable-memory"
     # Active Zone 一致(含 user/assistant/tool 三类)

@@ -140,6 +140,61 @@ class ContextManager:
             {"role": "user", "content": memories_text}
         ]
 
+    async def inject_kb_chunks(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        turn: int,
+        content: str,
+    ) -> None:
+        """§4.15 [MVP]: 注入知识库检索片段到 Stable Zone。
+
+        search_knowledge 工具结果除本轮 tool message 外, 额外注入
+        Stable Zone 供后续轮次长期参考(蓝图 §4.15: "工具返回的 KB 片段
+        由 context_manager 注入 Stable Zone")。带 [KB Context] 前缀,
+        供 §3.10.3 Stable Zone 合并压缩按前缀统计。
+
+        Args:
+            conn: Postgres 连接。
+            turn: 当前轮次。
+            content: KB 检索片段文本(截断至合理长度, 防膨胀)。
+        """
+        if not content:
+            return
+        # 截断防止单次注入过大(蓝图 artifact 阈值 4k token ≈ 12k 字符)
+        content = content[:12000]
+        kb_text = f"[KB Context]\n{content}"
+        msg_id = await conn.fetchval(
+            """
+            INSERT INTO messages (session_id, turn, role, content, zone)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            """,
+            self.session_id,
+            turn,
+            "user",
+            kb_text,
+            "stable",
+        )
+        self.stable_zone.messages.append(
+            {
+                "role": "user",
+                "content": kb_text,
+                "turn": turn,
+                "msg_id": msg_id,
+                "zone": "stable",
+            }
+        )
+
+    def kb_chunk_count(self) -> int:
+        """统计 Stable Zone 中 [KB Context] 片段数(§3.10.3 合并触发条件 2)。"""
+        return sum(
+            1
+            for m in self.stable_zone.messages
+            if (m.get("content") or "").startswith("[KB Context]")
+            and not m.get("compressed")
+        )
+
     async def ensure_initial(self, conn: "asyncpg.Connection") -> None:
         """幂等启动构建(蓝图 §3.3 + spec AC-3)。
 
@@ -246,7 +301,17 @@ class ContextManager:
             if zone == "frozen":
                 frozen.append({"role": role, "content": row["content"]})
             elif zone == "stable":
-                stable.append({"role": role, "content": row["content"]})
+                # 带内部字段恢复(§4.15 KB 计数 / §3.10.3 合并依赖)
+                stable_msg: dict[str, Any] = {
+                    "role": role,
+                    "content": row["content"],
+                    "turn": row["turn"],
+                    "msg_id": row["id"],
+                    "zone": zone,
+                }
+                if row["compressed"]:
+                    stable_msg["compressed"] = True
+                stable.append(stable_msg)
             elif zone == "active":
                 msg: dict[str, Any] = {
                     "role": role,

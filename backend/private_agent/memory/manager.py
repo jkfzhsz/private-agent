@@ -208,6 +208,14 @@ class MemoryManager:
                     "evicted": evicted,
                 },
             )
+            # §4.4 [MVP]: 淘汰事件单独记录(评估回放需要区分提取/淘汰)
+            if evicted > 0:
+                await self._react_events_insert(
+                    session_id=session_id,
+                    turn=current_turn,
+                    event_type="memory_evicted",
+                    payload={"count": evicted},
+                )
         return memories
 
     async def _extract_memories(

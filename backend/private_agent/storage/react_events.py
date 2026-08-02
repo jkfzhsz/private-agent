@@ -21,6 +21,7 @@ _VALID_EVENT_TYPES = frozenset(
         "checkpoint",
         "sandbox_execution",
         "memory_extracted",
+        "memory_evicted",  # §4.4 [MVP]: 记忆淘汰事件(蓝图要求单独记录)
         "compress",
         "token_usage",
         "injection_alert",

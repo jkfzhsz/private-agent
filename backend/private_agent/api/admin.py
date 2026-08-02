@@ -153,9 +153,14 @@ async def extract_memory(session_id: int):
                 )
             cfg = loader.load_config()
             repo = MemoriesRepo(conn)
+            # V2 补齐(§4.4 [MVP]): 注入 react_events_insert, 手动提取路径
+            # 同样记录 memory_extracted/memory_evicted 事件
+            from private_agent.storage.react_events import insert_react_event
+
             mgr = MemoryManager(
                 memories_repo=repo,
                 compress_adapter=_build_compress_adapter(cfg),
+                react_events_insert=insert_react_event,
                 extract_interval_turns=cfg.get("memory", {}).get(
                     "extract_interval_turns", 8
                 ),
@@ -798,6 +803,104 @@ async def test_provider(name: str):
             "ok": False,
             "provider": name,
             "error": f"{type(e).__name__}: {e}",
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# §6.14 [MVP] 沙箱配置管理 UI(蓝图 §6.14: GET/PUT config + POST test)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class SandboxConfigUpdateRequest(BaseModel):
+    """PUT /admin/settings/sandbox 请求体(至少一项, 空表示不更新)。"""
+
+    enabled: bool | None = None
+    cpu_timeout_sec: int | None = None
+    memory_limit_mb: int | None = None
+    disk_limit_mb: int | None = None
+    network_enabled: bool | None = None
+    code_scan_enabled: bool | None = None
+    env_sanitization_enabled: bool | None = None
+    retention_days: int | None = None
+
+
+class SandboxTestRequest(BaseModel):
+    """POST /admin/settings/sandbox/test 请求体。"""
+
+    code: str = "print('sandbox ok')"
+    language: str = "python"
+
+
+@router.get("/settings/sandbox", response_model=None)
+async def get_sandbox_config():
+    """读取沙箱配置(yaml + config_runtime 运行时覆盖合并, 蓝图 §6.14)。"""
+    cfg = await _load_cfg()
+    return cfg.get("sandbox", {})
+
+
+@router.put("/settings/sandbox", response_model=None)
+async def update_sandbox_config(body: SandboxConfigUpdateRequest):
+    """修改沙箱运行时配置(写入 config_runtime, 下次执行生效, 蓝图 §6.14)。
+
+    支持项: enabled / limits(cpu_timeout_sec, memory_limit_mb,
+    disk_limit_mb, network_enabled) / security(code_scan_enabled,
+    env_sanitization_enabled) / retention_days。
+    """
+    conn = await db.connect()
+    try:
+        if body.enabled is not None:
+            await _set_runtime(conn, "sandbox.enabled", bool(body.enabled))
+        if body.cpu_timeout_sec is not None:
+            await _set_runtime(conn, "sandbox.limits.cpu_timeout_sec", body.cpu_timeout_sec)
+        if body.memory_limit_mb is not None:
+            await _set_runtime(conn, "sandbox.limits.memory_limit_mb", body.memory_limit_mb)
+        if body.disk_limit_mb is not None:
+            await _set_runtime(conn, "sandbox.limits.disk_limit_mb", body.disk_limit_mb)
+        if body.network_enabled is not None:
+            await _set_runtime(conn, "sandbox.limits.network_enabled", bool(body.network_enabled))
+        if body.code_scan_enabled is not None:
+            await _set_runtime(conn, "sandbox.security.code_scan_enabled", bool(body.code_scan_enabled))
+        if body.env_sanitization_enabled is not None:
+            await _set_runtime(
+                conn,
+                "sandbox.security.env_sanitization_enabled",
+                bool(body.env_sanitization_enabled),
+            )
+        if body.retention_days is not None:
+            await _set_runtime(conn, "sandbox.retention_days", body.retention_days)
+    finally:
+        await conn.close()
+    return {"status": "ok"}
+
+
+@router.post("/settings/sandbox/test", response_model=None)
+async def test_sandbox(body: SandboxTestRequest):
+    """测试沙箱执行: 运行示例代码验证当前配置可用(蓝图 §6.14)。"""
+    cfg = await _load_cfg()
+    from private_agent.sandbox.service import SandboxService
+
+    try:
+        svc = SandboxService(cfg)
+        result = await svc.execute(
+            code=body.code,
+            language=body.language,
+            timeout=15,
+            session_id="sandbox-config-test",
+        )
+        return {
+            "ok": result.exit_code == 0,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "duration_ms": result.duration_ms,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"{type(e).__name__}: {e}",
+            "duration_ms": 0,
         }
 
 

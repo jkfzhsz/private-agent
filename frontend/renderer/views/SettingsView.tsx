@@ -111,6 +111,9 @@ export default function SettingsView(): JSX.Element {
         </div>
       </div>
 
+      {/* §6.14 [MVP] 沙箱配置管理 UI */}
+      <SandboxSection />
+
       {error && <div style={{ fontSize: 12, color: "var(--danger-text)" }}>加载失败: {error}</div>}
 
       {/* 主题壁纸 */}
@@ -793,6 +796,221 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
     </div>
   );
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 沙箱配置管理(§6.14 [MVP] 蓝图: GET/PUT config + POST test)
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface SandboxConfig {
+  enabled?: boolean;
+  retention_days?: number;
+  limits?: {
+    cpu_timeout_sec?: number;
+    memory_limit_mb?: number;
+    disk_limit_mb?: number;
+    network_enabled?: boolean;
+  };
+  security?: {
+    code_scan_enabled?: boolean;
+    env_sanitization_enabled?: boolean;
+  };
+}
+
+function SandboxSection(): JSX.Element {
+  const [cfg, setCfg] = useState<SandboxConfig | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<string | null>(null);
+
+  const load = useCallback(async (): Promise<void> => {
+    try {
+      const resp = await fetch(`${API_BASE}/settings/sandbox`);
+      const data = await resp.json();
+      setCfg(data);
+      setMsg(null);
+    } catch (e) {
+      setMsg(`加载沙箱配置失败: ${String(e)}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async (): Promise<void> => {
+    if (!cfg) return;
+    setBusy(true);
+    try {
+      const resp = await fetch(`${API_BASE}/settings/sandbox`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: cfg.enabled,
+          cpu_timeout_sec: cfg.limits?.cpu_timeout_sec,
+          memory_limit_mb: cfg.limits?.memory_limit_mb,
+          disk_limit_mb: cfg.limits?.disk_limit_mb,
+          network_enabled: cfg.limits?.network_enabled,
+          code_scan_enabled: cfg.security?.code_scan_enabled,
+          env_sanitization_enabled: cfg.security?.env_sanitization_enabled,
+          retention_days: cfg.retention_days,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setMsg("✅ 沙箱配置已保存(下次执行生效)");
+    } catch (e) {
+      setMsg(`保存失败: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runTest = async (): Promise<void> => {
+    setBusy(true);
+    setTestResult("测试中...");
+    try {
+      const resp = await fetch(`${API_BASE}/settings/sandbox/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: "import time\nprint('sandbox ok, time:', time.strftime('%H:%M:%S'))",
+          language: "python",
+        }),
+      });
+      const data = await resp.json();
+      setTestResult(
+        data.ok
+          ? `✅ 执行成功 (exit=${data.exit_code}, ${data.duration_ms}ms)\n${data.stdout || ""}${data.stderr ? `\n[stderr] ${data.stderr}` : ""}`
+          : `❌ 执行失败 (exit=${data.exit_code})\n${data.stderr || data.stdout || ""}`
+      );
+    } catch (e) {
+      setTestResult(`测试请求失败: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
+      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+        沙箱配置
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
+        §6.14 代码执行沙箱参数(内存/超时/磁盘/网络/扫描) · 修改后下次执行生效 · 可用"测试执行"验证
+      </div>
+
+      {!cfg ? (
+        <div style={{ fontSize: 13, color: "var(--text-tertiary)" }}>加载中...</div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              启用沙箱
+              <input
+                type="checkbox"
+                checked={cfg.enabled ?? true}
+                onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              内存上限 MB
+              <input
+                type="number"
+                value={cfg.limits?.memory_limit_mb ?? 512}
+                onChange={(e) =>
+                  setCfg({ ...cfg, limits: { ...cfg.limits, memory_limit_mb: Number(e.target.value) } })
+                }
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              超时秒
+              <input
+                type="number"
+                value={cfg.limits?.cpu_timeout_sec ?? 300}
+                onChange={(e) =>
+                  setCfg({ ...cfg, limits: { ...cfg.limits, cpu_timeout_sec: Number(e.target.value) } })
+                }
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              磁盘上限 MB
+              <input
+                type="number"
+                value={cfg.limits?.disk_limit_mb ?? 100}
+                onChange={(e) =>
+                  setCfg({ ...cfg, limits: { ...cfg.limits, disk_limit_mb: Number(e.target.value) } })
+                }
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              网络
+              <input
+                type="checkbox"
+                checked={cfg.limits?.network_enabled ?? false}
+                onChange={(e) =>
+                  setCfg({ ...cfg, limits: { ...cfg.limits, network_enabled: e.target.checked } })
+                }
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              代码扫描
+              <input
+                type="checkbox"
+                checked={cfg.security?.code_scan_enabled ?? true}
+                onChange={(e) =>
+                  setCfg({ ...cfg, security: { ...cfg.security, code_scan_enabled: e.target.checked } })
+                }
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              环境变量脱敏
+              <input
+                type="checkbox"
+                checked={cfg.security?.env_sanitization_enabled ?? true}
+                onChange={(e) =>
+                  setCfg({ ...cfg, security: { ...cfg.security, env_sanitization_enabled: e.target.checked } })
+                }
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              工作目录保留天数
+              <input
+                type="number"
+                value={cfg.retention_days ?? 7}
+                onChange={(e) => setCfg({ ...cfg, retention_days: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+            <button onClick={() => void save()} disabled={busy} style={btnStyle}>
+              {busy ? "保存中..." : "保存配置"}
+            </button>
+            <button onClick={() => void runTest()} disabled={busy} style={btnStyle}>
+              {busy ? "测试中..." : "测试执行"}
+            </button>
+          </div>
+
+          {msg && <div style={{ fontSize: 12, marginTop: 10 }}>{msg}</div>}
+          {testResult && (
+            <pre style={{ fontSize: 12, marginTop: 10, whiteSpace: "pre-wrap", background: "var(--panel-bg, rgba(0,0,0,0.04))", padding: 10, borderRadius: 8 }}>
+              {testResult}
+            </pre>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+const btnStyle: React.CSSProperties = {
+  fontSize: 13,
+  padding: "6px 14px",
+  borderRadius: 8,
+  border: "1px solid var(--border-color, rgba(128,128,128,0.3))",
+  background: "var(--panel-bg, rgba(255,255,255,0.6))",
+  cursor: "pointer",
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 主题壁纸板块(Phase 1.5)

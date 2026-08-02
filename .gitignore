@@ -37,3 +37,6 @@ frontend/dist-main/
 # 个人壁纸原图(不纳入版本库)
 pictures/
 backend/.env
+
+# 沙箱工作目录(字面量 WORKSPACE 展开残留 + 正常路径)
+backend/${WORKSPACE}/

@@ -567,6 +567,26 @@ class ReactLoop:
                         name=tool_name,
                     )
 
+                    # §4.15 [MVP]: search_knowledge 结果额外注入 Stable Zone
+                    # (除本轮 tool message 外, 供后续轮次长期参考; 蓝图要求
+                    # "工具返回的 KB 片段由 context_manager 注入 Stable Zone")
+                    if (
+                        tool_name == "search_knowledge"
+                        and not tool_result.error
+                        and tool_result.output
+                    ):
+                        try:
+                            await self._context_manager.inject_kb_chunks(
+                                self._conn,
+                                turn=self._turn,
+                                content=tool_result.output,
+                            )
+                        except Exception:
+                            # 注入失败不影响本轮对话
+                            self._logger.exception(
+                                "inject_kb_chunks failed (turn=%s)", self._turn,
+                            )
+
                 # OBSERVING → 继续循环
                 self._transition(ReactLoopState.OBSERVING)
             else:
@@ -646,6 +666,115 @@ class ReactLoop:
         except Exception as e:
             self._logger.warning("checkpoint save failed: %s", e)
 
+    async def _maybe_merge_stable_zone(self) -> bool:
+        """§3.10.3 [MVP]: 每 N 轮或 KB 片段超阈值时合并 Stable Zone。
+
+        流程(蓝图 §3.10.3):
+        1. 触发判断: turn % N == 0 或 kb_count > threshold(且存在 KB 片段)
+        2. 调 compress_adapter 合并所有未压缩 stable 消息 → 单一知识摘要
+        3. 旧 stable 消息标记 compressed(DB + 内存)
+        4. 新 merged 消息 INSERT zone='stable' + 追加到 stable_zone
+        5. 存档 version_snapshots(scope='stable_zone', version=f'turn-{turn}')
+
+        无 compress_adapter 时跳过(无法摘要, 降级不报错)。
+
+        Returns:
+            True 表示执行了合并。
+        """
+        cm = self._context_manager
+        kb_count = cm.kb_chunk_count()
+        if kb_count <= 0:
+            return False
+        merge_cfg = self._cfg.get("context", {}).get("compression", {})
+        merge_interval = int(merge_cfg.get("merge_interval_turns", 5))
+        kb_threshold = int(merge_cfg.get("kb_chunks_merge_threshold", 20))
+        if not Compressor.should_merge_stable(
+            self._turn, kb_count, merge_interval, kb_threshold
+        ):
+            return False
+        stable_msgs = [
+            m for m in cm.stable_zone.messages if not m.get("compressed")
+        ]
+        if not stable_msgs:
+            return False
+        if self._compress_adapter is None:
+            return False
+        try:
+            prompt = Compressor.build_merge_prompt(stable_msgs)
+            result = await self._compress_adapter.chat(
+                [{"role": "user", "content": prompt}], tools=[]
+            )
+            merged_text = (result.content or "").strip()
+            if not merged_text:
+                return False
+            if not merged_text.startswith("[Merged KB Context]"):
+                merged_text = f"[Merged KB Context]\n{merged_text}"
+            # 1. 存档 version_snapshots(scope='stable_zone', 蓝图 §3.10.3)
+            try:
+                await self._conn.execute(
+                    """
+                    INSERT INTO version_snapshots (scope, version, payload)
+                    VALUES ('stable_zone', $1, $2::jsonb)
+                    ON CONFLICT (scope, version) DO UPDATE
+                    SET payload = EXCLUDED.payload, created_at = now()
+                    """,
+                    f"turn-{self._turn}",
+                    json.dumps(
+                        {
+                            "messages": [
+                                {"role": m.get("role"), "content": m.get("content")}
+                                for m in stable_msgs
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception:
+                # 存档失败不影响合并主流程
+                self._logger.warning("stable_zone snapshot save failed")
+            # 2. 旧 stable 消息标记 compressed(DB + 内存)
+            msg_ids = [
+                m.get("msg_id") for m in stable_msgs if m.get("msg_id")
+            ]
+            if msg_ids:
+                await self._conn.execute(
+                    "UPDATE messages SET compressed=TRUE "
+                    "WHERE id = ANY($1::bigint[])",
+                    msg_ids,
+                )
+            for m in stable_msgs:
+                m["compressed"] = True
+            # 3. 新 merged 消息 INSERT + 内存追加
+            merged_id = await self._conn.fetchval(
+                """
+                INSERT INTO messages (session_id, turn, role, content, zone)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id
+                """,
+                self._session_id,
+                self._turn,
+                "user",
+                merged_text,
+                "stable",
+            )
+            cm.stable_zone.messages.append(
+                {
+                    "role": "user",
+                    "content": merged_text,
+                    "turn": self._turn,
+                    "msg_id": merged_id,
+                    "zone": "stable",
+                }
+            )
+            self._logger.info(
+                "stable zone merged: %d msgs → 1 summary (turn=%s)",
+                len(stable_msgs), self._turn,
+            )
+            return True
+        except Exception as e:
+            self._logger.warning("stable zone merge failed: %s", e)
+            return False
+
     async def _maybe_compress(self) -> None:
         """V2 上下文工程: 每轮结束后检查并执行上下文压缩(蓝图 §3.9)。
 
@@ -662,6 +791,9 @@ class ReactLoop:
         if self._compress_disabled:
             return
         try:
+            # §3.10.3 [MVP]: Stable Zone 合并(先于 active 压缩, 防止
+            # Agentic RAG 多轮检索导致 Stable Zone 膨胀)
+            await self._maybe_merge_stable_zone()
             cfg = self._cfg.get("context", {}).get("compression", {})
             if not cfg.get("enabled", True):
                 return
@@ -732,6 +864,8 @@ class ReactLoop:
 
         - 被压缩消息: UPDATE messages SET compressed=true + 内存标记
           (原文保留, 仅不进 API, 未来可恢复)
+        - 被压缩消息归档到 messages_archive(§3.10 [MVP] 压缩存档:
+          soft delete + 归档, ttl_cleanup 按 90 天清理)
         - 摘要消息(如有): INSERT zone='active' + compressed_from JSONB,
           插入 active_zone 头部(压缩后仍进 API, 信息密度更高)
         """
@@ -745,6 +879,8 @@ class ReactLoop:
                 "UPDATE messages SET compressed=TRUE WHERE id = ANY($1::bigint[])",
                 msg_ids,
             )
+            # §3.10 [MVP] 压缩存档: 原文归档到 messages_archive
+            await self._archive_compressed(compressed_msgs)
         # 内存: 按 msg_id 标记 active_zone 原消息(_sliding_window 返回的是
         # 浅拷贝, 直接标记副本无效, 必须回写原对象)
         compressed_ids = set(msg_ids)
@@ -774,6 +910,45 @@ class ReactLoop:
             summary["msg_id"] = summary_id
             summary["turn"] = self._turn
             cm.active_zone.messages.insert(0, summary)
+
+    async def _archive_compressed(self, compressed_msgs: list[dict]) -> None:
+        """§3.10 [MVP] 压缩存档: 被压缩消息原文写入 messages_archive。
+
+        表结构(蓝图 §9.14): original_msg_id/session_id/turn/role/content/
+        reasoning_content/tool_calls/zone。ttl_cleanup 按 90 天清理。
+        单条 INSERT(压缩消息数有限, 无需批量优化)。
+        """
+        for m in compressed_msgs:
+            msg_id = m.get("msg_id")
+            if not msg_id:
+                continue
+            tool_calls_json = None
+            if m.get("tool_calls"):
+                tool_calls_json = json.dumps(
+                    m["tool_calls"], ensure_ascii=False
+                )
+            try:
+                await self._conn.execute(
+                    """
+                    INSERT INTO messages_archive
+                        (original_msg_id, session_id, turn, role, content,
+                         reasoning_content, tool_calls, zone)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                    """,
+                    msg_id,
+                    self._session_id,
+                    m.get("turn") or self._turn,
+                    m.get("role", "assistant"),
+                    m.get("content") or "",
+                    m.get("reasoning_content"),
+                    tool_calls_json,
+                    m.get("zone", "active"),
+                )
+            except Exception:
+                # 归档失败不影响压缩主流程(压缩已标记 compressed)
+                self._logger.warning(
+                    "archive compressed msg %s failed", msg_id,
+                )
 
     def _find_tool(self, name: str) -> ToolDef | None:
         """按名查找工具定义。

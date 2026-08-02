@@ -39,9 +39,10 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
             "sandbox_execution" in def_text
             and "delta" in def_text
             and "tool_confirmation_required" in def_text
+            and "memory_evicted" in def_text
         ):
             continue
-        # 旧 CHECK, DROP 后 ADD 新 CHECK(16 种, 含权限确认)
+        # 旧 CHECK, DROP 后 ADD 新 CHECK(17 种, 含权限确认 + memory_evicted)
         conname = r["conname"]
         await conn.execute(f'ALTER TABLE react_events DROP CONSTRAINT "{conname}"')
         await conn.execute(
@@ -49,7 +50,7 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
             ALTER TABLE react_events ADD CONSTRAINT react_events_event_type_check
             CHECK (event_type IN (
                 'thinking', 'tool_call', 'tool_result', 'final', 'error', 'checkpoint',
-                'sandbox_execution', 'memory_extracted',
+                'sandbox_execution', 'memory_extracted', 'memory_evicted',
                 'compress', 'token_usage',
                 'injection_alert', 'injection_blocked',
                 'tool_error', 'delta',
@@ -132,3 +133,28 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await conn.execute(
         "ALTER TABLE messages_archive ADD COLUMN IF NOT EXISTS reasoning_content TEXT"
     )
+    # §3.10.3 [MVP]: version_snapshots.scope CHECK 扩容(老部署补丁,含 stable_zone)
+    await _migrate_version_snapshots_scope_check(conn)
+
+
+async def _migrate_version_snapshots_scope_check(conn: asyncpg.Connection) -> None:
+    """幂等扩容 version_snapshots.scope CHECK, 加入 'stable_zone'(§3.10.3 存档)。"""
+    rows = await conn.fetch(
+        """
+        SELECT conname, pg_get_constraintdef(oid) AS def
+        FROM pg_constraint
+        WHERE conrelid = 'version_snapshots'::regclass AND contype = 'c'
+        """
+    )
+    for r in rows:
+        def_text = r["def"] or ""
+        if "stable_zone" in def_text:
+            continue
+        conname = r["conname"]
+        await conn.execute(f'ALTER TABLE version_snapshots DROP CONSTRAINT "{conname}"')
+        await conn.execute(
+            """
+            ALTER TABLE version_snapshots ADD CONSTRAINT version_snapshots_scope_check
+            CHECK (scope IN ('prompt', 'skill', 'harness', 'config', 'kb', 'stable_zone'))
+            """
+        )

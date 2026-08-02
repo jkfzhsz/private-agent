@@ -380,10 +380,15 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
             frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
             tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
             # 构造 MemoryManager(蓝图 §4.2-§4.5)
+            # V2 补齐(§4.4 [MVP]): 注入 react_events_insert, 使记忆提取/
+            # 淘汰事件在生产路径真正入库(memory_extracted/memory_evicted)
+            from private_agent.storage.react_events import insert_react_event
+
             memories_repo = MemoriesRepo(conn)
             memory_mgr = MemoryManager(
                 memories_repo=memories_repo,
                 compress_adapter=_build_compress_adapter(cfg),
+                react_events_insert=insert_react_event,
                 extract_interval_turns=cfg.get("memory", {}).get(
                     "extract_interval_turns", 8
                 ),

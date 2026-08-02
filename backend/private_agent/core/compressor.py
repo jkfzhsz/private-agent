@@ -39,6 +39,46 @@ class Compressor:
             return True
         return False
 
+    # ── §3.10.3 [MVP] Stable Zone 合并压缩 ──────────────────────────────
+
+    @staticmethod
+    def should_merge_stable(
+        turn: int,
+        kb_count: int,
+        merge_interval: int = 5,
+        kb_threshold: int = 20,
+    ) -> bool:
+        """Stable Zone 合并触发判断(蓝图 §3.10.3)。
+
+        条件 1: 每 N 轮(默认 N=5)触发一次, 且当前有 KB 片段;
+        条件 2: KB 片段数超过阈值(默认 20 条)。
+        """
+        if kb_count <= 0:
+            return False
+        if turn > 0 and turn % merge_interval == 0:
+            return True
+        if kb_count > kb_threshold:
+            return True
+        return False
+
+    @staticmethod
+    def build_merge_prompt(stable_msgs: list[dict]) -> str:
+        """构造 Stable Zone 合并摘要 prompt(蓝图 §3.10.3 _build_merge_prompt)。
+
+        将多个 KB 检索片段合并为单一"知识摘要", 保留关键事实与来源。
+        """
+        lines = [
+            "请将以下多次知识库检索片段合并为一份精炼的知识摘要。",
+            "保留关键事实、数据与结论, 去除重复内容; 若片段间有矛盾请标注。",
+            "",
+        ]
+        for i, m in enumerate(stable_msgs, 1):
+            content = (m.get("content") or "").replace("[KB Context]", "").strip()
+            lines.append(f"[片段{i}]\n{content[:1500]}")
+        lines.append("")
+        lines.append("输出: 以 '[Merged KB Context]' 开头的合并摘要。")
+        return "\n".join(lines)
+
     def plan_compression(
         self,
         messages: list[dict],
