@@ -31,6 +31,9 @@ _EXT_CONTENT_TYPE = {
     ".gif": "image/gif",
     ".svg": "image/svg+xml",
     ".webp": "image/webp",
+    # V2: 首页视频背景(<video> 循环播放需要正确 Content-Type)
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
 }
 
 

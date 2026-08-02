@@ -75,8 +75,9 @@ export default function HomeView({
     return WARM_QUOTES[idx];
   }, [seed]);
 
-  // 壁纸(由设置页管理, 这里只负责加载显示)
+  // 壁纸/视频背景(由设置页管理, 这里只负责加载显示)
   const [wallpaper, setWallpaper] = useState<string | null>(null);
+  const [wpType, setWpType] = useState<"image" | "video">("image");
   const [wpStyle, setWpStyle] = useState<{
     position_x: number;
     position_y: number;
@@ -103,6 +104,7 @@ export default function HomeView({
             ? `${FILES_BASE}/${data.wallpaper.split("/").pop()}?t=${Date.now()}`
             : null;
           setWallpaper(url);
+          setWpType(data.type === "video" ? "video" : "image");
           if (data.style) setWpStyle(data.style);
         }
       } catch {
@@ -211,8 +213,27 @@ export default function HomeView({
               "linear-gradient(135deg, #eef1f8 0%, #e6ebf6 45%, #ece7f7 100%)",
           }}
         />
-        {/* 用户壁纸(支持位置/填充/缩放/旋转) */}
-        {wallpaper && (
+        {/* 用户壁纸/视频背景(支持位置/填充/缩放/旋转; 视频自动循环播放) */}
+        {wallpaper && wpType === "video" && (
+          <video
+            src={wallpaper}
+            autoPlay
+            loop
+            muted
+            playsInline
+            aria-label="动态背景"
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: wpStyle.fit === "contain" ? "contain" : "cover",
+              objectPosition: `${wpStyle.position_x}% ${wpStyle.position_y}%`,
+              transform: `scale(${(wpStyle.scale ?? 100) / 100}) rotate(${wpStyle.rotate ?? 0}deg)`,
+            }}
+          />
+        )}
+        {wallpaper && wpType === "image" && (
           <img
             src={wallpaper}
             alt="壁纸"

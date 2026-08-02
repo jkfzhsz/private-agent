@@ -1083,14 +1083,15 @@ async def set_session_model(id: int, body: SessionModelRequest):
 
 
 def _wallpaper_path() -> str | None:
-    """返回当前壁纸文件路径(不存在返回 None)。
+    """返回当前壁纸/视频背景文件路径(不存在返回 None)。
 
     按修改时间取最新(而非固定扩展名顺序),避免残留旧扩展名文件
-    (如 .png 测试图)覆盖用户最新上传的 .jpeg。
+    (如 .png 测试图)覆盖用户最新上传的 .jpeg/.mp4。
+    支持图片(.png/.jpg/.jpeg/.webp) + 视频(.mp4/.webm, V2 首页动态背景)。
     """
     outputs_dir = _get_outputs_dir()
     candidates: list = []
-    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+    for ext in (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"):
         p = outputs_dir / f"wallpaper{ext}"
         if p.exists() and p.is_file():
             candidates.append(p)
@@ -1098,6 +1099,11 @@ def _wallpaper_path() -> str | None:
         return None
     newest = max(candidates, key=lambda p: p.stat().st_mtime)
     return newest.name
+
+
+def _wallpaper_type(name: str) -> str:
+    """根据扩展名判断背景类型('image' | 'video'), 供前端选择渲染元素。"""
+    return "video" if name.lower().endswith((".mp4", ".webm")) else "image"
 
 
 def _wallpaper_style() -> dict:
@@ -1144,17 +1150,19 @@ class WallpaperStyleRequest(BaseModel):
 
 @router.get("/wallpaper", response_model=None)
 async def get_wallpaper():
-    """返回当前壁纸可访问路径与显示样式。
+    """返回当前壁纸/视频背景可访问路径、类型与显示样式。
 
     Returns:
         200: {
             "wallpaper": "/files/outputs/wallpaper.png" | None,
+            "type": "image" | "video"(按扩展名, 前端选择 <img> 或 <video>),
             "style": {"position_x": float, "position_y": float, "fit": str},
         }
     """
     name = _wallpaper_path()
     return {
         "wallpaper": f"/files/outputs/{name}" if name else None,
+        "type": _wallpaper_type(name) if name else "image",
         "style": _wallpaper_style(),
     }
 
@@ -1191,37 +1199,48 @@ async def update_wallpaper_style(body: WallpaperStyleRequest):
 
 @router.post("/wallpaper", response_model=None)
 async def upload_wallpaper(body: WallpaperUploadRequest):
-    """上传首页壁纸(存 outputs/wallpaper.*)。
+    """上传首页壁纸/视频背景(存 outputs/wallpaper.*)。
+
+    支持图片(data:image/png|jpeg|webp, ≤6MB) + 视频
+    (data:video/mp4|webm, ≤50MB, V2 首页动态背景)。
 
     Args:
-        body: {"data_url": "data:image/png;base64,..."}
+        body: {"data_url": "data:image/png;base64,..." 或 "data:video/mp4;base64,..."}
 
     Returns:
-        200: {"wallpaper": "/files/outputs/wallpaper.png"}
-        400: {"error": "invalid_image"}
+        200: {"wallpaper": "/files/outputs/wallpaper.mp4", "type": "video"}
+        400: {"error": "invalid_image" | "image_too_large"}
         500: {"error": "wallpaper_save_failed"}
     """
     import base64 as _b64
     import re as _re
 
-    m = _re.match(r"^data:image/(png|jpeg|webp);base64,(.+)$", body.data_url, _re.S)
+    # 图片 + 视频(video 上限 50MB)
+    m = _re.match(
+        r"^data:(image/(png|jpeg|webp)|video/(mp4|webm));base64,(.+)$",
+        body.data_url,
+        _re.S,
+    )
     if not m:
         return JSONResponse(status_code=400, content={"error": "invalid_image"})
-    ext = m.group(1)
-    raw = m.group(2)
-    # 大小上限 6MB(base64 解码后)
+    media_type = m.group(1)  # image/png | video/mp4 ...
+    raw = m.group(4)
+    is_video = media_type.startswith("video/")
+    ext = m.group(2) or m.group(3) if is_video else m.group(2)
+    # 大小上限: 图片 6MB, 视频 50MB(base64 解码后)
     try:
         decoded = _b64.b64decode(raw, validate=False)
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_image"})
-    if len(decoded) > 6 * 1024 * 1024:
+    limit = 50 * 1024 * 1024 if is_video else 6 * 1024 * 1024
+    if len(decoded) > limit:
         return JSONResponse(status_code=400, content={"error": "image_too_large"})
 
     try:
         outputs_dir = _get_outputs_dir()
         outputs_dir.mkdir(parents=True, exist_ok=True)
-        # 先清理旧壁纸(unlink 失败不阻断写入, 沙箱环境可能拦截删除)
-        for ext_old in (".png", ".jpg", ".jpeg", ".webp"):
+        # 先清理旧壁纸/旧视频(unlink 失败不阻断写入, 沙箱环境可能拦截删除)
+        for ext_old in (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"):
             old = outputs_dir / f"wallpaper{ext_old}"
             if old.exists():
                 try:
@@ -1230,7 +1249,10 @@ async def upload_wallpaper(body: WallpaperUploadRequest):
                     pass
         target = outputs_dir / f"wallpaper.{ext}"
         target.write_bytes(decoded)
-        return {"wallpaper": f"/files/outputs/wallpaper.{ext}"}
+        return {
+            "wallpaper": f"/files/outputs/wallpaper.{ext}",
+            "type": "video" if is_video else "image",
+        }
     except Exception:
         return JSONResponse(
             status_code=500,

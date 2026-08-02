@@ -1018,6 +1018,7 @@ const btnStyle: React.CSSProperties = {
 
 function WallpaperSection(): JSX.Element {
   const [wallpaper, setWallpaper] = useState<string | null>(null);
+  const [wpType, setWpType] = useState<"image" | "video">("image");
   const [fit, setFit] = useState<"cover" | "contain">("cover");
   const [posX, setPosX] = useState(50);
   const [posY, setPosY] = useState(50);
@@ -1036,6 +1037,7 @@ function WallpaperSection(): JSX.Element {
           ? `${FILES_BASE}/${data.wallpaper.split("/").pop()}?t=${Date.now()}`
           : null
       );
+      setWpType(data.type === "video" ? "video" : "image");
       if (data.style) {
         setFit(data.style.fit === "contain" ? "contain" : "cover");
         setPosX(Number(data.style.position_x) || 50);
@@ -1083,12 +1085,14 @@ function WallpaperSection(): JSX.Element {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    if (file.size > 6 * 1024 * 1024) {
-      setMsg("图片超过 6MB, 请压缩后再试");
+    const isVideo = file.type === "video/mp4" || file.type === "video/webm";
+    const limit = isVideo ? 50 * 1024 * 1024 : 6 * 1024 * 1024;
+    if (file.size > limit) {
+      setMsg(isVideo ? "视频超过 50MB, 请压缩后再试" : "图片超过 6MB, 请压缩后再试");
       return;
     }
-    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
-      setMsg("仅支持 PNG / JPG / WebP");
+    if (!isVideo && !/^image\/(png|jpeg|webp)$/.test(file.type)) {
+      setMsg("仅支持 PNG / JPG / WebP 图片或 MP4 / WebM 视频");
       return;
     }
     setBusy(true);
@@ -1107,13 +1111,14 @@ function WallpaperSection(): JSX.Element {
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
-      // 换图后 URL 必须不同, 否则 <img> 复用浏览器缓存的旧图
+      // 换图后 URL 必须不同, 否则 <img>/<video> 复用浏览器缓存的旧背景
       setWallpaper(
         data.wallpaper
           ? `${FILES_BASE}/${data.wallpaper.split("/").pop()}?t=${Date.now()}`
           : null
       );
-      setMsg("壁纸已更新, 首页将使用新背景");
+      setWpType(data.type === "video" ? "video" : "image");
+      setMsg(data.type === "video" ? "动态背景已更新, 首页将循环播放" : "壁纸已更新, 首页将使用新背景");
     } catch (err) {
       setMsg(`上传失败: ${String(err)}`);
     } finally {
@@ -1141,7 +1146,8 @@ function WallpaperSection(): JSX.Element {
         主题壁纸
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
-        设置首页顶部背景图 (PNG / JPG / WebP, ≤6MB); 可调整显示位置与填充方式
+        设置首页顶部背景: 静态图 (PNG / JPG / WebP, ≤6MB) 或动态视频
+        (MP4 / WebM, ≤50MB, 首页自动循环播放); 可调整显示位置与填充方式
       </div>
       <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
         <div
@@ -1157,7 +1163,24 @@ function WallpaperSection(): JSX.Element {
             position: "relative",
           }}
         >
-          {wallpaper && (
+          {wallpaper && wpType === "video" && (
+            <video
+              src={wallpaper}
+              autoPlay
+              loop
+              muted
+              playsInline
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: fit,
+                objectPosition: `${posX}% ${posY}%`,
+                transform: `scale(${scale / 100}) rotate(${rotate}deg)`,
+                display: "block",
+              }}
+            />
+          )}
+          {wallpaper && wpType === "image" && (
             <img
               src={wallpaper}
               alt="当前壁纸"
@@ -1200,18 +1223,22 @@ function WallpaperSection(): JSX.Element {
                 gap: 6,
               }}
             >
-              {wallpaper ? "更换壁纸" : "上传壁纸"}
+              {wallpaper
+                ? wpType === "video"
+                  ? "更换视频"
+                  : "更换壁纸"
+                : "上传背景"}
               <input
                 ref={fileRef}
                 type="file"
-                accept="image/png,image/jpeg,image/webp"
+                accept="image/png,image/jpeg,image/webp,video/mp4,video/webm"
                 style={{ display: "none" }}
                 onChange={(e) => void onFileChange(e)}
               />
             </label>
             {wallpaper && (
               <button className="btn-ghost" onClick={() => void remove()} disabled={busy}>
-                移除壁纸
+                移除背景
               </button>
             )}
           </div>
