@@ -30,12 +30,6 @@ export default function SettingsView(): JSX.Element {
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [protocol, setProtocol] = useState("");
   const [error, setError] = useState("");
-  // LLM 对话参数上限
-  const [maxInput, setMaxInput] = useState(8192);
-  const [maxOutput, setMaxOutput] = useState(2048);
-  const [maxTurns, setMaxTurns] = useState(20);
-  const [limitsMsg, setLimitsMsg] = useState<string | null>(null);
-  const [limitsBusy, setLimitsBusy] = useState(false);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -49,10 +43,6 @@ export default function SettingsView(): JSX.Element {
       setFallbackChain(provData.fallback_chain ?? []);
       setMcpServers(mcpData.servers ?? []);
       setProtocol(mcpData.protocol_version ?? "");
-      const limits = provData.limits ?? {};
-      if (limits.max_input_tokens) setMaxInput(limits.max_input_tokens);
-      if (limits.max_output_tokens) setMaxOutput(limits.max_output_tokens);
-      if (limits.max_turns) setMaxTurns(limits.max_turns);
       setError("");
     } catch (e) {
       setError(String(e));
@@ -62,29 +52,6 @@ export default function SettingsView(): JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
-
-  const saveLimits = async (): Promise<void> => {
-    setLimitsBusy(true);
-    setLimitsMsg(null);
-    try {
-      const resp = await fetch(`${API_BASE}/settings/models/limits`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          max_input_tokens: Number(maxInput),
-          max_output_tokens: Number(maxOutput),
-          max_turns: Number(maxTurns),
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
-      setLimitsMsg("已保存(对后续对话生效)");
-    } catch (err) {
-      setLimitsMsg(`保存失败: ${String(err)}`);
-    } finally {
-      setLimitsBusy(false);
-    }
-  };
 
   const handleDeleteProvider = async (name: string): Promise<void> => {
     try {
@@ -118,46 +85,6 @@ export default function SettingsView(): JSX.Element {
             </div>
           )}
           <ProviderAddForm onAdded={load} />
-        </div>
-        {/* 全局默认参数(模型未单独配置时使用) */}
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 14, marginTop: 16, paddingTop: 14, borderTop: "1px solid rgba(148,163,184,0.15)", flexWrap: "wrap" }}>
-          <div style={{ fontSize: 11, color: "var(--text-tertiary)", paddingBottom: 8 }}>
-            全局默认参数(未在模型行单独配置时使用):
-          </div>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>默认输入 tokens</span>
-            <input
-              type="number"
-              min={256}
-              value={maxInput}
-              onChange={(e) => setMaxInput(Number(e.target.value))}
-              style={{ width: 110, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
-            />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>默认输出 tokens</span>
-            <input
-              type="number"
-              min={64}
-              value={maxOutput}
-              onChange={(e) => setMaxOutput(Number(e.target.value))}
-              style={{ width: 110, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
-            />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>默认轮次</span>
-            <input
-              type="number"
-              min={1}
-              value={maxTurns}
-              onChange={(e) => setMaxTurns(Number(e.target.value))}
-              style={{ width: 110, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
-            />
-          </label>
-          <button className="btn-primary" style={{ fontSize: 12, padding: "6px 16px" }} onClick={() => void saveLimits()} disabled={limitsBusy}>
-            保存参数
-          </button>
-          {limitsMsg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{limitsMsg}</span>}
         </div>
       </div>
 
