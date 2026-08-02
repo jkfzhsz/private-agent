@@ -110,7 +110,7 @@ describe("stopSidecar", () => {
   it("先 SIGTERM,进程退出后不再 SIGKILL", async () => {
     const fakeProc = makeFakeProc();
     fakeProc.on("exit", (cb) => {
-      fakeProc._exitCb = cb as (code?: number) => void;
+      fakeProc._exitCb = cb as unknown as (code?: number) => void;
       return fakeProc;
     });
 
