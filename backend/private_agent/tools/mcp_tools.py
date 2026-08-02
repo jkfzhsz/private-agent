@@ -24,7 +24,43 @@ from private_agent.tools.schema_adapter import mcp_tool_to_tooldef
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["MCPToolManager", "mcp_result_to_text"]
+__all__ = ["MCPToolManager", "mcp_result_to_text", "build_tools_guide"]
+
+
+def build_tools_guide(
+    manager: "MCPToolManager", servers: list[dict]
+) -> str:
+    """生成 MCP 工具速查指南(注入 system prompt, 蓝图 L6585 工具选择优先级)。
+
+    只列 server 分类 + 工具名(完整 schema 已在 tools 字段, 重复描述浪费 token)。
+    内容静态稳定 → KV Cache 友好(不改前缀)。
+
+    Args:
+        manager: 已装配的 MCPToolManager(读 _tools_cache, 避免重复连接)。
+        servers: MCP server 配置列表。
+
+    Returns:
+        指南文本;无可用工具时返回空字符串。
+    """
+    sections: list[str] = []
+    for svc in servers:
+        sid = svc.get("id") or svc.get("name")
+        if not sid:
+            continue
+        defs = manager._tools_cache.get(sid)
+        if not defs:
+            continue
+        names = [d.name.split("__")[-1] for d in defs if getattr(d, "name", "")]
+        if not names:
+            continue
+        sections.append(
+            f"- {sid}({len(names)} 个工具): {', '.join(names)}"
+        )
+    if not sections:
+        return ""
+    return "## MCP 工具速查(按 server 分类, 完整参数见 tools 字段)\n" + "\n".join(
+        sections
+    )
 
 
 def mcp_result_to_text(result: dict) -> str:
@@ -124,7 +160,13 @@ class MCPToolManager:
             ToolDef 列表(名称为 mcp__{server_id}__{original})。
         """
         servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
-        enabled = [s for s in servers if s.get("enabled", True) and (s.get("id") or s.get("name"))]
+        # V2 P2: assemble=false 的 server 不装配工具(设置页开关, 默认 True)
+        enabled = [
+            s for s in servers
+            if s.get("enabled", True)
+            and s.get("assemble", True) is not False
+            and (s.get("id") or s.get("name"))
+        ]
         if not enabled:
             return []
 

@@ -1439,6 +1439,51 @@ async def delete_mcp_server(name: str):
     return {"ok": True, "server": name}
 
 
+class McpAssembleRequest(BaseModel):
+    """PUT /settings/mcp/{name}/assemble 请求体: 装配开关。"""
+
+    assemble: bool
+
+
+@router.put("/settings/mcp/{name}/assemble", response_model=None)
+async def set_mcp_assemble(name: str, body: McpAssembleRequest):
+    """设置 MCP server 的"装配到对话"开关(V2 P2)。
+
+    assemble=false 时该 server 的工具不再进入对话(模型不可见/不可调用),
+    但 server 配置保留(探活/测试仍可用)。默认 True。
+    """
+    import json as _json
+
+    conn = await db.connect()
+    try:
+        row = await conn.fetchval(
+            "SELECT value FROM config_runtime WHERE key = 'tools.mcp.servers'"
+        )
+        if row:
+            servers = _json.loads(row) if isinstance(row, str) else row
+        else:
+            cfg = await _load_cfg()
+            servers = list(cfg.get("tools", {}).get("mcp", {}).get("servers", []))
+
+        target = next(
+            (
+                s for s in servers
+                if isinstance(s, dict) and (s.get("id") == name or s.get("name") == name)
+            ),
+            None,
+        )
+        if target is None:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "server": name, "error": "server_not_found"},
+            )
+        target["assemble"] = body.assemble
+        await _set_runtime(conn, "tools.mcp.servers", servers)
+    finally:
+        await conn.close()
+    return {"ok": True, "server": name, "assemble": body.assemble}
+
+
 @router.post("/settings/mcp/{name}/test", response_model=None)
 async def test_mcp_server(name: str):
     """MCP server 连通性测试: 复用 MCPClient(自动协商协议 + SSE, 带认证)。

@@ -874,12 +874,13 @@ def test_run_turn_multiple_tool_calls_in_one_response():
             await conn.close()
 
     types = asyncio.run(_run())
-    # thinking + tool_call + tool_result + tool_call + tool_result + final = 6
+    # V2 P2 并行语义: 同轮 tool_call 事件先全部产出(Phase A), 再并行执行
+    # 后按原始顺序产出 tool_result(Phase C)
     assert types == [
         "thinking",
         "tool_call",
-        "tool_result",
         "tool_call",
+        "tool_result",
         "tool_result",
         "final",
     ]
@@ -1079,10 +1080,13 @@ def test_run_turn_unknown_tool_produces_error_event():
             await conn.close()
 
     types, final_state = asyncio.run(_run())
-    # 应有 thinking + tool_call + error(未知工具)
+    # V2 P2 语义: 未知工具 → 单工具 error 回传(tool_result.error), 不中断整轮,
+    # 下一轮模型据此收尾 → final, 状态 IDLE
     assert "tool_call" in types
-    assert "error" in types
-    assert final_state == ReactLoopState.ERROR
+    assert "tool_result" in types
+    assert "final" in types
+    assert "error" not in types  # 不再产出整轮 error event
+    assert final_state == ReactLoopState.IDLE
 
 
 def test_run_turn_error_event_payload_contains_message():

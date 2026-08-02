@@ -142,11 +142,15 @@ async def _get_system_prompt(cfg, session_id: int, conn):
     - session 未 activate (locked_skill_name IS NULL) → 返回默认提示词(M1 行为)
     - session 已 activate → 返回锁定 skill 的 system_prompt(模板替换 + 少样本,
       与 activate_skill 生成完全一致,保证 Frozen Zone hash 稳定,AC-3)
+    - V2 P2: 追加 MCP 工具速查指南(按 server 分类的工具名清单, 帮助模型
+      选对工具; 完整 schema 已在 tools 字段)。注意: 该文本变化会改变
+      frozen_hash → 旧会话走 replace_frozen_zone 自动重建(已有机制)。
     """
     from private_agent.skills.example_loader import ExampleLoader
     from private_agent.skills.loader import SkillLoader
     from private_agent.skills.manager import SkillManager
     from private_agent.tools.builtins import register_all_builtins
+    from private_agent.tools.mcp_tools import build_tools_guide
     from private_agent.tools.registry import ToolRegistry
 
     locked_skill = await conn.fetchval(
@@ -154,18 +158,30 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         session_id,
     )
     if not locked_skill:
-        return "You are a helpful assistant."
+        base_prompt = "You are a helpful assistant."
+    else:
+        loader = SkillLoader.from_cfg(cfg)
+        skill = await loader.load(locked_skill, conn)
+        registry = ToolRegistry()
+        register_all_builtins(registry)
+        mgr = SkillManager(
+            loader=loader,
+            example_loader=ExampleLoader.from_cfg(cfg),
+            tool_registry=registry,
+        )
+        base_prompt = await mgr.build_system_prompt(
+            skill, locked_skill, session_id, conn
+        )
 
-    loader = SkillLoader.from_cfg(cfg)
-    skill = await loader.load(locked_skill, conn)
-    registry = ToolRegistry()
-    register_all_builtins(registry)
-    mgr = SkillManager(
-        loader=loader,
-        example_loader=ExampleLoader.from_cfg(cfg),
-        tool_registry=registry,
-    )
-    return await mgr.build_system_prompt(skill, locked_skill, session_id, conn)
+    # V2 P2: MCP 工具速查指南(读已装配的 tools cache, 不重复连接)
+    try:
+        servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
+        guide = build_tools_guide(_get_mcp_manager(), servers)
+        if guide:
+            return f"{base_prompt}\n\n{guide}"
+    except Exception:  # noqa: BLE001
+        _logger.exception("mcp tools guide build failed")
+    return base_prompt
 
 
 @app.get("/")

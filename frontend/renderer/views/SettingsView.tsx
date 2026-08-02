@@ -22,6 +22,8 @@ interface McpServer {
   url?: string;
   tags?: string[];
   enabled?: boolean;
+  // V2 P2: 装配到对话开关(默认 true; false 时工具不进对话)
+  assemble?: boolean;
 }
 
 export default function SettingsView(): JSX.Element {
@@ -502,6 +504,32 @@ function McpRow({
     }
   };
 
+  // V2 P2: "装配到对话"开关 —— 关闭后该 server 工具不进对话, 但配置保留
+  const toggleAssemble = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const next = !(server.assemble !== false);
+      const resp = await fetch(
+        `${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}/assemble`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ assemble: next }),
+        }
+      );
+      if (!resp.ok) {
+        setMsg("切换失败");
+        return;
+      }
+      onChange();
+    } catch (err) {
+      setMsg(`切换失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.5)" }}>
       <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{server.id}</span>
@@ -511,6 +539,18 @@ function McpRow({
       <span style={{ fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
         {server.url || [server.command, ...(server.args ?? [])].join(" ")}
       </span>
+      <label
+        style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--text-secondary)", flexShrink: 0, cursor: "pointer" }}
+        title={server.assemble !== false ? "工具已装配进对话, 模型可直接调用" : "已关闭: 该 server 工具不进入对话"}
+      >
+        <input
+          type="checkbox"
+          checked={server.assemble !== false}
+          onChange={() => void toggleAssemble()}
+          disabled={busy}
+        />
+        装配到对话
+      </label>
       <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 10px", flexShrink: 0 }} onClick={() => void test()} disabled={busy}>
         测试
       </button>

@@ -33,7 +33,7 @@ from private_agent.core.injection_guard import InjectionGuard
 from private_agent.models.base import AllProvidersFailedError, ChatResult, ModelAdapter
 from private_agent.observability.logging import setup_logger
 from private_agent.storage.react_events import insert_react_event
-from private_agent.tools.defs import ToolDef
+from private_agent.tools.defs import ToolDef, ToolResult
 
 if TYPE_CHECKING:
     import asyncpg
@@ -286,6 +286,9 @@ class ReactLoop:
                     content=result.content,
                     tool_calls=result.tool_calls,
                 )
+                # V2 P2: 同轮多 tool_call 并行执行(蓝图 L612-616 + L4948)
+                # Phase A(串行): 解析 + emit tool_call + 权限确认 + 构造执行计划
+                plans: list[dict] = []
                 for tc in result.tool_calls:
                     # OpenAI 格式: tc.function.name / tc.function.arguments
                     func = tc.get("function", tc)
@@ -307,17 +310,26 @@ class ReactLoop:
                     # 查找工具定义
                     tool_def = self._find_tool(tool_name)
                     if tool_def is None:
+                        # 未知工具: 单工具 error 回传, 不中断整轮(V2 P2 语义)
+                        reason = f"unknown tool: {tool_name}"
                         await self._emit_event(
-                            "error",
+                            "tool_result",
                             payload={
-                                "message": f"unknown tool: {tool_name}",
                                 "tool_call_id": tool_call_id,
-                                "stage": "tool_lookup",
+                                "tool_name": tool_name,
+                                "output": "",
+                                "error": reason,
                             },
                         )
-                        self._transition(ReactLoopState.ERROR)
-                        await self._save_checkpoint()
-                        return
+                        await self._context_manager.append_tool_message(
+                            self._conn,
+                            turn=self._turn,
+                            tool_call_id=tool_call_id,
+                            content="",
+                            name=tool_name,
+                            error=reason,
+                        )
+                        continue
 
                     # ── V2 P1: 权限确认(蓝图 §5.12) ──
                     # 仅 elevated 工具走确认;拒绝/超时以 error 回传模型, 循环继续
@@ -398,25 +410,63 @@ class ReactLoop:
                         args = dict(args)
                         args["_on_output"] = _on_output
 
-                    # 执行工具(P2 fix: 包 try/except 防 handler 异常崩溃)
-                    try:
-                        tool_result = await tool_def.handler(args)
-                    except Exception as e:
-                        self._logger.exception(
-                            "Tool handler failed: tool=%s args=%s", tool_name, args
-                        )
-                        await self._emit_event(
-                            "error",
-                            payload={
-                                "message": f"tool handler error: {type(e).__name__}: {e}",
-                                "tool_call_id": tool_call_id,
-                                "tool_name": tool_name,
-                                "stage": "tool_execution",
-                            },
-                        )
-                        self._transition(ReactLoopState.ERROR)
-                        await self._save_checkpoint()
-                        return
+                    plans.append(
+                        {
+                            "idx": len(plans),
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "args": args,
+                            "tool_def": tool_def,
+                        }
+                    )
+
+                # Phase B: 并行执行(信号量限流; code_execution 串行避免同会话
+                # 沙箱 workspace 竞态)。单工具异常 → error 回传, 不中断整轮。
+                concurrent_limit = int(
+                    (self._cfg or {})
+                    .get("tools", {})
+                    .get("mcp", {})
+                    .get("concurrent_limit", 5)
+                )
+                sem = asyncio.Semaphore(concurrent_limit)
+
+                async def _exec_plan(plan: dict) -> ToolResult:
+                    async with sem:
+                        try:
+                            return await plan["tool_def"].handler(plan["args"])
+                        except Exception as e:  # noqa: BLE001
+                            self._logger.exception(
+                                "Tool handler failed: tool=%s", plan["tool_name"]
+                            )
+                            return ToolResult(
+                                output="",
+                                error=(
+                                    f"tool handler error: {type(e).__name__}: {e}"
+                                ),
+                            )
+
+                serial_plans = [
+                    p for p in plans if p["tool_name"] == "code_execution"
+                ]
+                parallel_plans = [
+                    p for p in plans if p["tool_name"] != "code_execution"
+                ]
+                results_by_idx: dict[int, ToolResult] = {}
+                for p in serial_plans:
+                    results_by_idx[p["idx"]] = await _exec_plan(p)
+                if parallel_plans:
+                    outcomes = await asyncio.gather(
+                        *(_exec_plan(p) for p in parallel_plans)
+                    )
+                    for p, tr in zip(parallel_plans, outcomes):
+                        results_by_idx[p["idx"]] = tr
+
+                # Phase C(按模型原始 tool_calls 顺序): emit tool_result +
+                # 注入防护扫描 + 持久化
+                for plan in plans:
+                    tool_result = results_by_idx[plan["idx"]]
+                    tool_name = plan["tool_name"]
+                    tool_call_id = plan["tool_call_id"]
 
                     # 产出 tool_result event
                     await self._emit_event(
