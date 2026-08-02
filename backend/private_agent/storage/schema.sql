@@ -38,6 +38,9 @@ CREATE TABLE messages (
     turn            INT NOT NULL DEFAULT 0,
     role            VARCHAR(20) NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
     content         TEXT,
+    -- 推理过程(DeepSeek V4 系要求 assistant 消息原样回传 reasoning_content,
+    -- 含 tool_calls 的消息也必须回传, 否则上游报错; AI-Agents-in-Depth 2.3.1)
+    reasoning_content TEXT,
     tool_calls      JSONB,
     tool_call_id    TEXT,
     name            TEXT,
@@ -61,6 +64,7 @@ CREATE TABLE messages_archive (
     turn            INT,
     role            VARCHAR(20),
     content         TEXT,
+    reasoning_content TEXT,
     tool_calls      JSONB,
     zone            VARCHAR(20),
     archived_at     TIMESTAMPTZ NOT NULL DEFAULT now()

@@ -337,7 +337,13 @@ def test_append_user_message_updates_in_memory_active_zone():
 
     cm = asyncio.run(_run())
     assert len(cm.active_zone.messages) == 1
-    assert cm.active_zone.messages[0] == {"role": "user", "content": "hi"}
+    # 内存消息含 OpenAI 字段 + 内部 metadata(turn/msg_id, 供压缩/恢复用;
+    # get_messages 剥离后才进 API)
+    msg = cm.active_zone.messages[0]
+    assert msg["role"] == "user"
+    assert msg["content"] == "hi"
+    assert msg["turn"] == 1
+    assert msg["msg_id"] is not None
 
 
 def test_append_assistant_message_persists_with_content():

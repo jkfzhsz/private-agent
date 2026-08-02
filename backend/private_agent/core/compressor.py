@@ -39,6 +39,81 @@ class Compressor:
             return True
         return False
 
+    def plan_compression(
+        self,
+        messages: list[dict],
+        keep_turns: int = 6,
+    ) -> dict:
+        """滑动窗口压缩规划(AI-Agents-in-Depth §2.7.4 第 4 层: 归档式摘要前置)。
+
+        用 _sliding_window 标记旧轮次消息 compressed=True(消息需携带内部
+        turn 字段, 来自 context_manager 内存消息), 返回:
+        {
+            "kept": [未压缩消息, 仍进 API],
+            "compressed": [被标记压缩的消息, 摘要的来源],
+        }
+
+        Args:
+            messages: 含内部 metadata(turn) 的消息列表(get_messages_with_meta)。
+            keep_turns: 保留最近轮次数(默认 6, 与 M2 测试基线一致)。
+        """
+        marked = self._sliding_window(messages, keep_turns=keep_turns)
+        kept = [m for m in marked if not m.get("compressed")]
+        compressed = [m for m in marked if m.get("compressed")]
+        return {"kept": kept, "compressed": compressed}
+
+    async def execute(
+        self,
+        messages: list[dict],
+        *,
+        keep_turns: int = 6,
+        compress_adapter: Any = None,
+    ) -> dict:
+        """执行一次完整压缩(AI-Agents-in-Depth §2.7.4): 滑动窗口 + 可选摘要。
+
+        有 compress_adapter 时对压缩掉的消息生成摘要消息(summary 进 API);
+        无 compress_adapter 时仅滑动窗口(低价值旧消息直接删除, 不做摘要)。
+        摘要失败(LLM 调用异常)时降级为纯滑动窗口, 不中断, 但返回
+        summary_error=True 供上层熔断计数(避免在反复失败的会话上持续烧钱,
+        §2.7.4 第 5 层)。
+
+        Returns:
+            {
+                "messages": 压缩后的消息列表(含摘要, 供 context_manager 回写),
+                "summary": 摘要消息 dict 或 None,
+                "compressed_msgs": 被压缩的原始消息列表,
+                "summary_error": 摘要 LLM 调用是否失败(True 时已降级滑动窗口),
+            }
+        """
+        plan = self.plan_compression(messages, keep_turns=keep_turns)
+        compressed = plan["compressed"]
+        if not compressed:
+            return {
+                "messages": messages,
+                "summary": None,
+                "compressed_msgs": [],
+                "summary_error": False,
+            }
+
+        result_messages = list(plan["kept"])
+        summary: dict | None = None
+        summary_error = False
+        if compress_adapter is not None:
+            try:
+                summary = await self._summarize(compress_adapter, compressed)
+                result_messages.insert(0, summary)
+            except Exception:
+                # 摘要失败: 降级为纯滑动窗口(不中断对话), 标记供熔断
+                summary = None
+                summary_error = True
+                result_messages = list(plan["kept"])
+        return {
+            "messages": result_messages,
+            "summary": summary,
+            "compressed_msgs": compressed,
+            "summary_error": summary_error,
+        }
+
     def _sliding_window(
         self, messages: list[dict], keep_turns: int = 6
     ) -> list[dict]:

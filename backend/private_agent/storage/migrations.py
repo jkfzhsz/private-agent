@@ -125,3 +125,10 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await migrate_react_events_event_type_check(conn)
     # B6 P0-5: kb_chunks embedding BYTEA→vector(1024) + HNSW 索引(老部署补丁)
     await migrate_kb_chunks_embedding_to_vector(conn)
+    # V2 上下文工程质量: messages.reasoning_content 列(老部署补列,新部署 schema.sql 已含)
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reasoning_content TEXT"
+    )
+    await conn.execute(
+        "ALTER TABLE messages_archive ADD COLUMN IF NOT EXISTS reasoning_content TEXT"
+    )

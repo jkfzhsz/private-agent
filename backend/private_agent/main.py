@@ -450,6 +450,9 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
                 event_sink=lambda ev: ws.send_json(ev),
                 # V2 P1: 权限确认管理器(仅 elevated 工具生效, 如 code_execution)
                 permission_manager=_get_permission_manager(session_id),
+                # V2 上下文工程: 压缩适配器(按 compress_model 构建,
+                # 未配置时 None → 压缩降级为纯滑动窗口)
+                compress_adapter=_build_compress_adapter(cfg),
             )
             await loop.run_turn(content)
             # 事件已通过 event_sink 实时推送, 无需再排空 event_queue

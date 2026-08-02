@@ -30,6 +30,7 @@ from private_agent.core.billing import BillingRecorder
 from private_agent.core.checkpoint import CheckpointManager
 from private_agent.core.compressor import Compressor
 from private_agent.core.injection_guard import InjectionGuard
+from private_agent.core.token_estimator import TokenEstimator
 from private_agent.models.base import AllProvidersFailedError, ChatResult, ModelAdapter
 from private_agent.observability.logging import setup_logger
 from private_agent.storage.react_events import insert_react_event
@@ -69,6 +70,7 @@ class ReactLoop:
         cfg: dict | None = None,
         provider_limits: dict | None = None,
         permission_manager: Any | None = None,
+        compress_adapter: Any | None = None,
     ) -> None:
         self._session_id = session_id
         self._context_manager = context_manager
@@ -99,7 +101,24 @@ class ReactLoop:
         self._cfg = cfg or {}
         self._injection_guard = InjectionGuard()
         self._compressor = Compressor()
+        self._token_estimator = TokenEstimator()  # V2 修复: _maybe_compress 曾引用未初始化
         self._billing = BillingRecorder()
+        # V2 上下文工程 - Agent 状态栏(AI-Agents-in-Depth §2.6):
+        # 纯代码维护的动态元信息(工具计数/时间戳/状态), 注入上下文末尾
+        from private_agent.core.status_bar import AgentStatusBar
+
+        self._status_bar = AgentStatusBar()
+        status_cfg = self._cfg.get("context", {}).get("status_bar", {})
+        self._status_bar_enabled = bool(status_cfg.get("enabled", True))
+        self._status_bar_per_turn = bool(
+            status_cfg.get("inject_per_turn", True)
+        )
+        # V2 上下文工程 - 上下文压缩(AI-Agents-in-Depth §2.7.4 / 蓝图 §3.9):
+        # compress_adapter 按 compress_model 构建(main.py 传入), None 时
+        # 压缩降级为纯滑动窗口(不摘要)。熔断器: 连续失败 3 次禁用本会话压缩。
+        self._compress_adapter = compress_adapter
+        self._compress_failures = 0
+        self._compress_disabled = False
 
     # ──────────────────────────────────────────────────────────────────────────
     # State machine
@@ -188,6 +207,10 @@ class ReactLoop:
         self._iteration = 0
         self._transition(ReactLoopState.THINKING)
 
+        # V2 状态栏: 新 turn 重置工具计数(状态栏反映当前轮内真实执行,
+        # 跨轮累积会误导模型对"本轮进度"的判断)
+        self._status_bar.reset()
+
         # 追加 user_message 到上下文
         await self._context_manager.append_user_message(
             self._conn, turn=self._turn, content=user_message,
@@ -202,6 +225,23 @@ class ReactLoop:
 
             # 构建消息列表
             messages = await self._context_manager.build_messages()
+
+            # V2 状态栏注入: 追加到上下文末尾的 user-role meta 消息
+            # (AI-Agents-in-Depth §2.6.3)。仅内存注入不持久化; 追加到末尾
+            # 不破坏 KV Cache 前缀(因果注意力只依赖前序 token)。
+            if self._status_bar_enabled and self._status_bar_per_turn:
+                messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": self._status_bar.render(
+                            state=self._state.value,
+                            turn=self._turn,
+                            iteration=self._iteration,
+                            max_iterations=self._max_iterations,
+                        ),
+                    },
+                ]
 
             # 推理增量累积器(跨 iteration 的 thinking 事件流, 前端逐段展示)
             reasoning_acc: list[str] = []
@@ -279,12 +319,17 @@ class ReactLoop:
                 has_emitted_thinking = True
 
             if result.tool_calls:
-                # 持久化 assistant 消息(含 tool_calls)
+                # 持久化 assistant 消息(含 tool_calls + reasoning_content)
+                # V2 上下文工程: reasoning_content 一并持久化, 续聊 reload 后
+                # 原样回传(DeepSeek V4 系强制要求, AI-Agents-in-Depth 2.3.1)
                 await self._context_manager.append_assistant_message(
                     self._conn,
                     turn=self._turn,
                     content=result.content,
                     tool_calls=result.tool_calls,
+                    reasoning_content=(
+                        getattr(result, "reasoning_content", None) or None
+                    ),
                 )
                 # V2 P2: 同轮多 tool_call 并行执行(蓝图 L612-616 + L4948)
                 # Phase A(串行): 解析 + emit tool_call + 权限确认 + 构造执行计划
@@ -296,6 +341,9 @@ class ReactLoop:
                     args_raw = func.get("arguments", "{}")
                     args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                     tool_call_id = tc.get("id", f"call_{self._iteration}")
+
+                    # V2 状态栏: 记录工具调用(计数供状态栏渲染)
+                    self._status_bar.record_tool_call(tool_name)
 
                     # 产出 tool_call event
                     await self._emit_event(
@@ -468,6 +516,11 @@ class ReactLoop:
                     tool_name = plan["tool_name"]
                     tool_call_id = plan["tool_call_id"]
 
+                    # V2 状态栏: 记录工具结果(失败计数供状态栏渲染)
+                    self._status_bar.record_tool_result(
+                        tool_name, error=tool_result.error
+                    )
+
                     # 产出 tool_result event
                     await self._emit_event(
                         "tool_result",
@@ -520,6 +573,9 @@ class ReactLoop:
                 # 无 tool_calls → final response
                 await self._context_manager.append_assistant_message(
                     self._conn, turn=self._turn, content=result.content,
+                    reasoning_content=(
+                        getattr(result, "reasoning_content", None) or None
+                    ),
                 )
                 await self._emit_event(
                     "final",
@@ -591,30 +647,133 @@ class ReactLoop:
             self._logger.warning("checkpoint save failed: %s", e)
 
     async def _maybe_compress(self) -> None:
-        """B4 P0-1: 每轮结束后检查并触发上下文压缩(蓝图 §3.9)。"""
+        """V2 上下文工程: 每轮结束后检查并执行上下文压缩(蓝图 §3.9)。
+
+        触发条件(AI-Agents-in-Depth §2.7.4): 轮次 > 10 或 token 超
+        context_window 的 80%(接近阈值时批量压缩, 不每轮都压, 避免频繁
+        破坏 KV Cache)。
+
+        执行: 滑动窗口标记旧轮次 compressed=True; 有 compress_adapter 时
+        对压缩掉的消息生成摘要(摘要进 API); 更新内存 + DB; emit compress 事件。
+
+        熔断器(§2.7.4 第 5 层): 连续失败 3 次禁用本会话压缩, 避免在反复
+        失败的会话上持续烧钱。
+        """
+        if self._compress_disabled:
+            return
         try:
             cfg = self._cfg.get("context", {}).get("compression", {})
             if not cfg.get("enabled", True):
                 return
             context_window = cfg.get("context_window", 8000)
-            active_zone_token_limit = cfg.get("active_zone_token_limit", 4000)
             messages = await self._context_manager.build_messages()
             active_turns = self._turn
             triggered = self._compressor.maybe_compress(
                 messages,
                 active_turns=active_turns,
                 context_window=context_window,
-                compress_adapter=None,
+                compress_adapter=self._compress_adapter,
             )
-            if triggered:
-                await self._compressor._emit_compress_event(
-                    self._conn,
-                    session_id=self._session_id,
-                    turn=self._turn,
-                    trigger="token_limit" if self._token_estimator.estimate_messages(messages) > context_window * 0.8 else "turn_limit",
-                )
+            if not triggered:
+                return
+            # 触发 → 执行压缩(滑动窗口 + 可选摘要), 基于含内部 metadata 的消息
+            meta_msgs = self._context_manager.get_messages_with_meta()
+            result = await self._compressor.execute(
+                meta_msgs,
+                keep_turns=int(cfg.get("keep_turns", 6)),
+                compress_adapter=self._compress_adapter,
+            )
+            if not result["compressed_msgs"]:
+                return
+            await self._apply_compression(result)
+            # 摘要失败(已降级滑动窗口) → 熔断计数; 成功则清零
+            if result.get("summary_error"):
+                self._compress_failures += 1
+                if self._compress_failures >= 3:
+                    self._compress_disabled = True
+                    self._logger.warning(
+                        "compression disabled for session %s after %d failures",
+                        self._session_id,
+                        self._compress_failures,
+                    )
+            else:
+                self._compress_failures = 0
+            trigger = (
+                "token_limit"
+                if self._token_estimator.estimate_messages(messages)
+                > context_window * 0.8
+                else "turn_limit"
+            )
+            await self._compressor._emit_compress_event(
+                self._conn,
+                session_id=self._session_id,
+                turn=self._turn,
+                trigger=trigger,
+            )
+            self._logger.info(
+                "context compressed: %d msgs (trigger=%s, summary=%s)",
+                len(result["compressed_msgs"]),
+                trigger,
+                bool(result["summary"]),
+            )
         except Exception as e:
+            self._compress_failures += 1
+            if self._compress_failures >= 3:
+                self._compress_disabled = True
+                self._logger.warning(
+                    "compression disabled for session %s after %d failures",
+                    self._session_id,
+                    self._compress_failures,
+                )
             self._logger.warning("compression failed: %s", e)
+
+    async def _apply_compression(self, result: dict) -> None:
+        """把压缩结果落库 + 更新内存 active_zone。
+
+        - 被压缩消息: UPDATE messages SET compressed=true + 内存标记
+          (原文保留, 仅不进 API, 未来可恢复)
+        - 摘要消息(如有): INSERT zone='active' + compressed_from JSONB,
+          插入 active_zone 头部(压缩后仍进 API, 信息密度更高)
+        """
+        cm = self._context_manager
+        compressed_msgs = result["compressed_msgs"]
+        msg_ids = [
+            m.get("msg_id") for m in compressed_msgs if m.get("msg_id")
+        ]
+        if msg_ids:
+            await self._conn.execute(
+                "UPDATE messages SET compressed=TRUE WHERE id = ANY($1::bigint[])",
+                msg_ids,
+            )
+        # 内存: 按 msg_id 标记 active_zone 原消息(_sliding_window 返回的是
+        # 浅拷贝, 直接标记副本无效, 必须回写原对象)
+        compressed_ids = set(msg_ids)
+        for m in cm.active_zone.messages:
+            if m.get("msg_id") in compressed_ids:
+                m["compressed"] = True
+        # 摘要消息落库 + 内存插入 active 头部
+        summary = result["summary"]
+        if summary is not None:
+            compressed_from = [
+                m.get("msg_id") for m in compressed_msgs if m.get("msg_id")
+            ]
+            summary_id = await self._conn.fetchval(
+                """
+                INSERT INTO messages
+                    (session_id, turn, role, content, compressed_from, zone)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+                RETURNING id
+                """,
+                self._session_id,
+                self._turn,
+                summary.get("role", "assistant"),
+                summary.get("content", ""),
+                json.dumps(compressed_from, ensure_ascii=False),
+                "active",
+            )
+            summary["msg_id"] = summary_id
+            summary["turn"] = self._turn
+            cm.active_zone.messages.insert(0, summary)
 
     def _find_tool(self, name: str) -> ToolDef | None:
         """按名查找工具定义。

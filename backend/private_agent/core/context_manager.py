@@ -229,7 +229,8 @@ class ContextManager:
         """
         rows = await conn.fetch(
             """
-            SELECT role, content, tool_calls, tool_call_id, name, zone
+            SELECT id, turn, role, content, reasoning_content,
+                   tool_calls, tool_call_id, name, zone, compressed
             FROM messages
             WHERE session_id=$1
             ORDER BY turn, id
@@ -247,7 +248,20 @@ class ContextManager:
             elif zone == "stable":
                 stable.append({"role": role, "content": row["content"]})
             elif zone == "active":
-                msg: dict[str, Any] = {"role": role, "content": row["content"]}
+                msg: dict[str, Any] = {
+                    "role": role,
+                    "content": row["content"],
+                    "turn": row["turn"],
+                    "msg_id": row["id"],
+                }
+                # 压缩标记: 压缩过的消息不进入 API(get_messages 过滤),
+                # 但保留在内存中供未来查询/恢复
+                if row["compressed"]:
+                    msg["compressed"] = True
+                # reasoning_content: 推理过程原样恢复(DeepSeek V4 系要求回传,
+                # AI-Agents-in-Depth 2.3.1)
+                if row["reasoning_content"] is not None:
+                    msg["reasoning_content"] = row["reasoning_content"]
                 # tool_calls(JSONB):asyncpg 默认返回 str,需 json.loads
                 tc = row["tool_calls"]
                 if tc is not None:
@@ -340,10 +354,11 @@ class ContextManager:
             turn: 当前轮次(≥1)。
             content: 用户消息文本。
         """
-        await conn.execute(
+        msg_id = await conn.fetchval(
             """
             INSERT INTO messages (session_id, turn, role, content, zone)
             VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
             """,
             self.session_id,
             turn,
@@ -351,7 +366,10 @@ class ContextManager:
             content,
             "active",
         )
-        self.active_zone.messages.append({"role": "user", "content": content})
+        # 内存同步: 携带内部字段(turn/msg_id), get_messages 剥离后才进 API
+        self.active_zone.messages.append(
+            {"role": "user", "content": content, "turn": turn, "msg_id": msg_id}
+        )
 
     async def append_assistant_message(
         self,
@@ -360,47 +378,65 @@ class ContextManager:
         turn: int,
         content: str,
         tool_calls: list[dict] | None = None,
+        reasoning_content: str | None = None,
     ) -> None:
         """每轮构建:追加助手消息到 Active Zone(蓝图 §3.3)。
 
         持久化到 messages 表(role='assistant', zone='active') + 内存同步。
         tool_calls 不为空时持久化为 JSONB。
+        reasoning_content(V2 上下文工程): 推理过程一并持久化,
+        reload 后原样回传(DeepSeek V4 系要求 assistant 消息回传思考过程,
+        AI-Agents-in-Depth 2.3.1)。
 
         Args:
             conn: Postgres 连接。
             turn: 当前轮次。
             content: 助手消息文本(可空,纯 tool_call 时为空字符串)。
             tool_calls: 工具调用列表(OpenAI 格式),无则 None。
+            reasoning_content: 模型推理过程(如 deepseek reasoning 模型),无则 None。
         """
         if tool_calls:
             tool_calls_json = json.dumps(tool_calls, ensure_ascii=False)
-            await conn.execute(
+            msg_id = await conn.fetchval(
                 """
-                INSERT INTO messages (session_id, turn, role, content, tool_calls, zone)
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+                INSERT INTO messages
+                    (session_id, turn, role, content, reasoning_content, tool_calls, zone)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                RETURNING id
                 """,
                 self.session_id,
                 turn,
                 "assistant",
                 content,
+                reasoning_content,
                 tool_calls_json,
                 "active",
             )
         else:
-            await conn.execute(
+            msg_id = await conn.fetchval(
                 """
-                INSERT INTO messages (session_id, turn, role, content, zone)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO messages
+                    (session_id, turn, role, content, reasoning_content, zone)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id
                 """,
                 self.session_id,
                 turn,
                 "assistant",
                 content,
+                reasoning_content,
                 "active",
             )
-        msg: dict[str, Any] = {"role": "assistant", "content": content}
+        msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": content,
+            "turn": turn,
+            "msg_id": msg_id,
+        }
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
         self.active_zone.messages.append(msg)
 
     async def append_tool_message(
@@ -427,10 +463,11 @@ class ContextManager:
         """
         if error:
             content = f"[{error}]\n{content}"
-        await conn.execute(
+        msg_id = await conn.fetchval(
             """
             INSERT INTO messages (session_id, turn, role, content, tool_call_id, name, zone)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id
             """,
             self.session_id,
             turn,
@@ -446,13 +483,47 @@ class ContextManager:
                 "tool_call_id": tool_call_id,
                 "content": content,
                 "name": name,
+                "turn": turn,
+                "msg_id": msg_id,
             }
         )
 
     def get_messages(self) -> list[dict]:
-        """返回 Frozen + Stable + Active 三区合并后的消息列表。
+        """返回 Frozen + Stable + Active 三区合并后的消息列表(供 ModelAdapter.chat 使用)。
 
-        供 ModelAdapter.chat(messages) 使用。顺序:frozen → stable → active。
+        蓝图 §3.2 关键约定: 仅输出 OpenAI 兼容字段(role/content/
+        reasoning_content/tool_calls/tool_call_id/name), 剥离全部内部 metadata
+        (zone/turn/msg_id/compressed 等) —— metadata 仅用于内部管理与持久化,
+        进入模型 API 请求会破坏兼容性。
+
+        V2 上下文工程: 过滤 compressed=True 的消息(已压缩不进 API, 但原文
+        保留在内存/DB 中, 未来可恢复)。
+
+        Returns:
+            合并后的 API 消息列表, 顺序: frozen → stable → active。
+        """
+        # OpenAI 兼容字段白名单(蓝图 §3.2 Message 结构)
+        api_fields = (
+            "role", "content", "reasoning_content",
+            "tool_calls", "tool_call_id", "name",
+        )
+        merged: list[dict] = []
+        for zone_msgs in (
+            self.frozen_zone.messages,
+            self.stable_zone.messages,
+            self.active_zone.messages,
+        ):
+            for m in zone_msgs:
+                if m.get("compressed"):
+                    continue  # 压缩过的消息不进 API(原文保留, 可恢复)
+                merged.append({k: m[k] for k in api_fields if k in m})
+        return merged
+
+    def get_messages_with_meta(self) -> list[dict]:
+        """返回含内部 metadata 的消息列表(供压缩/归档等内部逻辑使用)。
+
+        与 get_messages 的区别: 不剥离内部字段(zone/turn/msg_id/compressed),
+        供 Compressor 滑动窗口按 turn 判定与 DB 回写使用。不进入模型 API。
         """
         return [
             *self.frozen_zone.messages,
