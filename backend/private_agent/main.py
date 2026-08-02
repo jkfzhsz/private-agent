@@ -255,13 +255,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     try:
                         # 会话懒创建(蓝图 §2.10):WS 收到首条 user_message 时,
                         # sessions 无该行则插入,保证 ensure_initial 外键不失败
+                        # 懒创建: title 留空(NULL), list_sessions 用首条用户消息兜底生成可读标题
                         exists = await conn.fetchval(
                             "SELECT 1 FROM sessions WHERE id=$1", session_id
                         )
                         if exists is None:
                             await conn.execute(
-                                "INSERT INTO sessions (id, title) VALUES ($1, $2)",
-                                session_id, f"session-{session_id}",
+                                "INSERT INTO sessions (id) VALUES ($1)",
+                                session_id,
                             )
                         # frozen_tools: 内置白名单(与 activate 同源, hash 锁定)
                         # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
@@ -296,6 +297,17 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         )
                         await cm.ensure_initial(conn)
                         adapter = _build_adapter(cfg)
+                        # per-provider 对话参数上限: 取 session.model_id 或 fallback 首选
+                        from private_agent.config.loader import resolve_provider_limits
+
+                        model_id = await conn.fetchval(
+                            "SELECT model_id FROM sessions WHERE id = $1", session_id
+                        )
+                        chain = cfg.get("models", {}).get("router", {}).get(
+                            "fallback_chain", []
+                        )
+                        provider_name = model_id or (chain[0] if chain else None)
+                        provider_limits = resolve_provider_limits(cfg, provider_name)
                         loop = ReactLoop(
                             session_id=session_id,
                             context_manager=cm,
@@ -303,12 +315,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             tools=tools,
                             conn=conn,
                             cfg=cfg,
+                            provider_limits=provider_limits,
+                            # 实时推送: 事件边产生边发给 WS(流式逐块, 而非结束后批量)
+                            event_sink=lambda ev: ws.send_json(ev),
                         )
                         await loop.run_turn(content)
-                        # 排空 event_queue,逐条推送 react_event
-                        while not loop.event_queue.empty():
-                            event = loop.event_queue.get_nowait()
-                            await ws.send_json(event)
+                        # 事件已通过 event_sink 实时推送, 无需再排空 event_queue
                         await ws.send_json({
                             "type": "turn_end",
                             "session_id": session_id,

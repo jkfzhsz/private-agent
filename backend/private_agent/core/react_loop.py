@@ -67,6 +67,7 @@ class ReactLoop:
         max_iterations: int = 10,
         event_sink: Callable[[dict], Awaitable[None]] | None = None,
         cfg: dict | None = None,
+        provider_limits: dict | None = None,
     ) -> None:
         self._session_id = session_id
         self._context_manager = context_manager
@@ -75,12 +76,16 @@ class ReactLoop:
         # adapter.chat 期望 OpenAI tools schema dict(非 ToolDef 对象)
         self._tool_schemas = [t.to_openai_schema() for t in tools]
         self._conn = conn
-        # 最大迭代轮次: 优先配置 models.limits.max_turns(设置页可调)
-        limits = (cfg or {}).get("models", {}).get("limits", {}) if cfg else {}
+        # 对话参数上限: 优先 provider 级(per-model, 设置页按模型配置),
+        # 回退全局 models.limits
+        limits = provider_limits
+        if not limits:
+            limits = (cfg or {}).get("models", {}).get("limits", {}) if cfg else {}
         self._max_iterations = int(
             limits.get("max_turns") or max_iterations
         )
         self._max_output_tokens = limits.get("max_output_tokens")
+        self._max_input_tokens = limits.get("max_input_tokens")
         self._turn = 0
         self._state = ReactLoopState.IDLE
         self._iteration = 0
@@ -120,12 +125,15 @@ class ReactLoop:
             payload=payload or {},
         )
 
-        # 推送到队列(WS 消费)
+        # 推送到队列(测试消费)
         await self.event_queue.put(event)
 
-        # event_sink 回调(非 None 时调用,用于 ReplayExecutor 静默收集或真实会话 WS 推送)
+        # 实时推送给 WS(流式关键: 事件边产生边推送, 而非 run_turn 结束后批量)
         if self._event_sink is not None:
-            await self._event_sink(event)
+            try:
+                await self._event_sink(event)
+            except Exception:
+                self._logger.exception("event_sink push failed (继续, 不中断对话)")
 
     @property
     def state(self) -> ReactLoopState:

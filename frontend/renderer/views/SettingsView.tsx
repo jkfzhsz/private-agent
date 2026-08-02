@@ -11,6 +11,7 @@ interface ProviderInfo {
   model_name: string | null;
   base_url: string | null;
   api_key_configured: boolean;
+  limits?: { max_input_tokens?: number; max_output_tokens?: number; max_turns?: number };
 }
 
 interface McpServer {
@@ -85,6 +86,19 @@ export default function SettingsView(): JSX.Element {
     }
   };
 
+  const handleDeleteProvider = async (name: string): Promise<void> => {
+    try {
+      const resp = await fetch(`${API_BASE}/settings/providers/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      await load();
+    } catch (err) {
+      window.alert(`删除失败: ${String(err)}`);
+    }
+  };
+
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
       <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
@@ -92,17 +106,26 @@ export default function SettingsView(): JSX.Element {
           模型 Provider
         </div>
         <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
-          可编辑地址/模型/开关/API Key, 支持连通性测试; 降级链: {fallbackChain.join(" → ") || "—"}
+          可新增/编辑/删除模型(任意 OpenAI 兼容服务) · 编辑可配置参数上限(输入/输出/轮次) · 降级链: {fallbackChain.join(" → ") || "—"}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {providers.map((p) => (
-            <ProviderRow key={p.name} provider={p} onSaved={load} />
+            <ProviderRow key={p.name} provider={p} onSaved={load} onDelete={handleDeleteProvider} />
           ))}
+          {providers.length === 0 && (
+            <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
+              当前未配置模型 provider
+            </div>
+          )}
+          <ProviderAddForm onAdded={load} />
         </div>
-        {/* 对话参数上限 */}
+        {/* 全局默认参数(模型未单独配置时使用) */}
         <div style={{ display: "flex", alignItems: "flex-end", gap: 14, marginTop: 16, paddingTop: 14, borderTop: "1px solid rgba(148,163,184,0.15)", flexWrap: "wrap" }}>
+          <div style={{ fontSize: 11, color: "var(--text-tertiary)", paddingBottom: 8 }}>
+            全局默认参数(未在模型行单独配置时使用):
+          </div>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>最大输入 tokens</span>
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>默认输入 tokens</span>
             <input
               type="number"
               min={256}
@@ -112,7 +135,7 @@ export default function SettingsView(): JSX.Element {
             />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>最大输出 tokens</span>
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>默认输出 tokens</span>
             <input
               type="number"
               min={64}
@@ -122,7 +145,7 @@ export default function SettingsView(): JSX.Element {
             />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>最大轮次</span>
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>默认轮次</span>
             <input
               type="number"
               min={1}
@@ -173,15 +196,20 @@ export default function SettingsView(): JSX.Element {
 function ProviderRow({
   provider,
   onSaved,
+  onDelete,
 }: {
   provider: ProviderInfo;
   onSaved: () => void;
+  onDelete: (name: string) => void;
 }): JSX.Element {
   const [editing, setEditing] = useState(false);
   const [baseUrl, setBaseUrl] = useState(provider.base_url ?? "");
   const [modelName, setModelName] = useState(provider.model_name ?? "");
   const [enabled, setEnabled] = useState(provider.enabled);
   const [apiKey, setApiKey] = useState("");
+  const [maxInput, setMaxInput] = useState(provider.limits?.max_input_tokens ?? 8192);
+  const [maxOutput, setMaxOutput] = useState(provider.limits?.max_output_tokens ?? 2048);
+  const [maxTurns, setMaxTurns] = useState(provider.limits?.max_turns ?? 20);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -190,6 +218,9 @@ function ProviderRow({
     setModelName(provider.model_name ?? "");
     setEnabled(provider.enabled);
     setApiKey("");
+    setMaxInput(provider.limits?.max_input_tokens ?? 8192);
+    setMaxOutput(provider.limits?.max_output_tokens ?? 2048);
+    setMaxTurns(provider.limits?.max_turns ?? 20);
     setMsg(null);
     setEditing(true);
   };
@@ -203,6 +234,9 @@ function ProviderRow({
       if (modelName.trim()) body.model_name = modelName.trim();
       body.enabled = enabled;
       if (apiKey.trim()) body.api_key = apiKey.trim();
+      body.max_input_tokens = maxInput;
+      body.max_output_tokens = maxOutput;
+      body.max_turns = maxTurns;
       const resp = await fetch(`${API_BASE}/settings/providers/${provider.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -285,6 +319,18 @@ function ProviderRow({
             <button className="btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }} onClick={() => void test()} disabled={busy}>
               测试
             </button>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 12, padding: "5px 10px", color: "var(--danger-text)" }}
+              onClick={() => {
+                if (window.confirm(`确定删除模型 provider「${provider.name}」？删除后需重新配置才能使用。`)) {
+                  onDelete(provider.name);
+                }
+              }}
+              title="删除此模型"
+            >
+              删除
+            </button>
           </div>
         )}
       </div>
@@ -319,6 +365,34 @@ function ProviderRow({
               style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
             />
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>参数上限</span>
+            <input
+              type="number"
+              min={256}
+              value={maxInput}
+              onChange={(e) => setMaxInput(Number(e.target.value))}
+              title="最大输入 tokens"
+              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+            <input
+              type="number"
+              min={64}
+              value={maxOutput}
+              onChange={(e) => setMaxOutput(Number(e.target.value))}
+              title="最大输出 tokens"
+              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+            <input
+              type="number"
+              min={1}
+              value={maxTurns}
+              onChange={(e) => setMaxTurns(Number(e.target.value))}
+              title="最大轮次"
+              style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+            <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>输入/输出/轮次</span>
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
@@ -337,6 +411,120 @@ function ProviderRow({
           {msg && <div style={{ fontSize: 12, color: msg.startsWith("✅") ? "var(--success-text)" : msg.startsWith("❌") ? "var(--danger-text)" : "var(--text-secondary)" }}>{msg}</div>}
         </div>
       )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 新增 Provider 表单
+// ──────────────────────────────────────────────────────────────────────────────
+
+function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [modelName, setModelName] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [maxInput, setMaxInput] = useState(8192);
+  const [maxOutput, setMaxOutput] = useState(2048);
+  const [maxTurns, setMaxTurns] = useState(20);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const submit = async (): Promise<void> => {
+    if (!name.trim() || !baseUrl.trim() || !modelName.trim()) {
+      setMsg("请填写名称、API 地址和模型名");
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      const body: Record<string, unknown> = {
+        name: name.trim(),
+        base_url: baseUrl.trim(),
+        model_name: modelName.trim(),
+        enabled,
+        max_input_tokens: maxInput,
+        max_output_tokens: maxOutput,
+        max_turns: maxTurns,
+      };
+      if (apiKey.trim()) body.api_key = apiKey.trim();
+      const resp = await fetch(`${API_BASE}/settings/providers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setName("");
+      setBaseUrl("");
+      setModelName("");
+      setApiKey("");
+      setMsg("已添加(自动加入降级链)");
+      onAdded();
+    } catch (err) {
+      setMsg(`添加失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        className="btn-ghost"
+        style={{ fontSize: 12, padding: "8px 14px", borderStyle: "dashed", alignSelf: "flex-start" }}
+        onClick={() => setOpen(true)}
+      >
+        ＋ 添加模型
+      </button>
+    );
+  }
+
+  const inputStyle = {
+    flex: 1, padding: "6px 10px", borderRadius: 6,
+    border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)",
+  } as const;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.4)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>名称</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如 qwen / zhipu-v2" style={inputStyle} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API 地址</span>
+        <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://.../v1" style={inputStyle} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>模型名</span>
+        <input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="model-name" style={inputStyle} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API Key</span>
+        <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="可选, 留空稍后录入" style={inputStyle} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>参数上限</span>
+        <input type="number" min={256} value={maxInput} onChange={(e) => setMaxInput(Number(e.target.value))} title="最大输入 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }} />
+        <input type="number" min={64} value={maxOutput} onChange={(e) => setMaxOutput(Number(e.target.value))} title="最大输出 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }} />
+        <input type="number" min={1} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value))} title="最大轮次" style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }} />
+        <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>输入/输出/轮次</span>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          启用并加入降级链
+        </label>
+        <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void submit()} disabled={busy}>
+          添加
+        </button>
+        <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setOpen(false)} disabled={busy}>
+          取消
+        </button>
+        {msg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{msg}</span>}
+      </div>
     </div>
   );
 }

@@ -478,10 +478,14 @@ async def get_providers():
     """
     import os
 
+    from private_agent.config.loader import resolve_provider_limits
+
     cfg = await _load_cfg()
     providers = cfg.get("models", {}).get("providers", {})
     result = []
     for name, prov in providers.items():
+        if prov.get("deleted"):
+            continue  # 已删除的 provider 不展示
         env_var = f"PA_{name.upper()}_API_KEY"
         key_val = os.environ.get(env_var, "")
         result.append({
@@ -491,6 +495,8 @@ async def get_providers():
             "base_url": prov.get("base_url"),
             # 不返回 key 明文,仅返回是否已配置(非空且非 test-key 占位)
             "api_key_configured": bool(key_val) and key_val != "test-key",
+            # per-provider 对话参数上限(已解析: provider 级 > 全局默认)
+            "limits": resolve_provider_limits(cfg, name),
         })
     return {
         "providers": result,
@@ -573,12 +579,18 @@ def _ensure_master_key() -> bytes:
 
 
 class ProviderUpdateRequest(BaseModel):
-    """PUT /settings/providers/{name} 请求体(至少一项)。"""
+    """PUT /settings/providers/{name} 请求体(至少一项)。
+
+    含 per-provider 对话参数上限(覆盖全局 models.limits 默认)。
+    """
 
     base_url: str | None = None
     model_name: str | None = None
     enabled: bool | None = None
     api_key: str | None = None  # 提供才更新; 明文仅走 HTTPS/本机回环, 加密后存库
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_turns: int | None = None
 
 
 @router.put("/settings/providers/{name}", response_model=None)
@@ -606,6 +618,28 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
         if body.enabled is not None:
             await _set_runtime(conn, f"{prefix}.enabled", bool(body.enabled))
 
+        # per-provider 对话参数上限(0 表示删除覆盖回退全局默认, 空表示不更新)
+        for key, field in (
+            ("max_input_tokens", body.max_input_tokens),
+            ("max_output_tokens", body.max_output_tokens),
+            ("max_turns", body.max_turns),
+        ):
+            if field is None:
+                continue
+            if field <= 0:
+                await conn.execute(
+                    "DELETE FROM config_runtime WHERE key = $1",
+                    f"{prefix}.{key}",
+                )
+                continue
+            min_val = (
+                256 if key == "max_input_tokens"
+                else (64 if key == "max_output_tokens" else 1)
+            )
+            await _set_runtime(
+                conn, f"{prefix}.{key}", max(min_val, int(field))
+            )
+
         if body.api_key is not None and body.api_key.strip():
             master = _ensure_master_key()
             from private_agent.config import secrets
@@ -614,6 +648,127 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
             await _set_runtime(conn, f"{prefix}.api_key_encrypted", encrypted)
             # 热生效: 本进程适配器直接读环境变量
             os.environ[f"PA_{name.upper()}_API_KEY"] = body.api_key.strip()
+    finally:
+        await conn.close()
+    return {"ok": True, "name": name}
+
+
+class ProviderCreateRequest(BaseModel):
+    """POST /settings/providers 请求体: 新增模型 provider。"""
+
+    name: str
+    base_url: str
+    model_name: str
+    enabled: bool = True
+    api_key: str | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_turns: int | None = None
+
+
+@router.post("/settings/providers", response_model=None)
+async def create_provider(body: ProviderCreateRequest):
+    """新增模型 provider(任意 OpenAI 兼容服务, 动态注册)。
+
+    - 配置写 config_runtime(models.providers.{name}.*), 与 yaml provider 同等对待
+    - enabled 时自动加入 fallback_chain 尾部(整体列表写 runtime)
+    - api_key 可选, 提供则 AES 加密存储 + 热生效
+    """
+    import os
+
+    name = body.name.strip()
+    if not name or not body.base_url.strip():
+        raise HTTPException(status_code=400, detail="name 与 base_url 必填")
+    import json as _json
+
+    conn = await db.connect()
+    try:
+        # 已存在且未删除 → 拒绝(避免误覆盖)
+        existing = await conn.fetchval(
+            "SELECT value FROM config_runtime WHERE key = $1",
+            f"models.providers.{name}.deleted",
+        )
+        if existing is not None and existing is False:
+            raise HTTPException(status_code=409, detail=f"provider '{name}' 已存在")
+        if existing is True:
+            # 重新启用: 清除删除标记
+            await conn.execute(
+                "DELETE FROM config_runtime WHERE key = $1",
+                f"models.providers.{name}.deleted",
+            )
+            await _set_runtime(conn, f"models.providers.{name}.enabled", True)
+
+        prefix = f"models.providers.{name}"
+        await _set_runtime(conn, f"{prefix}.base_url", body.base_url.strip())
+        await _set_runtime(conn, f"{prefix}.model_name", body.model_name.strip())
+        await _set_runtime(conn, f"{prefix}.enabled", bool(body.enabled))
+        if body.api_key and body.api_key.strip():
+            master = _ensure_master_key()
+            from private_agent.config import secrets
+
+            encrypted = secrets.encrypt_api_key(body.api_key.strip(), master)
+            await _set_runtime(conn, f"{prefix}.api_key_encrypted", encrypted)
+            os.environ[f"PA_{name.upper()}_API_KEY"] = body.api_key.strip()
+        for key, field in (
+            ("max_input_tokens", body.max_input_tokens),
+            ("max_output_tokens", body.max_output_tokens),
+            ("max_turns", body.max_turns),
+        ):
+            if field and field > 0:
+                await _set_runtime(conn, f"{prefix}.{key}", int(field))
+
+        # 加入 fallback_chain(整体列表存 runtime, 避免写 yaml)
+        if body.enabled:
+            row = await conn.fetchval(
+                "SELECT value FROM config_runtime WHERE key = 'models.router.fallback_chain'"
+            )
+            if row:
+                chain = _json.loads(row) if isinstance(row, str) else row
+            else:
+                cfg = await _load_cfg()
+                chain = list(
+                    cfg.get("models", {}).get("router", {}).get("fallback_chain", [])
+                )
+            if name not in chain:
+                chain.append(name)
+                await _set_runtime(conn, "models.router.fallback_chain", chain)
+    finally:
+        await conn.close()
+    return {"ok": True, "name": name}
+
+
+@router.delete("/settings/providers/{name}", response_model=None)
+async def delete_provider(name: str):
+    """删除模型 provider(软删: deleted 标记 + 禁用 + 移出 fallback_chain)。
+
+    config.yaml 的静态 provider 不可物理删除, 用 runtime 标记屏蔽;
+    已删除的可通过 POST /settings/providers 同名重新创建。
+    """
+    import json as _json
+
+    conn = await db.connect()
+    try:
+        await _set_runtime(conn, f"models.providers.{name}.deleted", True)
+        await _set_runtime(conn, f"models.providers.{name}.enabled", False)
+        # 清除加密 key(重新创建时必须重新录入, 避免误用旧凭据)
+        await conn.execute(
+            "DELETE FROM config_runtime WHERE key = $1",
+            f"models.providers.{name}.api_key_encrypted",
+        )
+        # 移出 fallback_chain
+        row = await conn.fetchval(
+            "SELECT value FROM config_runtime WHERE key = 'models.router.fallback_chain'"
+        )
+        if row:
+            chain = _json.loads(row) if isinstance(row, str) else row
+        else:
+            cfg = await _load_cfg()
+            chain = list(
+                cfg.get("models", {}).get("router", {}).get("fallback_chain", [])
+            )
+        if name in chain:
+            chain = [c for c in chain if c != name]
+            await _set_runtime(conn, "models.router.fallback_chain", chain)
     finally:
         await conn.close()
     return {"ok": True, "name": name}
@@ -704,7 +859,10 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
             result = []
             for r in rows:
                 title = r["title"] or r["summary"]
-                if not title:
+                # 懒创建占位标题(session-{id})视为无标题, 走首条用户消息兜底
+                if not title or (
+                    isinstance(title, str) and title.startswith("session-")
+                ):
                     first = r["first_user_content"] or ""
                     title = first[:30].replace("\n", " ") if first else f"#{r['id']}"
                 result.append({

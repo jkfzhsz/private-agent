@@ -27,6 +27,19 @@ def register_adapter(
     _REGISTRY[name] = factory
 
 
+def ensure_registered(name: str) -> None:
+    """确保 provider 已注册;未注册的按 OpenAI 兼容动态注册(设置页可新增任意模型)。
+
+    新增 provider 只配置了 base_url/model_name/api_key, 无专用 adapter 类,
+    统一走 OpenAICompatibleAdapter(绝大多数云厂商兼容 OpenAI 协议)。
+    """
+    if name in _REGISTRY:
+        return
+    from private_agent.models.adapters import OpenAICompatibleAdapter
+
+    register_adapter(name, _make_factory(name, OpenAICompatibleAdapter))
+
+
 def get_adapter(name: str, cfg: dict | None = None) -> ModelAdapter:
     """从 registry 取 factory,用 cfg 构造 adapter。
 
@@ -37,6 +50,7 @@ def get_adapter(name: str, cfg: dict | None = None) -> ModelAdapter:
     Raises:
         KeyError: name 未注册。
     """
+    ensure_registered(name)
     if name not in _REGISTRY:
         raise KeyError(f"provider '{name}' not registered")
     factory = _REGISTRY[name]

@@ -207,3 +207,21 @@ def _validate_sandbox_config(cfg: dict[str, Any]) -> None:
         for key in ("stdout_artifact_threshold", "code_artifact_threshold"):
             if key in output and (not isinstance(output[key], int) or output[key] < 0):
                 raise ValueError(f"sandbox.output.{key} must be a non-negative integer")
+
+def resolve_provider_limits(cfg: dict, provider_name: str | None = None) -> dict:
+    """解析 provider 的对话参数上限(provider 级覆盖 > 全局 models.limits 默认)。
+
+    Args:
+        cfg: 合并后的配置 dict(含 config_runtime 覆盖)。
+        provider_name: provider 名(models.providers 的 key)。None 时仅返回全局默认。
+
+    Returns:
+        {"max_input_tokens": int, "max_output_tokens": int, "max_turns": int}
+    """
+    defaults = dict(cfg.get("models", {}).get("limits", {}))
+    if provider_name:
+        prov = cfg.get("models", {}).get("providers", {}).get(provider_name, {})
+        for key in ("max_input_tokens", "max_output_tokens", "max_turns"):
+            if prov.get(key) is not None:
+                defaults[key] = prov[key]
+    return defaults
