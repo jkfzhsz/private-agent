@@ -8,11 +8,11 @@
 
 ## 结论
 
-**核心功能(8 章主体)已全部开发完毕并经测试验证; 但严格对照蓝图 [MVP] 标注, 仍存在 5 个非远期缺口**(均为"功能完整度"问题, 不影响已验收的核心链路)。
+**核心功能(8 章主体)已全部开发完毕并经测试验证; 5 个非远期 [MVP] 缺口已于 2026-08-02 全部补齐(提交 `993f2a6`), 蓝图非远期内容达到 100% 覆盖。**
 
 - 蓝图 §9.7 MVP 验收 30 项维度: 28/30 通过, 2 项边界(V2 前状态) → V2 后权限确认运行时已接入, 仅剩跨平台未实测
 - 阶段 Done Criteria 36/36 完成(acceptance-report-v3)
-- 后端测试 869 passed, 前端 13 passed
+- 后端测试 885 passed(补齐后), 前端 13 passed
 
 ---
 
@@ -33,13 +33,15 @@
 
 ## 二、未开发完毕(❌ 非远期 [MVP] 缺口, 5 项)
 
-| # | 缺口 | 蓝图章节 | 现状 | 来源 |
-|---|---|---|---|---|
-| 1 | **沙箱 UI 配置面板** | §6.14 `[MVP]` "完整配置段+运行时覆盖+UI 配置实现" | 无 `GET/PUT /api/sandbox/config`、`POST /api/sandbox/test` 端点, 前端无配置面板; config.yaml 段+runtime 覆盖已有 | M2 handoff P0-4(归属 M3, 未做) |
-| 2 | **KB 片段注入 Stable Zone** | §4.15 `[MVP]` "工具返回的 KB 片段由 context_manager 注入 Stable Zone + 20 条计数器" | search_knowledge 结果走普通 tool message(active zone), 未注入 Stable Zone, 无计数器 | 实现偏差 |
-| 3 | **Stable Zone 合并压缩** | §3.10.3 `[MVP]` "三类压缩策略全量实现(含 Stable Zone 合并存档)" | compressor.py 注释"合并(留 V2)", 未实现每 N=5 轮合并 + 快照存档(与 #2 互为因果: 无 KB 注入则合并无对象) | 实现偏差 |
-| 4 | **memory_evicted 淘汰事件** | §4.4 `[MVP]` "淘汰事件记录(event_type=memory_evicted)" | 淘汰仅软删除, 未写 react_events(白名单无 memory_evicted, 只有 memory_extracted) | 实现遗漏 |
-| 5 | **压缩存档** | §3.10 `[MVP]` "压缩存档(soft delete + snapshot + hash 备份)" | 压缩时仅 UPDATE compressed + INSERT 摘要, 未写 messages_archive / version_snapshots(ttl_cleanup 只清不写) | 实现遗漏 |
+> **更新(2026-08-02)**: 5 项缺口已全部补齐(提交 `993f2a6`), 见下表"状态"。
+
+| # | 缺口 | 蓝图章节 | 现状 | 来源 | 状态 |
+|---|---|---|---|---|---|
+| 1 | **沙箱 UI 配置面板** | §6.14 `[MVP]` "完整配置段+运行时覆盖+UI 配置实现" | 已实现 `GET/PUT /admin/settings/sandbox` + `POST /admin/settings/sandbox/test` 端点 + 前端设置页沙箱区块(参数表单+测试执行) | M2 handoff P0-4 | ✅ 已补齐 |
+| 2 | **KB 片段注入 Stable Zone** | §4.15 `[MVP]` "工具返回的 KB 片段由 context_manager 注入 Stable Zone + 20 条计数器" | 已实现 `context_manager.inject_kb_chunks`([KB Context] 前缀+12k 截断)+`kb_chunk_count` 计数器; react_loop 对 search_knowledge 结果额外注入 stable | 实现偏差 | ✅ 已补齐 |
+| 3 | **Stable Zone 合并压缩** | §3.10.3 `[MVP]` "三类压缩策略全量实现(含 Stable Zone 合并存档)" | 已实现 `Compressor.should_merge_stable`(每5轮或>20条)+`_maybe_merge_stable_zone`(合并摘要+旧消息 compressed+version_snapshots 存档 scope=stable_zone); version_snapshots.scope CHECK 扩容 | 实现偏差 | ✅ 已补齐 |
+| 4 | **memory_evicted 淘汰事件** | §4.4 `[MVP]` "淘汰事件记录(event_type=memory_evicted)" | 已实现淘汰时单独写 react_events(白名单+CHECK 扩容 memory_evicted); main.py/admin.py 注入 react_events_insert(生产路径事件真正入库) | 实现遗漏 | ✅ 已补齐 |
+| 5 | **压缩存档** | §3.10 `[MVP]` "压缩存档(soft delete + snapshot + hash 备份)" | 已实现 `_apply_compression` 将被压缩消息写入 messages_archive(soft delete+归档, ttl_cleanup 90 天清理衔接) | 实现遗漏 | ✅ 已补齐 |
 
 ## 三、边界与说明(⚠️)
 
@@ -56,7 +58,13 @@
 
 ## 五、建议
 
-1. 若追求蓝图 [MVP] 字面达标, 优先补齐 #4(memory_evicted 事件)+ #5(压缩存档写 messages_archive), 成本低
-2. #1 沙箱 UI 面板属独立功能(3 个端点 + 1 个前端面板)
-3. #2/#3 涉及设计决策(KB 注入 Stable Zone vs 工具消息), 建议先确认是否沿用蓝图方案, 再实施
-4. 跨平台冒烟可在后续里程碑安排
+> **已执行(2026-08-02, 提交 `993f2a6`)**: 按优先级全部补齐。
+> 1. ✅ #4 memory_evicted 事件 + #5 压缩存档(低成本) → 完成
+> 2. ✅ #1 沙箱 UI 面板(3 端点 + 前端面板) → 完成
+> 3. ✅ #2/#3 KB 注入 Stable Zone + Stable Zone 合并(按蓝图方案) → 完成
+> 4. 跨平台冒烟可后续里程碑安排(测试覆盖边界)
+
+剩余建议:
+1. 跨平台(macOS/Linux)冒烟验证
+2. 评估可视化前端(EvalPanel)为 [V2] 远期, 后续里程碑
+3. 沙箱配置变更审计日志([V2] 标注)
