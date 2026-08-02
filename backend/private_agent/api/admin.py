@@ -1094,6 +1094,28 @@ async def import_mcp_json(body: McpImportRequest):
     }
 
 
+def _extract_auth(headers) -> str:
+    """从 headers 中提取认证 token(兼容各种写法)。
+
+    支持键名: Authorization / authorization / api-key / apikey / x-api-key / token。
+    支持值格式: "Bearer xxx" / "Token xxx" / "ApiKey xxx" / 裸 token(直接是值)。
+    返回值统一为裸 token(无前缀)。
+    """
+    if not isinstance(headers, dict):
+        return ""
+    for key in ("Authorization", "authorization", "api-key", "apikey", "x-api-key", "token"):
+        val = headers.get(key)
+        if isinstance(val, str) and val.strip():
+            raw = val.strip()
+            # 去掉常见认证前缀(不区分大小写)
+            lowered = raw.lower()
+            for prefix in ("bearer ", "token ", "apikey ", "basic "):
+                if lowered.startswith(prefix):
+                    return raw[len(prefix):].strip()
+            return raw  # 裸 token
+    return ""
+
+
 def _parse_mcp_json(parsed) -> list[dict]:
     """把各种 JSON 形态解析为 server dict 列表。"""
     if isinstance(parsed, dict):
@@ -1107,11 +1129,9 @@ def _parse_mcp_json(parsed) -> list[dict]:
                 item = {"id": name, "type": "http" if cfg.get("url") else "stdio"}
                 if item["type"] == "http":
                     item["url"] = cfg.get("url", "")
-                    # headers["Authorization"]: "Bearer xxx" → auth_token
-                    headers = cfg.get("headers") or {}
-                    auth = headers.get("Authorization") or headers.get("authorization") or ""
-                    if auth.lower().startswith("bearer "):
-                        item["auth_token"] = auth[7:].strip()
+                    auth = _extract_auth(cfg.get("headers"))
+                    if auth:
+                        item["auth_token"] = auth
                 else:
                     item["command"] = cfg.get("command", "")
                     item["args"] = list(cfg.get("args") or [])
@@ -1120,18 +1140,25 @@ def _parse_mcp_json(parsed) -> list[dict]:
                     item["env"] = cfg.get("env")
                 result.append(item)
             return result
-        # 单个 server 对象
+        # 单个 server 对象(兼容 headers 认证提取)
         if parsed.get("url") or parsed.get("command"):
-            return [dict(parsed)]
+            entry = dict(parsed)
+            auth = _extract_auth(parsed.get("headers"))
+            if auth:
+                entry["auth_token"] = auth
+            return [entry]
         return []
     if isinstance(parsed, list):
-        # 数组: 兼容本项目格式 [{id|name, type, url|command, ...}]
+        # 数组: 兼容本项目格式 [{id|name, type, url|command, headers, ...}]
         result = []
         for item in parsed:
             if not isinstance(item, dict):
                 continue
             entry = dict(item)
             entry["id"] = entry.get("id") or entry.get("name") or "server"
+            auth = _extract_auth(item.get("headers"))
+            if auth:
+                entry["auth_token"] = auth
             result.append(entry)
         return result
     return []
