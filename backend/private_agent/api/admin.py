@@ -954,6 +954,7 @@ class McpServerRequest(BaseModel):
     enabled: bool = True
     timeout_sec: float = 30.0
     auth_token: str | None = None  # Bearer 认证 token(提供才更新, AES 加密存库)
+    protocol_version: str = "auto"  # auto(自动协商) | 2026-07-28 | 2025-11-25
 
 
 @router.post("/settings/mcp", response_model=None)
@@ -973,6 +974,7 @@ async def upsert_mcp_server(body: McpServerRequest):
         auth_token=body.auth_token,
         enabled=body.enabled,
         timeout_sec=body.timeout_sec,
+        protocol_version=body.protocol_version,
     )
     conn = await db.connect()
     try:
@@ -993,6 +995,7 @@ def _build_server_value(
     enabled: bool = True,
     timeout_sec: float = 30.0,
     env: dict | None = None,
+    protocol_version: str = "auto",
 ) -> dict:
     """构造 MCP server 配置 dict(含 auth_token AES 加密存储)。"""
     value: dict = {
@@ -1000,6 +1003,7 @@ def _build_server_value(
         "type": "http" if (server_type == "http" or url) else "stdio",
         "enabled": enabled,
         "timeout_sec": timeout_sec,
+        "protocol_version": protocol_version,
     }
     if value["type"] == "http":
         value["url"] = url or ""
@@ -1079,6 +1083,7 @@ async def import_mcp_json(body: McpImportRequest):
             enabled=s.get("enabled", True),
             timeout_sec=s.get("timeout_sec", 30.0),
             env=s.get("env"),
+            protocol_version=s.get("protocol_version", "auto"),
         )
         for s in servers
     ]
@@ -1127,6 +1132,8 @@ def _parse_mcp_json(parsed) -> list[dict]:
                 if not isinstance(cfg, dict):
                     continue
                 item = {"id": name, "type": "http" if cfg.get("url") else "stdio"}
+                if cfg.get("protocol_version"):
+                    item["protocol_version"] = cfg["protocol_version"]
                 if item["type"] == "http":
                     item["url"] = cfg.get("url", "")
                     auth = _extract_auth(cfg.get("headers"))
@@ -1197,7 +1204,13 @@ async def delete_mcp_server(name: str):
 
 @router.post("/settings/mcp/{name}/test", response_model=None)
 async def test_mcp_server(name: str):
-    """MCP server 连通性测试: HTTP 发 tools/list, stdio spawn(2026-07-28 无状态, 带认证)。"""
+    """MCP server 连通性测试: 复用 MCPClient(自动协商协议 + SSE, 带认证)。
+
+    探活成功后若为 auto 协商, 将协商出的协议版本持久化回 config_runtime,
+    后续请求直接用该版本, 无需每次先失败重试。
+    """
+    import json as _json
+
     cfg = await _load_cfg()
     servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
     svc = next(
@@ -1210,7 +1223,30 @@ async def test_mcp_server(name: str):
     auth_token = _decrypt_server_auth(svc)
     try:
         if svc.get("type") == "http" or svc.get("url"):
-            return await _test_mcp_http(name, svc["url"], auth_token)
+            result = await _test_mcp_http(
+                name,
+                svc["url"],
+                auth_token=auth_token,
+                protocol_version=svc.get("protocol_version", "auto"),
+            )
+            # 持久化 auto 协商结果(避免后续每次先失败重试)
+            if result.get("ok") and result.get("negotiated"):
+                conn = await db.connect()
+                try:
+                    row = await conn.fetchval(
+                        "SELECT value FROM config_runtime WHERE key = 'tools.mcp.servers'"
+                    )
+                    if row:
+                        srv_list = _json.loads(row) if isinstance(row, str) else row
+                        for item in srv_list:
+                            if isinstance(item, dict) and (
+                                item.get("id") == name or item.get("name") == name
+                            ):
+                                item["protocol_version"] = result["negotiated"]
+                        await _set_runtime(conn, "tools.mcp.servers", srv_list)
+                finally:
+                    await conn.close()
+            return result
         return await _test_mcp_stdio(name, svc.get("command", ""), svc.get("args", []), auth_token)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}
@@ -1230,44 +1266,30 @@ def _decrypt_server_auth(svc: dict) -> str:
         return ""
 
 
-async def _test_mcp_http(name: str, url: str, auth_token: str = "") -> dict:
-    """2026-07-28 无状态协议探活: 发 tools/list(带协议头 + Bearer 认证)。"""
-    import httpx
+async def _test_mcp_http(
+    name: str, url: str, auth_token: str = "", protocol_version: str = "auto"
+) -> dict:
+    """HTTP MCP 探活: 复用 MCPClient(自动协商协议 + SSE 流式 + Bearer 认证)。"""
+    from private_agent.tools.mcp_client import MCPClient, MCPClientConfig
 
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list",
-        "params": {
-            "_meta": {
-                "protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientInfo": {
-                    "name": "private-agent-test",
-                    "version": "0.1",
-                },
-                "capabilities": {},
-            }
-        },
-    }
-    headers = {
-        "MCP-Protocol-Version": "2026-07-28",
-        "Mcp-Method": "tools/list",
-        "Content-Type": "application/json",
-    }
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        if resp.status_code != 200:
-            return {"ok": False, "server": name, "error": f"HTTP {resp.status_code}"}
-        data = resp.json()
-        result = data.get("result", {})
-        tools = result.get("tools", [])
+    client = MCPClient(
+        MCPClientConfig(
+            server_id=name,
+            server_type="http",
+            url=url,
+            timeout_sec=10,
+            auth_token=auth_token,
+            protocol_version=protocol_version,
+        )
+    )
+    async with client:
+        await client.connect()
+        tools = await client.discover_tools()
         return {
             "ok": True,
             "server": name,
-            "protocol": "2026-07-28",
-            "server_info": result.get("serverInfo", {}).get("name", ""),
+            "protocol": client.negotiated_version or protocol_version,
+            "negotiated": client.negotiated_version,
             "tools_count": len(tools),
         }
 
