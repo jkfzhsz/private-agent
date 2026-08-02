@@ -964,51 +964,177 @@ async def upsert_mcp_server(body: McpServerRequest):
     runtime > yaml 整体覆盖)。MCP client 在启动时加载, 改动后重启后端生效。
     auth_token 提供时 AES-256-GCM 加密存储(auth_token_encrypted), 不落明文。
     """
-    import json as _json
+    value = _build_server_value(
+        name=body.name,
+        server_type=body.type,
+        url=body.url,
+        command=body.command,
+        args=body.args,
+        auth_token=body.auth_token,
+        enabled=body.enabled,
+        timeout_sec=body.timeout_sec,
+    )
+    conn = await db.connect()
+    try:
+        await _write_servers_runtime(conn, [value])
+    finally:
+        await conn.close()
+    return {"ok": True, "server": body.name, "count": 1}
 
-    value = {
-        "id": body.name,
-        "type": body.type,
-        "enabled": body.enabled,
-        "timeout_sec": body.timeout_sec,
+
+def _build_server_value(
+    *,
+    name: str,
+    server_type: str = "http",
+    url: str | None = None,
+    command: str | None = None,
+    args: list[str] | None = None,
+    auth_token: str | None = None,
+    enabled: bool = True,
+    timeout_sec: float = 30.0,
+    env: dict | None = None,
+) -> dict:
+    """构造 MCP server 配置 dict(含 auth_token AES 加密存储)。"""
+    value: dict = {
+        "id": name,
+        "type": "http" if (server_type == "http" or url) else "stdio",
+        "enabled": enabled,
+        "timeout_sec": timeout_sec,
     }
-    if body.type == "http" or body.url:
-        value["type"] = "http"
-        value["url"] = body.url or ""
+    if value["type"] == "http":
+        value["url"] = url or ""
     else:
-        value["type"] = "stdio"
-        value["command"] = body.command or ""
-        value["args"] = body.args or []
-
-    if body.auth_token is not None and body.auth_token.strip():
+        value["command"] = command or ""
+        value["args"] = list(args or [])
+    if env:
+        value["env"] = env
+    if auth_token is not None and auth_token.strip():
         master = _ensure_master_key()
         from private_agent.config import secrets
 
         value["auth_token_encrypted"] = secrets.encrypt_api_key(
-            body.auth_token.strip(), master
+            auth_token.strip(), master
         )
+    return value
 
-    conn = await db.connect()
-    try:
-        # 现有列表: config_runtime 优先, 否则用 yaml 的
-        row = await conn.fetchval(
-            "SELECT value FROM config_runtime WHERE key = 'tools.mcp.servers'"
-        )
-        if row:
-            servers = _json.loads(row) if isinstance(row, str) else row
-        else:
-            cfg = await _load_cfg()
-            servers = list(cfg.get("tools", {}).get("mcp", {}).get("servers", []))
 
+async def _write_servers_runtime(conn, new_servers: list[dict]) -> None:
+    """将 server dict 列表合并写入 config_runtime tools.mcp.servers(同名覆盖)。"""
+    import json as _json
+
+    row = await conn.fetchval(
+        "SELECT value FROM config_runtime WHERE key = 'tools.mcp.servers'"
+    )
+    if row:
+        servers = _json.loads(row) if isinstance(row, str) else row
+    else:
+        cfg = await _load_cfg()
+        servers = list(cfg.get("tools", {}).get("mcp", {}).get("servers", []))
+
+    for value in new_servers:
         servers = [
             s for s in servers
-            if isinstance(s, dict) and (s.get("id") != body.name and s.get("name") != body.name)
+            if isinstance(s, dict)
+            and (s.get("id") != value["id"] and s.get("name") != value["id"])
         ]
         servers.append(value)
-        await _set_runtime(conn, "tools.mcp.servers", servers)
+    await _set_runtime(conn, "tools.mcp.servers", servers)
+
+
+class McpImportRequest(BaseModel):
+    """POST /settings/mcp/import-json 请求体: 粘贴 Claude Desktop 风格 JSON。"""
+
+    config_json: str
+
+
+@router.post("/settings/mcp/import-json", response_model=None)
+async def import_mcp_json(body: McpImportRequest):
+    """从 JSON 批量导入 MCP server(主流接入方式)。
+
+    兼容格式:
+    1. Claude Desktop: {"mcpServers": {"name": {"url"|"command", "args", "env", "headers"}}}
+       - headers["Authorization"] == "Bearer xxx" → 提取为 auth_token(加密存储)
+    2. 数组: [{"id"|"name", "type", "url"|"command", "auth_token", ...}]
+    3. 单个对象: {"id", "type", "url"|"command", ...}
+    """
+    import json as _json
+
+    try:
+        parsed = _json.loads(body.config_json)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"JSON 解析失败: {e}"}
+
+    servers = _parse_mcp_json(parsed)
+    if not servers:
+        return {"ok": False, "error": "未识别到任何 MCP server 配置"}
+
+    values = [
+        _build_server_value(
+            name=s["id"],
+            server_type=s.get("type", "http"),
+            url=s.get("url"),
+            command=s.get("command"),
+            args=s.get("args"),
+            auth_token=s.get("auth_token"),
+            enabled=s.get("enabled", True),
+            timeout_sec=s.get("timeout_sec", 30.0),
+            env=s.get("env"),
+        )
+        for s in servers
+    ]
+    conn = await db.connect()
+    try:
+        await _write_servers_runtime(conn, values)
     finally:
         await conn.close()
-    return {"ok": True, "server": body.name, "count": len(servers)}
+    return {
+        "ok": True,
+        "imported": [{"id": v["id"], "type": v["type"]} for v in values],
+        "count": len(values),
+    }
+
+
+def _parse_mcp_json(parsed) -> list[dict]:
+    """把各种 JSON 形态解析为 server dict 列表。"""
+    if isinstance(parsed, dict):
+        # Claude Desktop 风格: {"mcpServers": {...}}
+        mcp_servers = parsed.get("mcpServers")
+        if isinstance(mcp_servers, dict):
+            result = []
+            for name, cfg in mcp_servers.items():
+                if not isinstance(cfg, dict):
+                    continue
+                item = {"id": name, "type": "http" if cfg.get("url") else "stdio"}
+                if item["type"] == "http":
+                    item["url"] = cfg.get("url", "")
+                    # headers["Authorization"]: "Bearer xxx" → auth_token
+                    headers = cfg.get("headers") or {}
+                    auth = headers.get("Authorization") or headers.get("authorization") or ""
+                    if auth.lower().startswith("bearer "):
+                        item["auth_token"] = auth[7:].strip()
+                else:
+                    item["command"] = cfg.get("command", "")
+                    item["args"] = list(cfg.get("args") or [])
+                    item["env"] = cfg.get("env")
+                if cfg.get("env") and item["type"] == "http":
+                    item["env"] = cfg.get("env")
+                result.append(item)
+            return result
+        # 单个 server 对象
+        if parsed.get("url") or parsed.get("command"):
+            return [dict(parsed)]
+        return []
+    if isinstance(parsed, list):
+        # 数组: 兼容本项目格式 [{id|name, type, url|command, ...}]
+        result = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            entry = dict(item)
+            entry["id"] = entry.get("id") or entry.get("name") or "server"
+            result.append(entry)
+        return result
+    return []
 
 
 @router.delete("/settings/mcp/{name}", response_model=None)

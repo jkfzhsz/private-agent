@@ -343,14 +343,42 @@ function McpRow({
 
 function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"form" | "json">("form");
   const [type, setType] = useState<"http" | "stdio">("http");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
   const [authToken, setAuthToken] = useState("");
+  const [jsonText, setJsonText] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+
+  const importJson = async (): Promise<void> => {
+    if (!jsonText.trim()) {
+      setMsg("请粘贴 JSON 配置");
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      const resp = await fetch(`${API_BASE}/settings/mcp/import-json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config_json: jsonText }),
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+      const names = (data.imported ?? []).map((s: { id: string }) => s.id).join(", ");
+      setJsonText("");
+      setMsg(`✅ 已导入 ${data.count} 个: ${names}(重启后端后生效)`);
+      onAdded();
+    } catch (err) {
+      setMsg(`导入失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async (): Promise<void> => {
     if (!name.trim()) {
@@ -414,6 +442,49 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.4)" }}>
+      {/* 模式切换: 表单 / JSON 导入 */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 2 }}>
+        {(["form", "json"] as const).map((m) => (
+          <button
+            key={m}
+            className="btn-ghost"
+            style={{
+              fontSize: 11, padding: "4px 12px",
+              background: mode === m ? "var(--gradient-indigo)" : "rgba(255,255,255,0.5)",
+              color: mode === m ? "#fff" : "var(--text-primary)",
+              border: "none",
+            }}
+            onClick={() => setMode(m)}
+          >
+            {m === "form" ? "表单填写" : "JSON 导入"}
+          </button>
+        ))}
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)", alignSelf: "center", marginLeft: 8 }}>
+          {mode === "json" ? "支持 Claude Desktop 格式 mcpServers" : "逐项填写"}
+        </span>
+      </div>
+
+      {mode === "json" ? (
+        <>
+          <textarea
+            value={jsonText}
+            onChange={(e) => setJsonText(e.target.value)}
+            placeholder={'{\n  "mcpServers": {\n    "my-server": {\n      "url": "http://127.0.0.1:3000/mcp",\n      "headers": { "Authorization": "Bearer xxx" }\n    }\n  }\n}'}
+            spellCheck={false}
+            style={{ minHeight: 130, fontFamily: "monospace", fontSize: 11, padding: "8px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", background: "rgba(255,255,255,0.6)", resize: "vertical" }}
+          />
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void importJson()} disabled={busy}>
+              导入
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setOpen(false)}>
+              取消
+            </button>
+            {msg && <span style={{ fontSize: 12, color: msg.startsWith("✅") ? "var(--success-text)" : "var(--text-secondary)" }}>{msg}</span>}
+          </div>
+        </>
+      ) : (
+        <>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>名称</span>
         <input
@@ -491,6 +562,8 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
         </button>
         {msg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{msg}</span>}
       </div>
+        </>
+      )}
     </div>
   );
 }
