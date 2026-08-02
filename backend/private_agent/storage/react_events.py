@@ -28,6 +28,9 @@ _VALID_EVENT_TYPES = frozenset(
         "tool_error",
         # 流式输出增量(逐句/逐字返回, Phase 2 流式对话)
         "delta",
+        # V2 P1: 工具权限确认(蓝图 §5.12)
+        "tool_confirmation_required",
+        "tool_confirmation_result",
     }
 )
 

@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from private_agent.errors import SandboxTimeoutError
 from private_agent.sandbox.executor import SandboxExecutor
@@ -14,6 +15,9 @@ from private_agent.sandbox.security import CodeScanner, EnvSanitizer
 from private_agent.sandbox.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+
+# 流式输出回调: (stream_type, chunk) -> Awaitable[None]
+OnOutput = Callable[[str, str], Awaitable[None]]
 
 
 class SandboxService:
@@ -30,7 +34,11 @@ class SandboxService:
         self._config = config
         self._conn = conn
         sandbox_cfg = config.get("sandbox", {})
-        workspace_root = Path(sandbox_cfg.get("workspace_root", ".sandbox")).resolve()
+        # ${WORKSPACE}/.sandbox 等环境变量展开(config.yaml 大量相对/占位路径,
+        # loader 不负责展开, 此处必须 expandvars 否则生成字面量 ${WORKSPACE} 目录)
+        workspace_root = Path(
+            os.path.expandvars(sandbox_cfg.get("workspace_root", ".sandbox"))
+        ).resolve()
         self._workspace_mgr = WorkspaceManager(workspace_root)
 
         security_cfg = sandbox_cfg.get("security", {})
@@ -69,6 +77,7 @@ class SandboxService:
         language: str = "python",
         timeout: int | None = None,
         session_id: str = "",
+        on_output: OnOutput | None = None,
     ) -> SandboxResult:
         """端到端执行代码(AC-8, AC-14)。
 
@@ -77,6 +86,7 @@ class SandboxService:
             language: 语言(python/javascript,B2 P1-7)。
             timeout: 超时秒数(默认用 config 值)。
             session_id: 会话 ID(用于工作目录隔离和事件记录)。
+            on_output: 流式输出回调(蓝图 §6.10),透传到 executor。
 
         Returns:
             SandboxResult 包含执行结果和元数据。
@@ -110,6 +120,7 @@ class SandboxService:
                 timeout=timeout,
                 workspace=str(workspace),
                 env=safe_env,
+                on_output=on_output,
             )
         except SandboxTimeoutError as e:
             result = SandboxResult(

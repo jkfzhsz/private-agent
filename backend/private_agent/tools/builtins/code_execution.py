@@ -26,7 +26,8 @@ async def code_execution_handler(args: dict) -> ToolResult:
 
     Args:
         args: 包含 code(代码), timeout(超时秒数,可选,默认 300),
-              session_id(会话 ID,可选)的 dict。
+              session_id(会话 ID,可选), _on_output(流式输出回调,可选),
+              _sandbox_config(测试用配置注入)的 dict。
 
     Returns:
         ToolResult 包含执行 stdout/stderr/exit_code。
@@ -34,6 +35,8 @@ async def code_execution_handler(args: dict) -> ToolResult:
     code: str = args.get("code", "")
     timeout: int | None = args.get("timeout")
     session_id: str = args.get("session_id", "")
+    # 流式输出回调(由 react_loop 注入): (stream_type, chunk) -> Awaitable[None]
+    on_output = args.get("_on_output")
 
     if not code:
         return ToolResult(output="", error="No code provided")
@@ -48,7 +51,8 @@ async def code_execution_handler(args: dict) -> ToolResult:
     try:
         svc = SandboxService(config)
         result = await svc.execute(
-            code=code, language="python", timeout=timeout, session_id=session_id,
+            code=code, language="python", timeout=timeout,
+            session_id=session_id, on_output=on_output,
         )
         output = (
             f"Exit code: {result.exit_code}\n"
@@ -91,4 +95,6 @@ CODE_EXECUTION_TOOL = ToolDef(
         "required": ["code"],
     },
     handler=code_execution_handler,
+    # 蓝图 §5.11: code_execution safety_level="elevated"(V2 P1: 权限确认链路)
+    safety_level="elevated",
 )

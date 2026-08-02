@@ -35,9 +35,13 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
     for r in rows:
         def_text = r["def"] or ""
         # 已含 sandbox_execution 与 delta 说明 CHECK 已是最新,跳过
-        if "sandbox_execution" in def_text and "delta" in def_text:
+        if (
+            "sandbox_execution" in def_text
+            and "delta" in def_text
+            and "tool_confirmation_required" in def_text
+        ):
             continue
-        # 旧 CHECK, DROP 后 ADD 新 CHECK(14 种, 含流式 delta)
+        # 旧 CHECK, DROP 后 ADD 新 CHECK(16 种, 含权限确认)
         conname = r["conname"]
         await conn.execute(f'ALTER TABLE react_events DROP CONSTRAINT "{conname}"')
         await conn.execute(
@@ -48,7 +52,8 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
                 'sandbox_execution', 'memory_extracted',
                 'compress', 'token_usage',
                 'injection_alert', 'injection_blocked',
-                'tool_error', 'delta'
+                'tool_error', 'delta',
+                'tool_confirmation_required', 'tool_confirmation_result'
             ))
             """
         )

@@ -31,7 +31,11 @@ type EventType =
   | "tool_result"
   | "delta"
   | "final"
-  | "error";
+  | "error"
+  // V2 P1: 沙箱流式输出 + 权限确认(蓝图 §6.10 / §5.12)
+  | "sandbox_output"
+  | "tool_confirmation_required"
+  | "tool_confirmation_result";
 
 interface ReactEvent {
   id: number;
@@ -70,6 +74,9 @@ const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string 
   delta: { bg: "#e8eaf6", label: "Streaming", icon: "…" },
   final: { bg: "#e8eaf6", label: "Final", icon: "🎯" },
   error: { bg: "#ffebee", label: "Error", icon: "❌" },
+  sandbox_output: { bg: "#f1f5f9", label: "Sandbox", icon: "🖥️" },
+  tool_confirmation_required: { bg: "#fef3c7", label: "Permission", icon: "⚠️" },
+  tool_confirmation_result: { bg: "#f3e8ff", label: "Permission Result", icon: "🔐" },
 };
 
 // M3 AC-9: tool_result 中 outputs/*.png 等图片路径解析(蓝图 §7.12)
@@ -133,6 +140,13 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
       return deAIfy(String(payload.content ?? ""));
     case "error":
       return String(payload.message ?? JSON.stringify(payload));
+    case "sandbox_output":
+      // 沙箱终端流式输出: 仅显示 chunk 内容
+      return String(payload.chunk ?? "");
+    case "tool_confirmation_required":
+      return String(payload.message ?? "需要确认");
+    case "tool_confirmation_result":
+      return payload.approved ? "已批准" : "已拒绝";
     default:
       return JSON.stringify(payload);
   }
@@ -660,6 +674,18 @@ export default function App(): JSX.Element {
           const toolEvents = evs.filter(
             (e) => e.event_type === "tool_call" || e.event_type === "tool_result"
           );
+          // V2 P1: 沙箱终端流式输出(按 turn 合并全部 chunk, 等宽字体终端效果)
+          const sandboxText = evs
+            .filter((e) => e.event_type === "sandbox_output")
+            .map((e) => String(e.payload.chunk ?? ""))
+            .join("");
+          // V2 P1: 权限确认请求(渲染确认卡片, 同意/拒绝按钮)
+          const confirmEvents = evs.filter(
+            (e) => e.event_type === "tool_confirmation_required"
+          );
+          const confirmResultEv = evs.find(
+            (e) => e.event_type === "tool_confirmation_result"
+          );
           // 流式增量(无 final 时显示累积的 delta 文本, 有 final 用完整文本)
           const deltaText = evs
             .filter((e) => e.event_type === "delta")
@@ -824,6 +850,135 @@ export default function App(): JSX.Element {
                                     style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid #e5e7eb" }}
                                   />
                                 ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                    {/* V2 P1: 沙箱终端流式输出 */}
+                    {sandboxText && (
+                      <div
+                        style={{
+                          marginBottom: 8,
+                          border: "1px solid #e2e8f0",
+                          borderRadius: 8,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            padding: "4px 10px",
+                            background: "#f8fafc",
+                            fontSize: 11,
+                            fontWeight: 600,
+                            color: "#64748b",
+                            borderBottom: "1px solid #e2e8f0",
+                          }}
+                        >
+                          🖥️ 沙箱输出
+                        </div>
+                        <pre
+                          style={{
+                            margin: 0,
+                            padding: "8px 12px",
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-all",
+                            fontFamily: "Consolas, 'Courier New', monospace",
+                            fontSize: 12,
+                            color: "#334155",
+                            maxHeight: 260,
+                            overflowY: "auto",
+                          }}
+                        >
+                          {sandboxText}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* V2 P1: 权限确认卡片 */}
+                    {confirmEvents.length > 0 &&
+                      confirmEvents.map((ce) => {
+                        const args = ce.payload.args_summary as Record<string, unknown> | undefined;
+                        const argsPreview = args
+                          ? JSON.stringify(args).slice(0, 200)
+                          : "";
+                        return (
+                          <div
+                            key={ce.id}
+                            style={{
+                              marginBottom: 8,
+                              border: "1px solid #fcd34d",
+                              borderRadius: 8,
+                              background: "#fffbeb",
+                              padding: "10px 12px",
+                            }}
+                          >
+                            <div style={{ fontSize: 12, fontWeight: 600, color: "#92400e", marginBottom: 4 }}>
+                              ⚠️ {formatPayload("tool_confirmation_required", ce.payload)}
+                            </div>
+                            {argsPreview && (
+                              <pre
+                                style={{
+                                  margin: "0 0 8px",
+                                  whiteSpace: "pre-wrap",
+                                  wordBreak: "break-all",
+                                  fontSize: 11,
+                                  color: "#b45309",
+                                  fontFamily: "Consolas, monospace",
+                                }}
+                              >
+                                {argsPreview}
+                              </pre>
+                            )}
+                            {confirmResultEv ? (
+                              <div style={{ fontSize: 12, color: "#6b7280" }}>
+                                {formatPayload("tool_confirmation_result", confirmResultEv.payload)}
+                              </div>
+                            ) : (
+                              <div style={{ display: "flex", gap: 8 }}>
+                                <button
+                                  onClick={() => {
+                                    sendWs({
+                                      type: "tool_confirmation",
+                                      session_id: realSessionId ?? sessionId,
+                                      confirmation_id: ce.payload.confirmation_id,
+                                      approved: true,
+                                    });
+                                  }}
+                                  style={{
+                                    background: "#16a34a",
+                                    color: "#fff",
+                                    border: "none",
+                                    borderRadius: 6,
+                                    padding: "4px 14px",
+                                    fontSize: 12,
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  同意执行
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    sendWs({
+                                      type: "tool_confirmation",
+                                      session_id: realSessionId ?? sessionId,
+                                      confirmation_id: ce.payload.confirmation_id,
+                                      approved: false,
+                                    });
+                                  }}
+                                  style={{
+                                    background: "#dc2626",
+                                    color: "#fff",
+                                    border: "none",
+                                    borderRadius: 6,
+                                    padding: "4px 14px",
+                                    fontSize: 12,
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  拒绝
+                                </button>
                               </div>
                             )}
                           </div>

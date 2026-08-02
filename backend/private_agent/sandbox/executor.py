@@ -5,9 +5,13 @@ import os
 import shutil
 import time
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from private_agent.errors import SandboxTimeoutError
 from private_agent.sandbox.result import SandboxResult
+
+# 流式输出回调: (stream_type: "stdout"|"stderr", chunk: str) -> Awaitable[None]
+OnOutput = Callable[[str, str], Awaitable[None]]
 
 
 class SandboxExecutor:
@@ -29,6 +33,7 @@ class SandboxExecutor:
         timeout: int,
         workspace: str,
         env: dict[str, str] | None = None,
+        on_output: OnOutput | None = None,
     ) -> SandboxResult:
         """在子进程中执行代码(AC-1, AC-2)。
 
@@ -38,6 +43,8 @@ class SandboxExecutor:
             timeout: 超时秒数。
             workspace: 工作目录路径。
             env: 环境变量 dict(已脱敏)。
+            on_output: 流式输出回调(蓝图 §6.10 _stream_output),stdout/stderr
+                按 4KB 分片实时回调;None 时保持一次性收集(向后兼容)。
 
         Returns:
             SandboxResult 包含 stdout/stderr/exit_code。
@@ -53,9 +60,18 @@ class SandboxExecutor:
             env=env,
         )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(), timeout=timeout
-            )
+            if on_output is not None:
+                stdout_data, stderr_data = await asyncio.wait_for(
+                    self._stream_output(process, on_output),
+                    timeout=timeout,
+                )
+                await process.wait()
+            else:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(), timeout=timeout
+                )
+                stdout_data = stdout_bytes.decode("utf-8", errors="replace")
+                stderr_data = stderr_bytes.decode("utf-8", errors="replace")
         except asyncio.TimeoutError:
             process.terminate()
             await process.wait()
@@ -66,11 +82,51 @@ class SandboxExecutor:
 
         elapsed = int((time.monotonic() - start) * 1000)
         return SandboxResult(
-            stdout=stdout_bytes.decode("utf-8", errors="replace"),
-            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            stdout=stdout_data,
+            stderr=stderr_data,
             exit_code=process.returncode or 0,
             duration_ms=elapsed,
         )
+
+    async def _stream_output(
+        self,
+        process: asyncio.subprocess.Process,
+        on_output: OnOutput,
+    ) -> tuple[str, str]:
+        """流式读取 stdout/stderr(蓝图 §6.10),4KB 分片实时回调。
+
+        Args:
+            process: 运行中的子进程。
+            on_output: 流式回调(stream_type, chunk)。
+
+        Returns:
+            (stdout, stderr) 完整拼接文本。
+        """
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        async def read_stream(
+            stream: asyncio.StreamReader,
+            chunks: list[str],
+            stream_type: str,
+        ) -> None:
+            while True:
+                chunk = await stream.read(4096)  # 4KB 分片
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", errors="replace")
+                chunks.append(text)
+                try:
+                    await on_output(stream_type, text)
+                except Exception:
+                    # 回调异常不影响执行结果收集
+                    pass
+
+        await asyncio.gather(
+            read_stream(process.stdout, stdout_chunks, "stdout"),
+            read_stream(process.stderr, stderr_chunks, "stderr"),
+        )
+        return "".join(stdout_chunks), "".join(stderr_chunks)
 
     async def _write_script(self, code: str, language: str, workspace: str) -> str:
         """将代码写入临时脚本文件。"""

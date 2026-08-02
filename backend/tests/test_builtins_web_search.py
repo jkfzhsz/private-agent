@@ -12,9 +12,17 @@ class TestWebSearch:
     """web_search 工具:HTTP 搜索 API 封装。"""
 
     async def test_search_returns_results(self) -> None:
+        # 默认后端已是 bing(908ee2e 后 PA_WEB_SEARCH_BACKEND=bing):
+        # mock 需提供 bing HTML(.text) 而非 duckduckgo JSON(.json)
+        bing_html = (
+            '<li class="b_algo">'
+            '<h2><a href="https://en.wikipedia.org/wiki/Artificial_intelligence">'
+            "Artificial intelligence</a></h2>"
+            "<p>AI is artificial intelligence</p></li>"
+        )
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"AbstractText": "AI is artificial intelligence", "AbstractSource": "Wikipedia"}
+        mock_response.text = bing_html
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
         mock_client.get.return_value = mock_response

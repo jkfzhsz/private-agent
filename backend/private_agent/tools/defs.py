@@ -29,15 +29,21 @@ class ToolResult:
 
 @dataclass
 class ToolDef:
-    """蓝图 §3.8 工具定义 schema(OpenAI 2020-12 兼容)。
+    """蓝图 §3.8 / §5.12 工具定义 schema(OpenAI 2020-12 兼容)。
 
     handler 签名: async (args: dict) -> ToolResult
+
+    safety_level(蓝图 §5.12 权限分级):
+    - "none"/"safe": 自动执行,不打断 Agent
+    - "elevated": 执行前 WS 推送确认请求(60s 超时拒绝 + 会话级缓存)
+    - "dangerous": 直接拦截
     """
 
     name: str
     description: str
     parameters_schema: dict
     handler: Callable[[dict], Awaitable[ToolResult]]
+    safety_level: str = "none"
 
     def to_openai_schema(self) -> dict:
         """转换为 OpenAI tools 参数格式。"""

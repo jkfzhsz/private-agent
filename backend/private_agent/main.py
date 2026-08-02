@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -39,6 +40,22 @@ _logger = logging.getLogger("private_agent.main")
 _scheduler = None  # APScheduler 单例(startup 创建,shutdown 停止)
 # MCP 外轨工具管理器(进程级单例, 懒连接 + 缓存, shutdown 时关闭)
 _mcp_manager = None  # type: ignore[assignment]
+# V2 P1: per-session 运行锁(user_message 改 create_task 后防同会话并发 turn 冲突)
+_session_locks: dict[int, "asyncio.Lock"] = {}
+# V2 P1: per-session 权限确认管理器(蓝图 §5.12, tool_confirmation 消息 resolve)
+_permission_managers: dict[int, "PermissionManager"] = {}
+
+
+def _get_permission_manager(session_id: int):
+    """惰性创建会话级 PermissionManager(缓存确认结果按会话隔离)。"""
+    global _permission_managers
+    pm = _permission_managers.get(session_id)
+    if pm is None:
+        from private_agent.tools.permission_manager import PermissionManager
+
+        pm = PermissionManager(timeout=60.0)
+        _permission_managers[session_id] = pm
+    return pm
 
 
 def _get_mcp_manager():
@@ -267,119 +284,32 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "message": "invalid user_message: session_id>0 required",
                     })
                     continue
+                # V2 P1(B2 修复): create_task 异步执行 —— run_turn 阻塞期间
+                # 主循环仍可接收 tool_confirmation 等消息(权限确认链路前置条件)
+                asyncio.create_task(_handle_user_message(ws, session_id, content))
+            elif msg_type == "tool_confirmation":
+                # V2 P1: 权限确认响应(蓝图 §5.12, 用户点击同意/拒绝)
                 try:
-                    cfg = await _load_cfg_with_runtime()
-                    conn = await db.connect()
-                    try:
-                        # 会话懒创建(蓝图 §2.10):WS 收到首条 user_message 时,
-                        # sessions 无该行则插入,保证 ensure_initial 外键不失败
-                        # 懒创建: title 留空(NULL), list_sessions 用首条用户消息兜底生成可读标题
-                        exists = await conn.fetchval(
-                            "SELECT 1 FROM sessions WHERE id=$1", session_id
-                        )
-                        if exists is None:
-                            await conn.execute(
-                                "INSERT INTO sessions (id) VALUES ($1)",
-                                session_id,
-                            )
-                        # frozen_tools: 内置白名单(与 activate 同源, hash 锁定)
-                        # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
-                        frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
-                        tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
-                        # 构造 MemoryManager(蓝图 §4.2-§4.5)
-                        memories_repo = MemoriesRepo(conn)
-                        memory_mgr = MemoryManager(
-                            memories_repo=memories_repo,
-                            compress_adapter=_build_compress_adapter(cfg),
-                            extract_interval_turns=cfg.get("memory", {}).get(
-                                "extract_interval_turns", 8
-                            ),
-                            inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
-                            eviction_max_active=cfg.get("memory", {}).get(
-                                "eviction", {}
-                            ).get("max_active_count", 200),
-                            eviction_min_importance=cfg.get("memory", {}).get(
-                                "eviction", {}
-                            ).get("min_importance_threshold", 0.3),
-                            eviction_expire_days=cfg.get("memory", {}).get(
-                                "eviction", {}
-                            ).get("expire_days", 30),
-                        )
-                        cm = ContextManager(
-                            session_id=session_id,
-                            system_prompt=await _get_system_prompt(
-                                cfg, session_id, conn
-                            ),
-                            tools=frozen_tools,
-                            memory_manager=memory_mgr,
-                        )
-                        try:
-                            await cm.ensure_initial(conn)
-                        except FrozenHashMismatchError:
-                            # 工具/提示词演进导致 frozen_hash 变化(旧会话续聊):
-                            # 自动用当前 system_prompt + tools 重建 frozen zone 并
-                            # 更新 sessions.frozen_hash, 无需人工干预
-                            _logger.warning(
-                                "frozen_hash mismatch → rebuild frozen zone "
-                                "(工具/提示词演进, session=%s)", session_id,
-                            )
-                            await cm.replace_frozen_zone(
-                                conn,
-                                system_prompt=cm._system_prompt,
-                                tools=cm._tools,
-                            )
-                        # 续聊: 完整重放历史消息到内存(ensure_initial 只加载
-                        # Frozen Zone, active 历史对话需 reload_from_db 重建,
-                        # 否则模型看不到历史上下文)
-                        await cm.reload_from_db(conn)
-                        # 会话级模型选择: auto(fallback 链) / 具体 provider(手动锁定)
-                        model_id = await conn.fetchval(
-                            "SELECT model_id FROM sessions WHERE id = $1", session_id
-                        )
-                        adapter = _build_session_adapter(cfg, model_id)
-                        # per-provider 对话参数上限: 取 session.model_id 或 fallback 首选
-                        from private_agent.config.loader import resolve_provider_limits
-
-                        chain = cfg.get("models", {}).get("router", {}).get(
-                            "fallback_chain", []
-                        )
-                        provider_name = model_id or (chain[0] if chain else None)
-                        provider_limits = resolve_provider_limits(cfg, provider_name)
-                        loop = ReactLoop(
-                            session_id=session_id,
-                            context_manager=cm,
-                            adapter=adapter,
-                            tools=tools,
-                            conn=conn,
-                            cfg=cfg,
-                            provider_limits=provider_limits,
-                            # 实时推送: 事件边产生边发给 WS(流式逐块, 而非结束后批量)
-                            event_sink=lambda ev: ws.send_json(ev),
-                        )
-                        await loop.run_turn(content)
-                        # 事件已通过 event_sink 实时推送, 无需再排空 event_queue
-                        await ws.send_json({
-                            "type": "turn_end",
-                            "session_id": session_id,
-                            "turn": loop._turn,
-                        })
-                        # 每轮结束后触发记忆提取(蓝图 §4.2)
-                        await memory_mgr.maybe_extract(
-                            session_id=session_id, current_turn=loop._turn,
-                        )
-                    finally:
-                        await conn.close()
-                except Exception:
-                    _logger.exception("user_message handling failed")
-                    try:
-                        await CheckpointManager.mark_session_interrupted(
-                            conn, session_id
-                        )
-                    except Exception:
-                        pass
+                    session_id = int(msg["session_id"])
+                    confirmation_id = str(msg["confirmation_id"])
+                    approved = bool(msg.get("approved", False))
+                except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
-                        "message": "user_message_failed",
+                        "message": "invalid tool_confirmation: session_id/confirmation_id required",
+                    })
+                    continue
+                pm = _permission_managers.get(session_id)
+                if pm is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "no pending confirmation for session",
+                    })
+                    continue
+                if not pm.resolve(confirmation_id, approved):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "unknown confirmation_id",
                     })
     except WebSocketDisconnect:
         if session_id is not None:
@@ -395,6 +325,146 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 _logger.exception(
                     "Failed to mark session interrupted on disconnect"
                 )
+
+
+async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> None:
+    """AC-1: 用户消息触发 ReAct 循环(蓝图 §2.4/§2.6)。
+
+    V2 P1(B2 修复): 由 ws_endpoint create_task 异步调用 —— run_turn 期间
+    WS 主循环可继续接收 tool_confirmation 等消息。
+
+    - per-session 运行锁: 同会话并发 user_message 串行(防 turn 冲突)
+    - set_sandbox_config 注入(B1 修复): code_execution 工具依赖模块级全局,
+      此前从未在生产路径调用 → 现网必报 "Sandbox not configured"
+    - permission_manager 传入 ReactLoop: 权限确认运行时链路(蓝图 §5.12)
+    """
+    lock = _session_locks.setdefault(session_id, asyncio.Lock())
+    conn = None
+    async with lock:
+        try:
+            cfg = await _load_cfg_with_runtime()
+            # B1 修复: 注入沙箱配置(code_execution handler 依赖模块级全局)
+            from private_agent.tools.builtins.code_execution import set_sandbox_config
+
+            set_sandbox_config(cfg.get("sandbox"))
+            conn = await db.connect()
+            # 会话懒创建(蓝图 §2.10):WS 收到首条 user_message 时,
+            # sessions 无该行则插入,保证 ensure_initial 外键不失败
+            # 懒创建: title 留空(NULL), list_sessions 用首条用户消息兜底生成可读标题
+            exists = await conn.fetchval(
+                "SELECT 1 FROM sessions WHERE id=$1", session_id
+            )
+            if exists is None:
+                await conn.execute(
+                    "INSERT INTO sessions (id) VALUES ($1)",
+                    session_id,
+                )
+            # frozen_tools: 内置白名单(与 activate 同源, hash 锁定)
+            # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
+            frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
+            tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
+            # 构造 MemoryManager(蓝图 §4.2-§4.5)
+            memories_repo = MemoriesRepo(conn)
+            memory_mgr = MemoryManager(
+                memories_repo=memories_repo,
+                compress_adapter=_build_compress_adapter(cfg),
+                extract_interval_turns=cfg.get("memory", {}).get(
+                    "extract_interval_turns", 8
+                ),
+                inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
+                eviction_max_active=cfg.get("memory", {}).get(
+                    "eviction", {}
+                ).get("max_active_count", 200),
+                eviction_min_importance=cfg.get("memory", {}).get(
+                    "eviction", {}
+                ).get("min_importance_threshold", 0.3),
+                eviction_expire_days=cfg.get("memory", {}).get(
+                    "eviction", {}
+                ).get("expire_days", 30),
+            )
+            cm = ContextManager(
+                session_id=session_id,
+                system_prompt=await _get_system_prompt(
+                    cfg, session_id, conn
+                ),
+                tools=frozen_tools,
+                memory_manager=memory_mgr,
+            )
+            try:
+                await cm.ensure_initial(conn)
+            except FrozenHashMismatchError:
+                # 工具/提示词演进导致 frozen_hash 变化(旧会话续聊):
+                # 自动用当前 system_prompt + tools 重建 frozen zone 并
+                # 更新 sessions.frozen_hash, 无需人工干预
+                _logger.warning(
+                    "frozen_hash mismatch → rebuild frozen zone "
+                    "(工具/提示词演进, session=%s)", session_id,
+                )
+                await cm.replace_frozen_zone(
+                    conn,
+                    system_prompt=cm._system_prompt,
+                    tools=cm._tools,
+                )
+            # 续聊: 完整重放历史消息到内存(ensure_initial 只加载
+            # Frozen Zone, active 历史对话需 reload_from_db 重建,
+            # 否则模型看不到历史上下文)
+            await cm.reload_from_db(conn)
+            # 会话级模型选择: auto(fallback 链) / 具体 provider(手动锁定)
+            model_id = await conn.fetchval(
+                "SELECT model_id FROM sessions WHERE id = $1", session_id
+            )
+            adapter = _build_session_adapter(cfg, model_id)
+            # per-provider 对话参数上限: 取 session.model_id 或 fallback 首选
+            from private_agent.config.loader import resolve_provider_limits
+
+            chain = cfg.get("models", {}).get("router", {}).get(
+                "fallback_chain", []
+            )
+            provider_name = model_id or (chain[0] if chain else None)
+            provider_limits = resolve_provider_limits(cfg, provider_name)
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=adapter,
+                tools=tools,
+                conn=conn,
+                cfg=cfg,
+                provider_limits=provider_limits,
+                # 实时推送: 事件边产生边发给 WS(流式逐块, 而非结束后批量)
+                event_sink=lambda ev: ws.send_json(ev),
+                # V2 P1: 权限确认管理器(仅 elevated 工具生效, 如 code_execution)
+                permission_manager=_get_permission_manager(session_id),
+            )
+            await loop.run_turn(content)
+            # 事件已通过 event_sink 实时推送, 无需再排空 event_queue
+            await ws.send_json({
+                "type": "turn_end",
+                "session_id": session_id,
+                "turn": loop._turn,
+            })
+            # 每轮结束后触发记忆提取(蓝图 §4.2)
+            await memory_mgr.maybe_extract(
+                session_id=session_id, current_turn=loop._turn,
+            )
+        except Exception:
+            _logger.exception("user_message handling failed")
+            try:
+                if conn is not None:
+                    await CheckpointManager.mark_session_interrupted(
+                        conn, session_id
+                    )
+            except Exception:
+                pass
+            try:
+                await ws.send_json({
+                    "type": "error",
+                    "message": "user_message_failed",
+                })
+            except Exception:
+                pass
+        finally:
+            if conn is not None:
+                await conn.close()
 
 
 @app.on_event("startup")

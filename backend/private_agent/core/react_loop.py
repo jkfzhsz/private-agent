@@ -68,6 +68,7 @@ class ReactLoop:
         event_sink: Callable[[dict], Awaitable[None]] | None = None,
         cfg: dict | None = None,
         provider_limits: dict | None = None,
+        permission_manager: Any | None = None,
     ) -> None:
         self._session_id = session_id
         self._context_manager = context_manager
@@ -76,6 +77,8 @@ class ReactLoop:
         # adapter.chat 期望 OpenAI tools schema dict(非 ToolDef 对象)
         self._tool_schemas = [t.to_openai_schema() for t in tools]
         self._conn = conn
+        # V2 P1: 工具权限确认管理器(蓝图 §5.12), None 时跳过确认(测试/兼容)
+        self._permission_manager = permission_manager
         # 对话参数上限: 优先 provider 级(per-model, 设置页按模型配置),
         # 回退全局 models.limits
         limits = provider_limits
@@ -102,12 +105,20 @@ class ReactLoop:
     # State machine
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def _emit_event(self, event_type: str, *, payload: dict | None = None) -> None:
-        """构造并写入 react_event(同步入库 + 异步推送)。
+    async def _emit_event(
+        self,
+        event_type: str,
+        *,
+        payload: dict | None = None,
+        persist: bool = True,
+    ) -> None:
+        """构造并写入 react_event(可选入库 + 异步推送)。
 
         Args:
             event_type: 事件类型(thinking/tool_call/tool_result/error/final)。
             payload: 事件负载(可选)。
+            persist: 是否持久化到 DB。False 用于高频流式事件
+                (如 sandbox_output), 避免事件风暴, 仅 WS 推送 + 队列。
         """
         event: dict[str, Any] = {
             "type": "react_event",
@@ -117,14 +128,15 @@ class ReactLoop:
             "payload": payload or {},
         }
 
-        # 持久化到 DB
-        await insert_react_event(
-            self._conn,
-            session_id=self._session_id,
-            turn=self._turn,
-            event_type=event_type,
-            payload=payload or {},
-        )
+        # 持久化到 DB(高频流式事件跳过)
+        if persist:
+            await insert_react_event(
+                self._conn,
+                session_id=self._session_id,
+                turn=self._turn,
+                event_type=event_type,
+                payload=payload or {},
+            )
 
         # 推送到队列(测试消费)
         await self.event_queue.put(event)
@@ -307,6 +319,85 @@ class ReactLoop:
                         await self._save_checkpoint()
                         return
 
+                    # ── V2 P1: 权限确认(蓝图 §5.12) ──
+                    # 仅 elevated 工具走确认;拒绝/超时以 error 回传模型, 循环继续
+                    if self._permission_manager is not None:
+                        level = getattr(tool_def, "safety_level", "none")
+                        if level == "elevated":
+                            outcome = await self._permission_manager.check_and_confirm(
+                                session_id=self._session_id,
+                                tool_def=tool_def,
+                                args=args,
+                                emit_fn=self._emit_confirmation_required,
+                            )
+                            await self._emit_event(
+                                "tool_confirmation_result",
+                                payload={
+                                    "confirmation_id": "",
+                                    "tool_name": tool_name,
+                                    "approved": outcome == "approved",
+                                },
+                            )
+                            if outcome in ("denied", "timeout"):
+                                reason = (
+                                    "Tool confirmation timeout (60s)"
+                                    if outcome == "timeout"
+                                    else "User denied tool execution"
+                                )
+                                await self._emit_event(
+                                    "tool_result",
+                                    payload={
+                                        "tool_call_id": tool_call_id,
+                                        "tool_name": tool_name,
+                                        "output": "",
+                                        "error": reason,
+                                    },
+                                )
+                                await self._context_manager.append_tool_message(
+                                    self._conn,
+                                    turn=self._turn,
+                                    tool_call_id=tool_call_id,
+                                    content="",
+                                    name=tool_name,
+                                    error=reason,
+                                )
+                                continue
+                        elif level == "dangerous":
+                            reason = f"Dangerous tool blocked: {tool_name}"
+                            await self._emit_event(
+                                "tool_result",
+                                payload={
+                                    "tool_call_id": tool_call_id,
+                                    "tool_name": tool_name,
+                                    "output": "",
+                                    "error": reason,
+                                },
+                            )
+                            await self._context_manager.append_tool_message(
+                                self._conn,
+                                turn=self._turn,
+                                tool_call_id=tool_call_id,
+                                content="",
+                                name=tool_name,
+                                error=reason,
+                            )
+                            continue
+
+                    # ── V2 P1: 沙箱流式输出注入(code_execution) ──
+                    # 把 on_output 回调注入 args 副本(不污染解析出的原始 dict,
+                    # 否则回调函数进 messages JSONB 序列化失败), handler 透传到
+                    # 沙箱 executor, 分片实时推送 sandbox_output 事件(仅 WS, 不入库)
+                    if tool_name == "code_execution":
+                        async def _on_output(stream: str, chunk: str) -> None:
+                            await self._emit_event(
+                                "sandbox_output",
+                                payload={"stream": stream, "chunk": chunk},
+                                persist=False,
+                            )
+
+                        args = dict(args)
+                        args["_on_output"] = _on_output
+
                     # 执行工具(P2 fix: 包 try/except 防 handler 异常崩溃)
                     try:
                         tool_result = await tool_def.handler(args)
@@ -410,6 +501,21 @@ class ReactLoop:
         await self._emit_event(
             "delta",
             payload={"turn": self._turn, "content": text},
+        )
+
+    async def _emit_confirmation_required(self, ev: dict) -> None:
+        """权限确认请求回调(PermissionManager emit_fn)。
+
+        将确认请求持久化(审计) + 实时推送 WS, 前端渲染确认卡片。
+        """
+        await self._emit_event(
+            "tool_confirmation_required",
+            payload={
+                "confirmation_id": ev["confirmation_id"],
+                "tool_name": ev["tool_name"],
+                "args_summary": ev["args_summary"],
+                "message": ev["message"],
+            },
         )
 
     # ──────────────────────────────────────────────────────────────────────────

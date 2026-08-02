@@ -80,7 +80,7 @@ class _MockAdapter:
         self._responses = list(responses)
         self._idx = 0
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, max_tokens=None):
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")
         r = self._responses[self._idx]
@@ -89,16 +89,35 @@ class _MockAdapter:
 
 
 def _patch_adapter_and_tools(monkeypatch, responses, tools):
-    """注入 mock adapter + tools 到 main 模块。"""
+    """注入 mock adapter + tools 到 main 模块。
+
+    注1: 会话级模型选择(1e0af49)后 user_message 走 _build_session_adapter,
+    需同时 patch 它(否则 model_id=mock-glm 解析到真实 adapter → 空 base_url 报错)。
+    注2: user_message 路径实际调用 _get_frozen_tools(c49ca95 起), 测试工具
+    (如 ECHO_TOOL)不在内置白名单, 必须 patch _get_frozen_tools 返回测试工具,
+    否则 ReactLoop _find_tool 找不到 → 误报 unknown tool。
+    """
     import private_agent.main as main_mod
 
     def _fake_build_adapter(cfg):
         return _MockAdapter(responses=responses)
 
+    def _fake_build_session_adapter(cfg, model_id=None):
+        return _MockAdapter(responses=responses)
+
+    async def _fake_get_frozen_tools(cfg, session_id, conn):
+        return list(tools)
+
     async def _fake_get_tools(cfg, session_id, conn):
         return list(tools)
 
     monkeypatch.setattr(main_mod, "_build_adapter", _fake_build_adapter)
+    monkeypatch.setattr(
+        main_mod, "_build_session_adapter", _fake_build_session_adapter
+    )
+    monkeypatch.setattr(
+        main_mod, "_get_frozen_tools", _fake_get_frozen_tools
+    )
     monkeypatch.setattr(main_mod, "_get_tools", _fake_get_tools)
 
 
@@ -251,3 +270,92 @@ def test_user_message_non_int_session_id_returns_error(monkeypatch):
         msg = ws.receive_json()
     assert msg["type"] == "error"
     assert "session_id" in msg["message"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V2 P1: 权限确认端到端(user_message → confirmation_required → tool_confirmation → tool_result)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _elevated_stub_tool(calls: list) -> "ToolDef":
+    """elevated 沙箱 stub 工具: 记录调用并返回结果(不真跑子进程)。"""
+    from private_agent.tools.defs import ToolDef, ToolResult
+
+    async def _handler(args: dict) -> ToolResult:
+        calls.append(args)
+        return ToolResult(output="sandbox-ran:" + args.get("code", ""))
+
+    return ToolDef(
+        name="code_execution",
+        description="sandbox exec",
+        parameters_schema={"type": "object", "properties": {"code": {"type": "string"}}},
+        handler=_handler,
+        safety_level="elevated",
+    )
+
+
+def test_user_message_confirmation_flow(monkeypatch):
+    """V2 P1: elevated 工具 → WS 推 confirmation_required → 客户端批准 → 执行 → tool_result。
+
+    验证 B2 修复: create_task 非阻塞, run_turn 等待确认期间 WS 主循环
+    仍能接收 tool_confirmation 消息。
+    """
+    _setup_schema()
+    session_id = _create_session()
+    _patch_db_connect(monkeypatch)
+    calls: list = []
+    elevated_tool = _elevated_stub_tool(calls)
+
+    tool_call = {
+        "id": "call_c1",
+        "type": "function",
+        "function": {
+            "name": "code_execution",
+            "arguments": '{"code": "print(1)"}',
+        },
+    }
+    _patch_adapter_and_tools(
+        monkeypatch,
+        responses=[
+            ChatResult(content="", tool_calls=[tool_call], used_provider="mock"),
+            ChatResult(content="done after exec", used_provider="mock"),
+        ],
+        tools=[elevated_tool],
+    )
+
+    client = TestClient(app)
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({
+            "type": "user_message",
+            "session_id": session_id,
+            "content": "run code",
+        })
+        messages = []
+        confirmed = False
+        while True:
+            msg = ws.receive_json()
+            messages.append(msg)
+            if (
+                msg.get("type") == "react_event"
+                and msg.get("event_type") == "tool_confirmation_required"
+            ):
+                # 客户端批准确认(核心: 主循环未被 run_turn 阻塞)
+                ws.send_json({
+                    "type": "tool_confirmation",
+                    "session_id": session_id,
+                    "confirmation_id": msg["payload"]["confirmation_id"],
+                    "approved": True,
+                })
+                confirmed = True
+            if msg.get("type") in ("turn_end", "error"):
+                break
+
+    assert confirmed, "must receive tool_confirmation_required"
+    event_types = [m["event_type"] for m in messages if m["type"] == "react_event"]
+    assert "tool_confirmation_required" in event_types
+    assert "tool_result" in event_types
+    tr = next(m for m in messages if m.get("event_type") == "tool_result")
+    assert tr["payload"]["error"] is None
+    # handler 已执行(权限通过后调用)
+    assert calls and calls[0]["code"] == "print(1)"
+    assert messages[-1]["type"] == "turn_end"

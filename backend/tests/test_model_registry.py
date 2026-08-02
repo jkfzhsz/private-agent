@@ -87,14 +87,16 @@ def test_register_adapter_stores_by_name():
     assert result is stub
 
 
-def test_get_adapter_unknown_raises_key_error():
-    """get_adapter("unknown") 抛 KeyError。"""
-    raised = False
-    try:
-        get_adapter("__nonexistent_provider__")
-    except KeyError:
-        raised = True
-    assert raised, "未注册的 provider 名应抛 KeyError"
+def test_get_adapter_unknown_dynamically_registers():
+    """未注册的 provider 名 → ensure_registered 动态注册为 OpenAICompatibleAdapter。
+
+    (39f11f9/1e0af49 动态注册后不再抛 KeyError —— 开放式接入的基础行为)
+    """
+    from private_agent.models.adapters import OpenAICompatibleAdapter
+
+    adapter = get_adapter("__nonexistent_provider__")
+    assert isinstance(adapter, OpenAICompatibleAdapter)
+    assert adapter.provider_name == "__nonexistent_provider__"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -135,13 +137,12 @@ def test_manual_router_select_returns_adapter():
     assert adapter.provider_name == "glm"
 
 
-def test_manual_router_select_unknown_raises():
-    """select('unknown') 抛 KeyError。"""
+def test_manual_router_select_unknown_dynamically_registers():
+    """select('unknown') → 动态注册并返回 adapter(不再抛 KeyError)。"""
+    from private_agent.models.adapters import OpenAICompatibleAdapter
+
     cfg = _make_cfg()
     router = ManualRouter(cfg)
-    raised = False
-    try:
-        router.select("__nonexistent_provider__")
-    except KeyError:
-        raised = True
-    assert raised, "select 未注册的 provider 应抛 KeyError"
+    adapter = router.select("__nonexistent_provider__")
+    assert isinstance(adapter, OpenAICompatibleAdapter)
+    assert adapter.provider_name == "__nonexistent_provider__"

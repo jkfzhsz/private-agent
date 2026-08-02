@@ -411,6 +411,7 @@ class ContextManager:
         tool_call_id: str,
         content: str,
         name: str,
+        error: str | None = None,
     ) -> None:
         """每轮构建:追加工具结果消息到 Active Zone(蓝图 §3.3)。
 
@@ -422,7 +423,10 @@ class ContextManager:
             tool_call_id: 对应 tool_call 的 id(OpenAI tool_call_id 字段)。
             content: 工具输出文本。
             name: 工具名称。
+            error: 工具执行错误(V2 P1 权限拒绝/超时回传, 拼入 content)。
         """
+        if error:
+            content = f"[{error}]\n{content}"
         await conn.execute(
             """
             INSERT INTO messages (session_id, turn, role, content, tool_call_id, name, zone)
