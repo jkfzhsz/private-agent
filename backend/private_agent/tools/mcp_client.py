@@ -284,7 +284,13 @@ class MCPClient:
                 start = time.monotonic()
                 payload = self._build_request("ping")
                 resp = await self._http_client.post(
-                    self._endpoint(), json=payload, timeout=self._config.timeout_sec
+                    self._endpoint(),
+                    json=payload,
+                    headers={
+                        "MCP-Protocol-Version": self._config.protocol_version,
+                        "Mcp-Method": "ping",
+                    },
+                    timeout=self._config.timeout_sec,
                 )
                 self._latency_ms = (time.monotonic() - start) * 1000
                 if resp.status_code >= 400:
