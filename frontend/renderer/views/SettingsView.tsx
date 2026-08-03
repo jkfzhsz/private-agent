@@ -268,6 +268,23 @@ function ProviderRow({
         )}
       </div>
 
+      {/* 测试/保存结果提示(放编辑区外: 非编辑模式的"测试"按钮结果也可见) */}
+      {msg && (
+        <div
+          style={{
+            fontSize: 12,
+            marginTop: 8,
+            color: msg.startsWith("✅")
+              ? "var(--success-text)"
+              : msg.startsWith("❌")
+                ? "var(--danger-text)"
+                : "var(--text-secondary)",
+          }}
+        >
+          {msg}
+        </div>
+      )}
+
       {editing && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(148,163,184,0.15)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -341,7 +358,6 @@ function ProviderRow({
               测试连通性
             </button>
           </div>
-          {msg && <div style={{ fontSize: 12, color: msg.startsWith("✅") ? "var(--success-text)" : msg.startsWith("❌") ? "var(--danger-text)" : "var(--text-secondary)" }}>{msg}</div>}
         </div>
       )}
     </div>
