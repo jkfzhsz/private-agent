@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import platform
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -99,10 +101,40 @@ class ReactLoop:
         self._event_sink = event_sink
         self._logger = setup_logger("private_agent.react_loop")
         self._cfg = cfg or {}
+        # 项目优化(opencode 借鉴): 运行时环境注入(工作目录/平台),
+        # 状态栏渲染时传给模型, 帮助理解项目上下文(工作目录在哪/Git 相关操作等)
+        workspace_root = str(
+            self._cfg.get("system", {}).get("workspace_root", "")
+        )
+        self._workspace_label = os.path.expandvars(workspace_root) if workspace_root else ""
+        self._platform_label = platform.system()
         self._injection_guard = InjectionGuard()
         self._compressor = Compressor()
         self._token_estimator = TokenEstimator()  # V2 修复: _maybe_compress 曾引用未初始化
         self._billing = BillingRecorder()
+        # 项目优化(opencode 借鉴): Doom Loop 检测 - 跟踪工具调用序列,
+        # 识别"同一工具/同参数反复调用"的死循环, 提示模型收敛, 超限强制终止
+        # (区别于 max_iterations 的硬上限: 循环可能在 2-3 次迭代就反复)
+        self._tool_call_trace: list[str] = []   # 本轮迭代内的 "name:argshash"
+        self._loop_warnings = 0                  # 已注入的循环提示次数
+        self._loop_enabled = bool(
+            self._cfg.get("context", {}).get("loop", {}).get("enabled", True)
+        )
+        self._loop_max_warnings = int(
+            self._cfg.get("context", {}).get("loop", {}).get(
+                "max_warnings", 2
+            )
+        )
+        self._loop_same_args_threshold = int(
+            self._cfg.get("context", {}).get("loop", {}).get(
+                "same_args_threshold", 3
+            )
+        )
+        self._loop_same_tool_threshold = int(
+            self._cfg.get("context", {}).get("loop", {}).get(
+                "same_tool_threshold", 5
+            )
+        )
         # V2 上下文工程 - Agent 状态栏(AI-Agents-in-Depth §2.6):
         # 纯代码维护的动态元信息(工具计数/时间戳/状态), 注入上下文末尾
         from private_agent.core.status_bar import AgentStatusBar
@@ -210,6 +242,10 @@ class ReactLoop:
         # V2 状态栏: 新 turn 重置工具计数(状态栏反映当前轮内真实执行,
         # 跨轮累积会误导模型对"本轮进度"的判断)
         self._status_bar.reset()
+        # 项目优化(opencode 借鉴): 循环检测 trace 按"整个对话轮"累积
+        # (跨迭代; 跨轮模型重来, 不跨轮累积)
+        self._tool_call_trace = []
+        self._loop_warnings = 0
 
         # 追加 user_message 到上下文
         await self._context_manager.append_user_message(
@@ -239,6 +275,8 @@ class ReactLoop:
                             turn=self._turn,
                             iteration=self._iteration,
                             max_iterations=self._max_iterations,
+                            workspace=self._workspace_label,
+                            platform=self._platform_label,
                         ),
                     },
                 ]
@@ -344,6 +382,62 @@ class ReactLoop:
 
                     # V2 状态栏: 记录工具调用(计数供状态栏渲染)
                     self._status_bar.record_tool_call(tool_name)
+
+                    # 项目优化(opencode 借鉴): Doom Loop 检测
+                    # 同一工具/同参数反复调用 → 注入提示消息引导收敛;
+                    # 已提示满 max_warnings 仍循环 → 本轮直接终止(不执行工具,
+                    # 避免继续烧 token), 给模型一次看到提示收敛的机会在前一次
+                    # cfg context.loop.enabled=false 可整体关闭(兼容旧测试)
+                    loop_type = (
+                        self._detect_tool_loop(tool_name, args)
+                        if self._loop_enabled
+                        else None
+                    )
+                    if loop_type is not None:
+                        if self._loop_warnings < self._loop_max_warnings:
+                            self._loop_warnings += 1
+                            note = self._loop_note_message(loop_type, tool_name)
+                            # 仅内存注入(不持久化, 同状态栏机制), 模型下一轮可见
+                            self._context_manager.active_zone.messages.append(
+                                {"role": "user", "content": note}
+                            )
+                            await self._emit_event(
+                                "tool_loop_detected",
+                                payload={
+                                    "turn": self._turn,
+                                    "iteration": self._iteration,
+                                    "loop_type": loop_type,
+                                    "tool_name": tool_name,
+                                },
+                            )
+                            self._logger.warning(
+                                "tool loop detected (type=%s, tool=%s, warning=%d)",
+                                loop_type, tool_name, self._loop_warnings,
+                            )
+                        else:
+                            # 已提示满上限仍循环 → 强制终止本轮
+                            await self._emit_event(
+                                "tool_loop_detected",
+                                payload={
+                                    "turn": self._turn,
+                                    "iteration": self._iteration,
+                                    "loop_type": loop_type,
+                                    "tool_name": tool_name,
+                                    "force_stop": True,
+                                },
+                            )
+                            await self._emit_event(
+                                "final",
+                                payload={
+                                    "turn": self._turn,
+                                    "content": (
+                                        "检测到工具调用死循环, 已终止本轮执行。"
+                                        "建议换一种思路重试, 或拆分问题后再问。"
+                                    ),
+                                },
+                            )
+                            self._transition(ReactLoopState.IDLE)
+                            return
 
                     # 产出 tool_call event
                     await self._emit_event(
@@ -949,6 +1043,59 @@ class ReactLoop:
                 self._logger.warning(
                     "archive compressed msg %s failed", msg_id,
                 )
+
+    def _detect_tool_loop(self, tool_name: str, args: dict) -> str | None:
+        """Doom Loop 检测(opencode 借鉴): 识别工具调用死循环模式。
+
+        记录调用到本轮 trace 后, 检查两种循环模式:
+        - same_args: 同一工具 + 同一归一化参数连续出现 ≥ threshold 次
+          (模型反复用完全相同参数重试, 典型 stuck loop)
+        - same_tool: 最近 N 次调用中同一工具占比过高且无其他工具穿插
+          (单工具轰炸, 如反复 web_search 同一查询)
+
+        Args:
+            tool_name: 工具名。
+            args: 工具参数 dict。
+
+        Returns:
+            循环类型("same_args"/"same_tool")或 None(无循环)。
+        """
+        try:
+            args_key = json.dumps(args, sort_keys=True, ensure_ascii=False)[:200]
+        except Exception:
+            args_key = ""
+        trace_key = f"{tool_name}:{args_key}"
+        self._tool_call_trace.append(trace_key)
+
+        # 模式 1: 同参数重复
+        recent = self._tool_call_trace[-self._loop_same_args_threshold:]
+        if (
+            len(recent) >= self._loop_same_args_threshold
+            and len(set(recent)) == 1
+        ):
+            return "same_args"
+        # 模式 2: 同工具高频(最近 8 次中 ≥ threshold 次且无其他工具)
+        window = self._tool_call_trace[-8:]
+        if len(window) >= self._loop_same_tool_threshold:
+            tool_names = [k.split(":")[0] for k in window]
+            if tool_names.count(tool_name) >= self._loop_same_tool_threshold:
+                return "same_tool"
+        return None
+
+    def _loop_note_message(self, loop_type: str, tool_name: str) -> str:
+        """构造循环提示消息(注入模型上下文, 引导收敛而非硬终止)。"""
+        if loop_type == "same_args":
+            return (
+                "[System Note] 检测到你在反复使用完全相同的参数调用工具 "
+                f"{tool_name}——这看起来是一个死循环。请停止重试, 检查上一次"
+                "工具返回结果后改变策略(换参数/换工具), 或直接基于已有信息"
+                "给出最终回答。"
+            )
+        return (
+            "[System Note] 检测到你连续多次调用工具 "
+            f"{tool_name} 且没有进展——这看起来是一个死循环。请停止该模式, "
+            "要么换一种方法继续, 要么直接给出最终回答。"
+        )
 
     def _find_tool(self, name: str) -> ToolDef | None:
         """按名查找工具定义。

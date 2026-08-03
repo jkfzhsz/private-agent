@@ -69,6 +69,8 @@ class AgentStatusBar:
         turn: int = 0,
         iteration: int = 0,
         max_iterations: int = 10,
+        workspace: str = "",
+        platform: str = "",
     ) -> str:
         """渲染状态栏文本(键值对格式, 追加到上下文末尾的 user 消息)。
 
@@ -77,6 +79,9 @@ class AgentStatusBar:
             turn: 当前对话轮次。
             iteration: 当前工具迭代次数。
             max_iterations: 迭代上限。
+            workspace: 工作目录(opencode 借鉴: 运行时环境注入, 帮助模型
+                理解当前项目上下文)。
+            platform: 平台/OS 信息(如 Windows)。
 
         Returns:
             <agent_status> 包裹的键值对文本。
@@ -87,6 +92,10 @@ class AgentStatusBar:
         lines.append(f"对话轮次: 第 {turn} 轮")
         lines.append(f"工具迭代: {iteration}/{max_iterations}")
         lines.append(f"当前状态: {state}")
+        if workspace:
+            lines.append(f"工作目录: {workspace}")
+        if platform:
+            lines.append(f"运行平台: {platform}")
 
         if self._tool_counts:
             parts = []

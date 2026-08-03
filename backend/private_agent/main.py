@@ -136,6 +136,24 @@ async def _get_tools(cfg, session_id: int, conn):
     return frozen_tools + mcp_tools
 
 
+# 项目优化(Hermes SOUL.md 借鉴): 稳定身份层, 永远在 system prompt 首位。
+# 单文件静态定义, 跨会话一致; config context.identity 可覆盖。
+_DEFAULT_IDENTITY = (
+    "你是 Private Agent —— 运行在用户本机的个人桌面智能体。\n"
+    "协作规则:\n"
+    "1. 提建议时给出明确选项 + 理由, 不要列开放式菜单。\n"
+    "2. 安全明确的任务直接执行再汇报, 不先请示; 危险/不可逆操作先确认。\n"
+    "3. 回答基于证据、结构清晰、没有废话; 不确定时明确承认。\n"
+    "4. 使用与用户一致的语言交流。"
+)
+
+
+def _identity_prompt(cfg: dict) -> str:
+    """构造身份段(SOUL 层): config 覆盖 > 内置默认。"""
+    configured = (cfg.get("context", {}) or {}).get("identity", "")
+    return (configured or _DEFAULT_IDENTITY).strip()
+
+
 async def _get_system_prompt(cfg, session_id: int, conn):
     """获取系统提示词(测试可 monkeypatch)。
 
@@ -174,6 +192,10 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         )
 
     # V2 P2: MCP 工具速查指南(读已装配的 tools cache, 不重复连接)
+    # 项目优化(Hermes SOUL.md 借鉴): 身份段置于 system prompt 最前
+    identity = _identity_prompt(cfg)
+    if identity:
+        base_prompt = f"{identity}\n\n{base_prompt}"
     try:
         servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
         guide = build_tools_guide(_get_mcp_manager(), servers)

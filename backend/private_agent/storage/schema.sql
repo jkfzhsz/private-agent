@@ -86,7 +86,8 @@ CREATE TABLE react_events (
         'compress', 'token_usage',
         'injection_alert', 'injection_blocked',
         'tool_error', 'delta',
-        'tool_confirmation_required', 'tool_confirmation_result'
+        'tool_confirmation_required', 'tool_confirmation_result',
+        'tool_loop_detected'
     )),
     payload     JSONB NOT NULL,
     created_at  TIMESTAMPTZ DEFAULT now()

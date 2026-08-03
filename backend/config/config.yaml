@@ -72,6 +72,15 @@ models:
 # 4. 上下文工程配置(3.5、3.7、3.9、3.10、3.13)
 # ------------------------------------------------------------------------------
 context:
+  # 项目优化(Hermes SOUL.md 借鉴): 稳定身份/协作规则段, 注入 system prompt 首位。
+  # 留空使用代码内置默认(个人桌面智能体 + 协作规则); 自定义可覆盖。
+  identity: ""  # [runtime]
+  # 项目优化(opencode 借鉴): Doom Loop 死循环检测(工具反复调用提前终止)。
+  loop:
+    enabled: true  # [runtime] 整体开关(测试可关闭)
+    max_warnings: 2  # [runtime] 提示多少次后仍循环则强制终止
+    same_args_threshold: 3  # [runtime] 同参数重复 ≥3 次判定循环
+    same_tool_threshold: 5  # [runtime] 最近 8 次中同工具 ≥5 次判定循环
   status_bar:
     enabled: true  # [runtime]
     inject_per_turn: true  # [runtime]

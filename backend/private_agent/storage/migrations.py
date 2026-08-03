@@ -40,9 +40,10 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
             and "delta" in def_text
             and "tool_confirmation_required" in def_text
             and "memory_evicted" in def_text
+            and "tool_loop_detected" in def_text
         ):
             continue
-        # 旧 CHECK, DROP 后 ADD 新 CHECK(17 种, 含权限确认 + memory_evicted)
+        # 旧 CHECK, DROP 后 ADD 新 CHECK(18 种, 含权限确认/淘汰/循环检测)
         conname = r["conname"]
         await conn.execute(f'ALTER TABLE react_events DROP CONSTRAINT "{conname}"')
         await conn.execute(
@@ -54,7 +55,8 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
                 'compress', 'token_usage',
                 'injection_alert', 'injection_blocked',
                 'tool_error', 'delta',
-                'tool_confirmation_required', 'tool_confirmation_result'
+                'tool_confirmation_required', 'tool_confirmation_result',
+                'tool_loop_detected'
             ))
             """
         )

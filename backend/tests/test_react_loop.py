@@ -941,7 +941,11 @@ def test_run_turn_max_iterations_stops_with_error_event():
 
 
 def test_run_turn_max_iterations_default_is_ten():
-    """max_iterations 默认 10,死循环场景下 adapter 最多调用 10 次。"""
+    """max_iterations 默认 10,死循环场景下 adapter 最多调用 10 次。
+
+    注: 显式关闭 Doom Loop 检测(loop.enabled=false), 本测试只验证
+    max_iterations 硬上限, 不被循环检测提前终止(循环检测有独立测试)。
+    """
     _setup_schema()
 
     async def _run() -> int:
@@ -968,6 +972,7 @@ def test_run_turn_max_iterations_default_is_ten():
                 adapter=adapter,
                 tools=[ECHO_TOOL],
                 conn=conn,
+                cfg={"context": {"loop": {"enabled": False}}},
             )
             await loop.run_turn("loop")
             return len(adapter.chat_calls)

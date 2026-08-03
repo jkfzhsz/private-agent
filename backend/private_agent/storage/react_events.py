@@ -32,6 +32,8 @@ _VALID_EVENT_TYPES = frozenset(
         # V2 P1: 工具权限确认(蓝图 §5.12)
         "tool_confirmation_required",
         "tool_confirmation_result",
+        # 项目优化(opencode Doom Loop 借鉴): 工具调用死循环检测告警
+        "tool_loop_detected",
     }
 )
 
