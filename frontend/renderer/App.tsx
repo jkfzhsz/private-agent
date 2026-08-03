@@ -225,10 +225,22 @@ export default function App(): JSX.Element {
   const [artifactsOpen, setArtifactsOpen] = useState(true);
 
   // HomeView 模式按钮: 激活 skill + 切换到对话视图
+  // 会话锁定(AC-4): 同一 session 激活后不允许切换 skill(409),
+  // 因此切换到不同模式时必须新建会话(随机 session_id, 后端懒创建)
   const handlePickMode = async (
     skill: "office" | "data_analysis" | "frontend_design"
   ): Promise<void> => {
-    const sid = realSessionId ?? sessionId;
+    const needNewSession = activeSkill !== null && activeSkill !== skill;
+    const sid =
+      needNewSession
+        ? Math.floor(Math.random() * 100000) + 1
+        : realSessionId ?? sessionId;
+    if (needNewSession) {
+      // 新会话: 触发 ws 重连 + 清空当前对话(后端对新 session 懒创建行)
+      setSessionId(sid);
+      setRealSessionId(null);
+      setEvents([]);
+    }
     try {
       const resp = await fetch(
         `http://127.0.0.1:8765/admin/sessions/${sid}/activate`,
