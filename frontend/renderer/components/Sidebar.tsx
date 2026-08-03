@@ -395,13 +395,13 @@ export default function Sidebar({
               flexShrink: 0,
             }}
           >
-            PA
+            智
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-sans)", letterSpacing: "-0.02em", whiteSpace: "nowrap" }}>
-              Private Agent
+              私人智能体
             </div>
-            <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>FlowSpace v2.1</div>
+            <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>私人智能体 v2.1</div>
           </div>
         </div>
       )}

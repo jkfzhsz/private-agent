@@ -6,8 +6,8 @@ const API_BASE = "http://localhost:8765/admin";
 
 interface KbStats {
   total_documents: number;
-  total_chunks: number;
-  scenarios: Record<string, { docs: number; chunks: number }>;
+  total_片段s: number;
+  scenarios: Record<string, { docs: number; 片段s: number }>;
 }
 
 export default function KnowledgeView({
@@ -60,7 +60,7 @@ export default function KnowledgeView({
       if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
       setUploadMsg({
         ok: true,
-        text: `上传成功: 文档 #${data.doc_id}, 生成 ${data.chunks} 个 chunk`,
+        text: `上传成功: 文档 #${data.doc_id}, 生成 ${data.片段s} 个 片段`,
       });
       setContent("");
       setFilename("");
@@ -91,10 +91,10 @@ export default function KnowledgeView({
         <div className="stat-card animate-in delay-2">
           <div>
             <div className="stat-label" style={{ fontSize: 12, color: "var(--text-tertiary)", fontWeight: 500 }}>
-              Chunk 总数
+              片段总数
             </div>
             <div style={{ fontSize: 32, fontWeight: 700, letterSpacing: "-0.03em", color: "var(--text-primary)" }}>
-              {stats?.total_chunks ?? "—"}
+              {stats?.total_片段s ?? "—"}
             </div>
           </div>
         </div>
@@ -169,7 +169,7 @@ export default function KnowledgeView({
               >
                 <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{name}</span>
                 <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                  {s.docs} 文档 · {s.chunks} chunk
+                  {s.docs} 文档 · {s.片段s} 片段
                 </span>
               </div>
             ))}

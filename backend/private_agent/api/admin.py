@@ -11,6 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import yaml
 
 from private_agent.config import loader
 from private_agent.knowledge.kb_repo import KnowledgeBaseRepo
@@ -947,7 +948,12 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
                        ) AS first_user_content
                 FROM sessions s
                 WHERE NOT $2::bool
-                   OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+                   -- 仅"发生过对话"的会话入历史任务: 至少有一条 AI 回复
+                   -- (只有提问没有回答/被打断的空会话不显示)
+                   OR EXISTS (
+                       SELECT 1 FROM messages m
+                       WHERE m.session_id = s.id AND m.role = 'assistant'
+                   )
                 ORDER BY s.updated_at DESC
                 LIMIT $1
                 """,
@@ -1267,6 +1273,100 @@ async def update_wallpaper_style(body: WallpaperStyleRequest):
             status_code=500,
             content={"error": "wallpaper_style_save_failed"},
         )
+
+
+class ChatFileUploadRequest(BaseModel):
+    """POST /admin/files/upload 请求体: 对话文档上传(base64)。"""
+
+    filename: str = "upload.bin"
+    content_base64: str
+
+
+@router.post("/files/upload", response_model=None)
+async def upload_chat_file(body: ChatFileUploadRequest):
+    """对话文档上传: 存 {WORKSPACE}/uploads/, 返回绝对路径供模型 file_read。
+
+    Args:
+        body: {"filename": "xxx.pdf", "content_base64": "..."}
+
+    Returns:
+        200: {"path": str, "name": str, "size": int}
+        400: {"error": "invalid_file" | "file_too_large"}
+        500: {"error": "upload_failed"}
+    """
+    import base64 as _b64
+    import re as _re
+    from pathlib import Path
+
+    safe_name = _re.sub(r'[\\/:*?"<>|]', "_", Path(body.filename).name or "upload.bin")
+    if not safe_name:
+        safe_name = "upload.bin"
+    try:
+        decoded = _b64.b64decode(body.content_base64, validate=False)
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "invalid_file"})
+    if len(decoded) > 15 * 1024 * 1024:  # ≤15MB
+        return JSONResponse(status_code=400, content={"error": "file_too_large"})
+    try:
+        ws = os.environ.get("WORKSPACE", "")
+        uploads_dir = Path(ws) / "uploads" if ws else Path(_get_outputs_dir()).parent / "uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        target = uploads_dir / safe_name
+        target.write_bytes(decoded)
+        return {"path": str(target), "name": safe_name, "size": len(decoded)}
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"error": "upload_failed"})
+
+
+class SkillUploadRequest(BaseModel):
+    """POST /admin/skills/upload 请求体: 上传新技能(skill.yaml + system_prompt)。"""
+
+    name: str
+    skill_yaml: str
+    system_prompt: str = ""
+
+
+@router.post("/skills/upload", response_model=None)
+async def upload_skill(body: SkillUploadRequest):
+    """上传新 skill: 写 backend/skills/{name}/skill.yaml(+system_prompt.md)。
+
+    Args:
+        body: {"name": "my_skill", "skill_yaml": "...", "system_prompt": "..."}
+
+    Returns:
+        200: {"name": str, "path": str}
+        400: {"error": "invalid_skill_name" | "invalid_skill_yaml"}
+        500: {"error": "skill_save_failed"}
+    """
+    import re as _re
+    from pathlib import Path
+
+    name = body.name.strip().lower()
+    if not _re.fullmatch(r"[a-z0-9_]+", name):
+        return JSONResponse(status_code=400, content={"error": "invalid_skill_name"})
+    try:
+        parsed = yaml.safe_load(body.skill_yaml)
+        if not isinstance(parsed, dict) or not parsed.get("name"):
+            return JSONResponse(
+                status_code=400, content={"error": "invalid_skill_yaml"},
+            )
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "invalid_skill_yaml"})
+    try:
+        cfg = loader.load_config()
+        dev_dir = Path(cfg.get("skills", {}).get("storage", {}).get("dev_dir", "./skills"))
+        if not dev_dir.is_absolute():
+            dev_dir = Path.cwd() / dev_dir
+        target_dir = dev_dir / name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "skill.yaml").write_text(body.skill_yaml, encoding="utf-8")
+        if body.system_prompt.strip():
+            (target_dir / "system_prompt.md").write_text(
+                body.system_prompt, encoding="utf-8",
+            )
+        return {"name": name, "path": str(target_dir)}
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"error": "skill_save_failed"})
 
 
 @router.post("/wallpaper", response_model=None)

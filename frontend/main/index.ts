@@ -3,12 +3,13 @@
 // 流程:whenReady → 加载 backend/.env(可选) → loadSidecarConfig →
 // SidecarManager.start(拉起 Python Sidecar) → waitForHealth → createWindow;
 // 退出时停止 Sidecar。
-import { app, BrowserWindow, dialog } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { loadSidecarConfig } from "./config-loader";
 import { SidecarManager } from "./sidecar";
 import { createWindow } from "./window";
+import { checkForUpdates } from "./updater";
 
 let sidecarManager: SidecarManager | null = null;
 // 保存主窗口引用: Electron BrowserWindow 若无强引用会被 V8 GC 回收,
@@ -60,7 +61,7 @@ function notifyMissingEnvAsync(): void {
   setTimeout(() => {
     void dialog.showMessageBox({
       type: "warning",
-      title: "Private Agent - 配置提示",
+      title: "私人智能体 - 配置提示",
       message: `缺少环境配置: ${missing.join(", ")}`,
       detail:
         "可将配置写入 backend/.env(KEY=VALUE, 每行一个), 或在本终端设置环境变量后重新启动。\n" +
@@ -131,11 +132,20 @@ async function bootstrap(): Promise<void> {
 }
 
 app.whenReady().then(() => {
+  // 检查更新 IPC(渲染进程"设置-检查更新"调用)
+  ipcMain.handle("app:check-updates", async () => {
+    try {
+      return await checkForUpdates();
+    } catch (e) {
+      return { hasUpdate: false, currentVersion: "", latestVersion: "", releaseUrl: "", notes: String(e), failed: true };
+    }
+  });
+
   bootstrap().catch((err: unknown) => {
     console.error("[main] Failed to start sidecar:", err);
     void dialog.showMessageBox({
       type: "error",
-      title: "Private Agent - 启动失败",
+      title: "私人智能体 - 启动失败",
       message: "后端 Sidecar 启动失败",
       detail: String(err),
     });

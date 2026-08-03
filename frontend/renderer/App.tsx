@@ -165,6 +165,14 @@ export default function App(): JSX.Element {
   const [events, setEvents] = useState<ReactEvent[]>([]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<ConnStatus>("disconnected");
+  // 对话文档上传: 文件引用(上传成功后记录, 发送时附带路径)
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingUpload, setPendingUpload] = useState<{ name: string; path: string } | null>(null);
+  // 生成中状态(显示"停止"按钮)
+  const [isGenerating, setIsGenerating] = useState(false);
+  // 对话中切换技能弹层
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false);
+  const [availableSkills, setAvailableSkills] = useState<{ name: string; version: string; enabled: boolean }[]>([]);
   const [sessionId, setSessionId] = useState<number>(() => getSessionIdFromUrl());
   const [realSessionId, setRealSessionId] = useState<number | null>(null);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
@@ -304,6 +312,29 @@ export default function App(): JSX.Element {
     }
   }, []);
 
+  // 打断/停止: 发送 cancel 消息, 后端取消当前 turn
+  const stopGeneration = useCallback((): void => {
+    sendWs({ type: "cancel", session_id: sessionId });
+  }, [sendWs, sessionId]);
+
+  // 技能切换弹层: 打开时加载技能列表; 选择 → 新会话激活(handlePickMode)
+  useEffect(() => {
+    if (!skillPickerOpen) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const resp = await fetch("http://127.0.0.1:8765/admin/skills");
+        const data = (await resp.json()) as { name: string; version: string; enabled: boolean }[];
+        if (!cancelled) setAvailableSkills(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) setAvailableSkills([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [skillPickerOpen]);
+
   // ── 处理收到的 WS 消息 ──────────────────────────────────────────────────────
   const handleMessage = useCallback((msg: WSMessage): void => {
     switch (msg.type) {
@@ -432,9 +463,16 @@ export default function App(): JSX.Element {
 
       case "turn_end":
         // 一轮结束,可在此做 UI 收尾
+        setIsGenerating(false);
+        break;
+
+      case "turn_cancelled":
+        // 打断/停止: 后端已取消当前 turn
+        setIsGenerating(false);
         break;
 
       case "error":
+        setIsGenerating(false);
         if (msg.message) {
           // B2 P1-9: skill_not_found → 自动切回首页(重新选择 Skill)
           if (/skill_not_found|skill not found/i.test(msg.message)) {
@@ -523,9 +561,51 @@ export default function App(): JSX.Element {
   }, [connect]);
 
   // ── 发送用户消息 ──────────────────────────────────────────────────────────
+  // 对话文档上传: 选择文件 → base64 上传 → 记录文件引用(发送时附带)
+  const handleFilePick = useCallback(
+    async (file: File | undefined | null): Promise<void> => {
+      if (!file) return;
+      const MAX = 15 * 1024 * 1024;
+      if (file.size > MAX) {
+        // eslint-disable-next-line no-alert
+        window.alert("文件超过 15MB 限制");
+        return;
+      }
+      try {
+        const buf = await file.arrayBuffer();
+        let binary = "";
+        const bytes = new Uint8Array(buf);
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        }
+        const b64 = btoa(binary);
+        const resp = await fetch("http://127.0.0.1:8765/admin/files/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: file.name, content_base64: b64 }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error ?? `HTTP ${resp.status}`);
+        }
+        const data = (await resp.json()) as { name: string; path: string };
+        setPendingUpload({ name: data.name, path: data.path });
+      } catch (e) {
+        // eslint-disable-next-line no-alert
+        window.alert(`上传失败: ${String(e)}`);
+      }
+    },
+    []
+  );
+
   const sendMessage = useCallback((): void => {
-    const content = input.trim();
+    let content = input.trim();
     if (!content) return;
+    // 已上传文件: 消息头部附带文件路径(模型可用 file_read 工具读取)
+    if (pendingUpload) {
+      content = `[已上传文件: ${pendingUpload.name} 路径: ${pendingUpload.path}]\n${content}`;
+    }
     sendWs({
       type: "user_message",
       session_id: sessionId,
@@ -544,7 +624,9 @@ export default function App(): JSX.Element {
       },
     ]);
     setInput("");
-  }, [input, sessionId, sendWs]);
+    setPendingUpload(null); // 发送后清除文件引用(一次一文件)
+    setIsGenerating(true); // 生成中(显示"停止"按钮)
+  }, [input, sessionId, sendWs, pendingUpload]);
 
   // ── 生命周期:挂载时连接,卸载时关闭 ──────────────────────────────────────
   useEffect(() => {
@@ -728,6 +810,17 @@ export default function App(): JSX.Element {
                   <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                     session={realSessionId ?? sessionId}
                   </span>
+                  {/* 对话中加载/切换技能: 弹技能面板 → 新会话激活 */}
+                  <button
+                    onClick={() => setSkillPickerOpen(true)}
+                    title="切换技能(将新建会话)"
+                    style={{
+                      fontSize: 12, padding: "4px 12px", borderRadius: 8,
+                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
+                    }}
+                  >
+                    🔄 切换技能
+                  </button>
                   <span style={{ flex: 1 }} />
                   {/* 会话级模型选择: 自动(fallback 链) / 手动锁定单模型 */}
                   <select
@@ -849,11 +942,11 @@ export default function App(): JSX.Element {
                       background: "linear-gradient(135deg, #818cf8, #c084fc)",
                     }}
                   >
-                    PA
+                    智
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
-                      Private Agent
+                      私人智能体
                     </div>
 
                     {isPending && !thinkingEv && (
@@ -1209,6 +1302,28 @@ export default function App(): JSX.Element {
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        {/* 上传文档: 选择文件 → base64 上传后端 → 发送时附带文件路径 */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          style={{ display: "none" }}
+          onChange={(e) => void handleFilePick(e.target.files?.[0])}
+        />
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          title="上传文档(≤15MB, 支持 pdf/docx/xlsx/txt/图片等)"
+          style={{
+            padding: "10px 12px", borderRadius: 6, border: "1px solid #ddd",
+            backgroundColor: "#fff", fontSize: 14, cursor: "pointer",
+          }}
+        >
+          📎
+        </button>
+        {pendingUpload && (
+          <span style={{ fontSize: 12, color: "#4caf50", alignSelf: "center", whiteSpace: "nowrap" }}>
+            ✓ {pendingUpload.name}
+          </span>
+        )}
         <input
           type="text"
           value={input}
@@ -1236,6 +1351,18 @@ export default function App(): JSX.Element {
         >
           发送
         </button>
+        {isGenerating && (
+          <button
+            onClick={stopGeneration}
+            title="停止生成"
+            style={{
+              padding: "10px 20px", borderRadius: 6, border: "none",
+              backgroundColor: "#d32f2f", color: "#fff", fontSize: 14, cursor: "pointer",
+            }}
+          >
+            ⏹ 停止
+          </button>
+        )}
           </div>
           </div>
           )}
@@ -1248,6 +1375,57 @@ export default function App(): JSX.Element {
           artifacts={artifacts}
           onToggle={() => setArtifactsOpen(!artifactsOpen)}
         />
+
+        {/* 对话中切换技能弹层 */}
+        {skillPickerOpen && (
+          <div
+            style={{
+              position: "fixed", inset: 0, background: "rgba(15,23,42,0.4)",
+              display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+            }}
+            onClick={() => setSkillPickerOpen(false)}
+          >
+            <div
+              className="glass-panel"
+              style={{ padding: 20, width: 420, maxHeight: "70vh", overflowY: "auto" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>选择技能</div>
+              <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 12 }}>
+                切换技能将新建会话(当前会话保持原技能)
+              </div>
+              {availableSkills.filter((s) => s.enabled).map((s) => (
+                <button
+                  key={s.name}
+                  onClick={() => {
+                    setSkillPickerOpen(false);
+                    void handlePickMode(s.name as "office" | "data_analysis" | "frontend_design");
+                  }}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    width: "100%", padding: "10px 14px", marginBottom: 8,
+                    borderRadius: 8, border: "1px solid #ddd", background: "#fff",
+                    fontSize: 14, cursor: "pointer", textAlign: "left",
+                  }}
+                >
+                  <span>{s.name}</span>
+                  <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>v{s.version}</span>
+                </button>
+              ))}
+              {availableSkills.filter((s) => s.enabled).length === 0 && (
+                <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: 16, textAlign: "center" }}>
+                  暂无可用技能
+                </div>
+              )}
+              <button
+                onClick={() => setSkillPickerOpen(false)}
+                style={{ width: "100%", padding: "8px", marginTop: 6, borderRadius: 6, border: "none", background: "#eee", cursor: "pointer", fontSize: 13 }}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        )}
         </div>
       </div>
     </div>

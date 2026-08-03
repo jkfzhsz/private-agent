@@ -152,7 +152,7 @@ export default function HomeView({
                 marginBottom: 8,
               }}
             >
-              DAILY DASHBOARD · 今日工作台
+              今日工作台
             </div>
             <h1
               style={{

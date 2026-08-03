@@ -72,7 +72,7 @@ export default function SettingsView(): JSX.Element {
     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
       <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
         <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
-          模型 Provider
+          模型提供商
         </div>
         <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
           可新增/编辑/删除模型(任意 OpenAI 兼容服务) · 编辑可配置参数上限(输入/输出/轮次) · 降级链: {fallbackChain.join(" → ") || "—"}
@@ -93,7 +93,7 @@ export default function SettingsView(): JSX.Element {
 
       <div className="glass-panel animate-in delay-2" style={{ padding: "20px 24px" }}>
         <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
-          MCP Servers
+          MCP 服务
         </div>
         <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
           协议版本: {protocol || "—"} · 可新增/删除/测试连通性(改动重启后端后生效)
@@ -118,6 +118,205 @@ export default function SettingsView(): JSX.Element {
 
       {/* 主题壁纸 */}
       <WallpaperSection />
+
+      {/* 技能管理: 列表 + 上传新技能 */}
+      <SkillsSection />
+
+      {/* 关于与更新 */}
+      <UpdateSection />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 技能管理: 展示全部技能(含未启用) + 上传新技能(skill.yaml + system_prompt)
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface SkillInfo {
+  name: string;
+  version: string;
+  description: string;
+  enabled: boolean;
+}
+
+function SkillsSection(): JSX.Element {
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [name, setName] = useState("");
+  const [skillYaml, setSkillYaml] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    try {
+      const resp = await fetch("http://127.0.0.1:8765/admin/skills");
+      const data = await resp.json();
+      setSkills(Array.isArray(data) ? data : []);
+    } catch {
+      setSkills([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const upload = async (): Promise<void> => {
+    setMsg(null);
+    if (!name.trim() || !skillYaml.trim()) {
+      setMsg("请填写技能名称和 skill.yaml 内容");
+      return;
+    }
+    try {
+      const resp = await fetch("http://127.0.0.1:8765/admin/skills/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          skill_yaml: skillYaml,
+          system_prompt: systemPrompt,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error ?? `HTTP ${resp.status}`);
+      }
+      setMsg(`技能 ${data.name} 上传成功`);
+      setName("");
+      setSkillYaml("");
+      setSystemPrompt("");
+      await load();
+    } catch (e) {
+      setMsg(`上传失败: ${String(e)}`);
+    }
+  };
+
+  return (
+    <div className="glass-panel" style={{ padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div style={{ fontSize: 15, fontWeight: 600 }}>技能管理</div>
+        <button className="btn-secondary" style={{ fontSize: 12, padding: "4px 12px" }} onClick={() => void load()}>
+          {loading ? "刷新中..." : "刷新"}
+        </button>
+      </div>
+
+      {/* 已安装技能 */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+        {skills.map((s) => (
+          <span
+            key={s.name}
+            style={{
+              fontSize: 12, padding: "4px 12px", borderRadius: 12,
+              border: s.enabled ? "1px solid #4caf50" : "1px solid #ccc",
+              color: s.enabled ? "#2e7d32" : "var(--text-tertiary)",
+              background: s.enabled ? "rgba(76,175,80,0.08)" : "transparent",
+            }}
+          >
+            {s.name} v{s.version} {s.enabled ? "· 已启用" : "· 未启用"}
+          </span>
+        ))}
+        {skills.length === 0 && (
+          <div style={{ fontSize: 13, color: "var(--text-tertiary)" }}>暂无技能</div>
+        )}
+      </div>
+
+      {/* 上传新技能 */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>上传新技能</div>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="技能名称(小写字母/数字/下划线, 如 my_skill)"
+          style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", fontSize: 13 }}
+        />
+        <textarea
+          value={skillYaml}
+          onChange={(e) => setSkillYaml(e.target.value)}
+          placeholder="skill.yaml 内容(需含 name 字段)"
+          rows={5}
+          style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", fontSize: 12, fontFamily: "monospace" }}
+        />
+        <textarea
+          value={systemPrompt}
+          onChange={(e) => setSystemPrompt(e.target.value)}
+          placeholder="system_prompt.md 内容(可选)"
+          rows={3}
+          style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", fontSize: 12 }}
+        />
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button className="btn-primary" style={{ padding: "8px 18px", fontSize: 13 }} onClick={() => void upload()}>
+            上传技能
+          </button>
+          {msg && <span style={{ fontSize: 12, color: msg.startsWith("技能") ? "#4caf50" : "#d32f2f" }}>{msg}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 关于与更新: 版本信息 + 检查更新
+// ──────────────────────────────────────────────────────────────────────────────
+
+function UpdateSection(): JSX.Element {
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+
+  const runCheck = async (): Promise<void> => {
+    setChecking(true);
+    setResult(null);
+    try {
+      const r = (await window.pa?.checkForUpdates?.()) as {
+        hasUpdate?: boolean;
+        currentVersion?: string;
+        latestVersion?: string;
+        releaseUrl?: string;
+        notes?: string;
+        failed?: boolean;
+      };
+      if (!r) {
+        setResult("无法检查更新(请在打包版中使用)");
+      } else if (r.failed) {
+        setResult(`检查失败: ${r.notes || "未知错误"}`);
+      } else if (r.hasUpdate) {
+        setResult(
+          `发现新版本 ${r.latestVersion}(当前 ${r.currentVersion})${r.releaseUrl ? `\n下载: ${r.releaseUrl}` : ""}`
+        );
+      } else {
+        setResult(`当前已是最新版本 v${r.currentVersion}${r.latestVersion ? `(远端 ${r.latestVersion})` : ""}`);
+      }
+    } catch (e) {
+      setResult(`检查更新出错: ${String(e)}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="glass-panel" style={{ padding: 16 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>关于与更新</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <button
+          className="btn-primary"
+          style={{ padding: "8px 18px", fontSize: 13 }}
+          onClick={() => void runCheck()}
+          disabled={checking}
+        >
+          {checking ? "检查中..." : "检查更新"}
+        </button>
+        <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+          当前版本 v{window.pa?.versions?.app || "0.1.0"}
+        </span>
+      </div>
+      {result && (
+        <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", marginTop: 10, color: "var(--text-secondary)" }}>
+          {result}
+        </pre>
+      )}
     </div>
   );
 }

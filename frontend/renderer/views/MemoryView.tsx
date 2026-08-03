@@ -58,7 +58,7 @@ export default function MemoryView({
   const doExtract = async (): Promise<void> => {
     const sid = Number(extractSession);
     if (!Number.isInteger(sid) || sid <= 0) {
-      setExtractMsg("请输入有效的 session_id");
+      setExtractMsg("请输入有效的会话 ID");
       return;
     }
     setExtracting(true);
@@ -87,7 +87,7 @@ export default function MemoryView({
           <input
             className="flow-input"
             style={{ width: 220 }}
-            placeholder="session_id"
+            placeholder="会话 ID"
             value={extractSession}
             onChange={(e) => setExtractSession(e.target.value)}
           />

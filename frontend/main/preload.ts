@@ -4,7 +4,7 @@
 // - 平台/版本信息
 // - 后端 Sidecar 地址(与 config.yaml 一致)
 // - 关键环境变量的"是否已配置"状态(不暴露 key 值本身)
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 
 const sidecarPort = Number(process.env.PA_SIDECAR_PORT) || 8765;
 const sidecarHost = "127.0.0.1";
@@ -15,6 +15,7 @@ const api = {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
+    app: process.env.PA_APP_VERSION ?? "",
   },
   sidecar: {
     host: sidecarHost,
@@ -28,6 +29,8 @@ const api = {
     glmKey: Boolean(process.env.PA_GLM_API_KEY),
     kimiKey: Boolean(process.env.PA_KIMI_API_KEY),
   },
+  // 检查更新(主进程实现, 渲染进程只拿结果)
+  checkForUpdates: (): Promise<unknown> => ipcRenderer.invoke("app:check-updates"),
 };
 
 contextBridge.exposeInMainWorld("pa", api);

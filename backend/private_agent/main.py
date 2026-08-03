@@ -42,6 +42,8 @@ _scheduler = None  # APScheduler 单例(startup 创建,shutdown 停止)
 _mcp_manager = None  # type: ignore[assignment]
 # V2 P1: per-session 运行锁(user_message 改 create_task 后防同会话并发 turn 冲突)
 _session_locks: dict[int, "asyncio.Lock"] = {}
+# 打断/停止: per-session 当前运行 task(供 cancel 消息取消)
+_session_tasks: dict[int, "asyncio.Task"] = {}
 # V2 P1: per-session 权限确认管理器(蓝图 §5.12, tool_confirmation 消息 resolve)
 _permission_managers: dict[int, "PermissionManager"] = {}
 
@@ -324,7 +326,26 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     continue
                 # V2 P1(B2 修复): create_task 异步执行 —— run_turn 阻塞期间
                 # 主循环仍可接收 tool_confirmation 等消息(权限确认链路前置条件)
-                asyncio.create_task(_handle_user_message(ws, session_id, content))
+                task = asyncio.create_task(_handle_user_message(ws, session_id, content))
+                # 打断/停止: 记录 task, 收到 cancel 时取消
+                _session_tasks[session_id] = task
+                task.add_done_callback(
+                    lambda t, sid=session_id: _session_tasks.pop(sid, None)
+                )
+            elif msg_type == "cancel":
+                # 打断/停止: 取消当前会话正在运行的 turn(生成中用户点"停止")
+                try:
+                    session_id = int(msg["session_id"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                task = _session_tasks.get(session_id)
+                if task is not None and not task.done():
+                    task.cancel()
+                    await ws.send_json({
+                        "type": "turn_cancelled",
+                        "session_id": session_id,
+                        "message": "已停止生成",
+                    })
             elif msg_type == "tool_confirmation":
                 # V2 P1: 权限确认响应(蓝图 §5.12, 用户点击同意/拒绝)
                 try:
@@ -499,6 +520,24 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
             await memory_mgr.maybe_extract(
                 session_id=session_id, current_turn=loop._turn,
             )
+        except asyncio.CancelledError:
+            # 打断/停止: 用户点"停止" → cancel → 标记会话中断, 不报错
+            try:
+                if conn is not None:
+                    await CheckpointManager.mark_session_interrupted(
+                        conn, session_id
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await ws.send_json({
+                    "type": "turn_cancelled",
+                    "session_id": session_id,
+                    "message": "已停止生成",
+                })
+            except Exception:  # noqa: BLE001
+                pass
+            raise  # 保持 CancelledError 语义(task 被正确取消)
         except Exception:
             _logger.exception("user_message handling failed")
             try:

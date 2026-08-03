@@ -14,7 +14,8 @@ export function createWindow(): BrowserWindow {
     height: 840,
     minWidth: 960,
     minHeight: 640,
-    title: "Private Agent",
+    title: "私人智能体",
+    autoHideMenuBar: true, // 隐藏默认英文菜单栏(File/Edit/View...), 界面全中文
     backgroundColor: "#eef1f8", // 与首页底色一致, 避免加载白闪
     webPreferences: {
       preload: join(__dirname, "preload.js"),
