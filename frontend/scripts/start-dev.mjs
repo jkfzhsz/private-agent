@@ -68,6 +68,38 @@ async function main() {
     }
   }
 
+  // 0.5) 清理残留端口进程(上次实例未正常退出时 vite/后端端口被占,
+  //      会导致本次 vite 起不来 → Electron 加载失败退出)
+  // 仅 Windows; 用 execFile 直接调 netstat/taskkill, 不经 cmd shell
+  if (isWin) {
+    const { execFileSync } = await import("node:child_process");
+    const killPort = (port) => {
+      try {
+        const out = execFileSync("netstat", ["-ano", "-p", "tcp"], {
+          encoding: "utf8",
+        });
+        for (const line of out.split(/\r?\n/)) {
+          if (!line.includes(`:${port}`)) continue;
+          if (!line.includes("LISTENING")) continue;
+          const parts = line.trim().split(/\s+/);
+          const pid = parts[parts.length - 1];
+          if (!pid || !/^\d+$/.test(pid)) continue;
+          if (pid === String(process.pid)) continue;
+          try {
+            execFileSync("taskkill", ["/PID", pid, "/F"], { stdio: "ignore" });
+            console.log(`[start] 端口 ${port} 被残留进程占用 (PID ${pid}), 已清理`);
+          } catch {
+            /* 可能已被释放 */
+          }
+        }
+      } catch {
+        /* netstat 不可用则忽略 */
+      }
+    };
+    killPort(8765);
+    killPort(5173);
+  }
+
   // 1) 编译主进程 TS → dist-main
   console.log("[start] 编译主进程 (tsc) ...");
   await new Promise((resolve, reject) => {

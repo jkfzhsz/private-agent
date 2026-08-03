@@ -19,6 +19,11 @@ rem ============================================================================
 setlocal
 cd /d "%~dp0"
 
+rem 步骤追踪: 每步追加到 logs\launch-trace.log, 秒退也能定位执行到哪
+if not exist "%~dp0logs" mkdir "%~dp0logs"
+set "TRACE=%~dp0logs\launch-trace.log"
+echo [%date% %time%] start-desktop.bat 启动 (arg=%~1) >> "%TRACE%"
+
 if /i "%~1"=="--no-gpu" set "PA_DISABLE_GPU=1"
 
 echo.
@@ -28,6 +33,7 @@ echo  ================================================
 echo.
 
 rem --- 1) Node.js ---
+echo [%time%] 步骤1: 检查 Node >> "%TRACE%"
 set "NODE_CMD=node"
 where node >nul 2>&1
 if errorlevel 1 (
@@ -39,8 +45,10 @@ if errorlevel 1 (
   )
 )
 echo [PA] Node: %NODE_CMD%
+echo [%time%] Node=%NODE_CMD% >> "%TRACE%"
 
 rem --- 2) frontend deps ---
+echo [%time%] 步骤2: 检查 frontend 依赖 >> "%TRACE%"
 if not exist "frontend\node_modules\electron\dist\electron.exe" (
   echo [PA] ERROR: frontend dependencies missing.
   echo       Run: cd frontend ^&^& npm install
@@ -48,8 +56,10 @@ if not exist "frontend\node_modules\electron\dist\electron.exe" (
   exit /b 1
 )
 echo [PA] frontend deps OK
+echo [%time%] frontend deps OK >> "%TRACE%"
 
 rem --- 3) PostgreSQL ---
+echo [%time%] 步骤3: 检查 PostgreSQL >> "%TRACE%"
 netstat -ano | findstr /c:":5432 " >nul 2>&1
 if errorlevel 1 (
   echo [PA] WARNING: PostgreSQL (port 5432) is not running.
@@ -60,25 +70,20 @@ if errorlevel 1 (
   timeout /t 6 /nobreak >nul
 )
 
-rem --- 4) 残留进程自动清理(上次实例未正常退出时, vite/后端端口被占
-rem        会导致本次启动失败: vite 5173 in use → Electron 加载失败退出) ---
-for %%P in (8765 5173) do (
-  for /f "tokens=5" %%a in ('netstat -ano ^| findstr /c:":%%P " ^| findstr "LISTENING"') do (
-    echo [PA] Port %%P busy ^(PID %%a^) - killing leftover process...
-    taskkill /PID %%a /F >nul 2>&1
-  )
-)
+rem --- 4) 残留端口进程清理已移入 start-dev.mjs(启动前自动执行) ---
+rem        (node 内用 netstat/taskkill 直接清理, 比 bat 嵌套 for 更可靠)
 
 rem --- 5) Launch Electron (auto-spawns backend Sidecar + Vite) ---
+echo [%time%] 步骤4: 启动 start-dev.mjs >> "%TRACE%"
 echo.
 echo [PA] Starting Private Agent desktop...
 echo [PA] Close the app window to stop everything.
 echo [PA] Logs: logs\desktop-launch.log
 echo.
 cd /d "%~dp0frontend"
-if not exist "%~dp0logs" mkdir "%~dp0logs"
 "%NODE_CMD%" scripts/start-dev.mjs >> "%~dp0logs\desktop-launch.log" 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
+echo [%time%] start-dev.mjs 退出 code=%EXIT_CODE% >> "%TRACE%"
 
 echo.
 echo  ================================================
