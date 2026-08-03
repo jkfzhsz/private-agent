@@ -5,24 +5,25 @@ rem  Private Agent - Desktop Launcher (Windows)
 rem
 rem  Usage:
 rem    start-desktop.bat             normal launch (hardware acceleration)
-rem    start-desktop.bat --no-gpu    disable GPU (remote desktop / VMs / bad drivers)
+rem    start-desktop.bat --no-gpu    disable GPU (remote desktop / VM / drivers)
 rem
 rem  Flow:
 rem    1. Locate Node.js (PATH first, fallback to managed node)
 rem    2. Verify frontend deps (electron/vite/typescript)
-rem    3. Check PostgreSQL (5432) - auto-start script installed in Startup folder
-rem    4. Check backend port 8765 (warn if already in use)
-rem    5. Start Electron desktop app via frontend/scripts/start-dev.mjs
-rem       (Electron main process auto-spawns the Python backend Sidecar
-rem        + Vite dev server; closing the app window shuts everything down)
+rem    3. Check PostgreSQL (5432) - auto-start script in Windows Startup folder
+rem    4. Start Electron app via frontend/scripts/start-dev.mjs
+rem       (Electron main auto-spawns the Python backend Sidecar + Vite;
+rem        closing the app window shuts everything down)
+rem
+rem  NOTE: keep this file pure ASCII - UTF-8 chars break cmd parsing (GBK).
 rem ============================================================================
 setlocal
 cd /d "%~dp0"
 
-rem 步骤追踪: 每步追加到 logs\launch-trace.log, 秒退也能定位执行到哪
+rem Step trace: every step appends to logs\launch-trace.log
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 set "TRACE=%~dp0logs\launch-trace.log"
-echo [%date% %time%] start-desktop.bat 启动 (arg=%~1) >> "%TRACE%"
+echo [%date% %time%] start-desktop.bat start (arg=%~1) >> "%TRACE%"
 
 if /i "%~1"=="--no-gpu" set "PA_DISABLE_GPU=1"
 
@@ -33,7 +34,7 @@ echo  ================================================
 echo.
 
 rem --- 1) Node.js ---
-echo [%time%] 步骤1: 检查 Node >> "%TRACE%"
+echo [%time%] step1: check node >> "%TRACE%"
 set "NODE_CMD=node"
 where node >nul 2>&1
 if errorlevel 1 (
@@ -45,10 +46,10 @@ if errorlevel 1 (
   )
 )
 echo [PA] Node: %NODE_CMD%
-echo [%time%] Node=%NODE_CMD% >> "%TRACE%"
+echo [%time%] node=%NODE_CMD% >> "%TRACE%"
 
 rem --- 2) frontend deps ---
-echo [%time%] 步骤2: 检查 frontend 依赖 >> "%TRACE%"
+echo [%time%] step2: check frontend deps >> "%TRACE%"
 if not exist "frontend\node_modules\electron\dist\electron.exe" (
   echo [PA] ERROR: frontend dependencies missing.
   echo       Run: cd frontend ^&^& npm install
@@ -59,7 +60,7 @@ echo [PA] frontend deps OK
 echo [%time%] frontend deps OK >> "%TRACE%"
 
 rem --- 3) PostgreSQL ---
-echo [%time%] 步骤3: 检查 PostgreSQL >> "%TRACE%"
+echo [%time%] step3: check postgresql >> "%TRACE%"
 netstat -ano | findstr /c:":5432 " >nul 2>&1
 if errorlevel 1 (
   echo [PA] WARNING: PostgreSQL (port 5432) is not running.
@@ -70,11 +71,10 @@ if errorlevel 1 (
   timeout /t 6 /nobreak >nul
 )
 
-rem --- 4) 残留端口进程清理已移入 start-dev.mjs(启动前自动执行) ---
-rem        (node 内用 netstat/taskkill 直接清理, 比 bat 嵌套 for 更可靠)
+rem --- 4) leftover-port cleanup moved into start-dev.mjs ---
 
 rem --- 5) Launch Electron (auto-spawns backend Sidecar + Vite) ---
-echo [%time%] 步骤4: 启动 start-dev.mjs >> "%TRACE%"
+echo [%time%] step4: run start-dev.mjs >> "%TRACE%"
 echo.
 echo [PA] Starting Private Agent desktop...
 echo [PA] Close the app window to stop everything.
@@ -83,7 +83,7 @@ echo.
 cd /d "%~dp0frontend"
 "%NODE_CMD%" scripts/start-dev.mjs >> "%~dp0logs\desktop-launch.log" 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
-echo [%time%] start-dev.mjs 退出 code=%EXIT_CODE% >> "%TRACE%"
+echo [%time%] start-dev.mjs exit code=%EXIT_CODE% >> "%TRACE%"
 
 echo.
 echo  ================================================
