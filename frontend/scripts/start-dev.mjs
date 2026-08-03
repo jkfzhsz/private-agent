@@ -95,7 +95,15 @@ async function main() {
     const electronEnv = { ...process.env, VITE_DEV_SERVER_URL: "http://localhost:5173" };
     delete electronEnv.ELECTRON_RUN_AS_NODE;
     delete electronEnv.NODE_OPTIONS;
-    const electron = spawn(electronExe, ["."], { cwd: root, env: electronEnv });
+    // Windows 受限环境(普通用户/无管理员/受限 token)下 Electron/Chromium
+    // sandbox 启动会直接闪退(code=2147483651); 本地单机个人应用的安全
+    // 模型靠工具权限确认而非进程 sandbox, 故 Windows 默认 --no-sandbox。
+    // 若需启用: 设 PA_ELECTRON_SANDBOX=1。
+    const electronArgs = ["."];
+    if (isWin && process.env.PA_ELECTRON_SANDBOX !== "1") {
+      electronArgs.push("--no-sandbox");
+    }
+    const electron = spawn(electronExe, electronArgs, { cwd: root, env: electronEnv });
     electron.on("exit", (code) => {
       console.log(`[start] Electron 退出 (code=${code}), 清理 vite ...`);
       vite.kill();

@@ -72,14 +72,17 @@ rem --- 5) Launch Electron (auto-spawns backend Sidecar + Vite) ---
 echo.
 echo [PA] Starting Private Agent desktop...
 echo [PA] Close the app window to stop everything.
+echo [PA] Logs: logs\desktop-launch.log
 echo.
 cd /d "%~dp0frontend"
-"%NODE_CMD%" scripts/start-dev.mjs
+if not exist "%~dp0logs" mkdir "%~dp0logs"
+"%NODE_CMD%" scripts/start-dev.mjs >> "%~dp0logs\desktop-launch.log" 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.
 echo  ================================================
 echo   Private Agent exited (code=%EXIT_CODE%)
+echo   Logs: logs\desktop-launch.log
 echo  ================================================
 echo.
 pause
