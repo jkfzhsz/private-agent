@@ -174,6 +174,10 @@ export default function App(): JSX.Element {
   // 会话级模型选择: "auto"(fallback 链) 或 provider 名(手动锁定)
   const [sessionModel, setSessionModel] = useState<string>("auto");
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  // 工作区选择(画地为牢): 会话级工作目录
+  const [workspace, setWorkspace] = useState<string | null>(null);
+  const [editingWorkspace, setEditingWorkspace] = useState(false);
+  const [workspaceInput, setWorkspaceInput] = useState("");
 
   // 按 turn 分组事件:同一轮对话合并为一个 AI 回复块
   const turnGroups = useMemo(() => {
@@ -344,6 +348,45 @@ export default function App(): JSX.Element {
             }
             return;
           }
+          // 推理增量: 逐 token thinking 事件累积合并到该 turn 最后一条
+          // thinking(避免每条都追加 → 渲染抖动/多条"思考中"卡片)
+          if (msg.event_type === "thinking") {
+            const reasoning = String(
+              msg.payload.reasoning ?? msg.payload.content ?? ""
+            );
+            setEvents((prev) => {
+              const last = [...prev]
+                .reverse()
+                .find((e) => e.turn === msg.turn && e.event_type === "thinking");
+              if (last) {
+                return prev.map((e) =>
+                  e.id === last.id
+                    ? {
+                        ...e,
+                        payload: {
+                          turn: msg.turn,
+                          reasoning:
+                            String(e.payload.reasoning ?? "") + reasoning,
+                        },
+                      }
+                    : e
+                );
+              }
+              const t = msg.turn as number;
+              return [
+                ...prev,
+                {
+                  id: ++eventIdRef.current,
+                  session_id: msg.session_id ?? sessionId,
+                  turn: t,
+                  event_type: "thinking" as EventType,
+                  payload: { turn: t, reasoning },
+                  ts: Date.now(),
+                },
+              ];
+            });
+            return;
+          }
           const event: ReactEvent = {
             id: ++eventIdRef.current,
             session_id: msg.session_id ?? sessionId,
@@ -508,6 +551,51 @@ export default function App(): JSX.Element {
       wsRef.current = null;
     };
   }, [connect, sessionId]);
+
+  // 加载默认工作区(画地为牢选择器显示用; 会话工作区后端持久化)
+  useEffect(() => {
+    let cancelled = false;
+    fetch("http://localhost:8765/admin/workspaces")
+      .then((r) => r.json())
+      .then((data) => {
+        if (!cancelled) {
+          const def = (data.default as string) || "";
+          const candidates = (data.workspaces ?? []) as string[];
+          setWorkspace(def || (candidates[0] ?? null));
+          setWorkspaceInput(def || (candidates[0] ?? ""));
+        }
+      })
+      .catch(() => {
+        /* 后端未起时忽略 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 保存会话工作区(画地为牢)
+  const saveWorkspace = useCallback(async (): Promise<void> => {
+    const path = workspaceInput.trim();
+    try {
+      const resp = await fetch(
+        `http://localhost:8765/admin/sessions/${realSessionId ?? sessionId}/workspace`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace: path || null }),
+        }
+      );
+      const data = await resp.json();
+      if (!resp.ok) {
+        window.alert(`工作区设置失败: ${data.error ?? data.detail ?? `HTTP ${resp.status}`}`);
+        return;
+      }
+      setWorkspace(data.workspace ?? null);
+      setEditingWorkspace(false);
+    } catch (err) {
+      window.alert(`工作区设置失败: ${String(err)}`);
+    }
+  }, [realSessionId, sessionId, workspaceInput]);
 
   // 加载可用模型列表(模型选择器用)
   useEffect(() => {
@@ -1030,6 +1118,82 @@ export default function App(): JSX.Element {
             </div>
           );
         })}
+      </div>
+
+      {/* 工作区条(画地为牢): 显示/修改会话工作目录, agent 操作范围告知层 */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginTop: 10,
+          fontSize: 12,
+          color: "#6b7280",
+        }}
+      >
+        {editingWorkspace ? (
+          <>
+            <input
+              type="text"
+              value={workspaceInput}
+              onChange={(e) => setWorkspaceInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void saveWorkspace();
+                }
+              }}
+              placeholder="输入工作区目录路径, 如 D:/MyProject"
+              style={{
+                flex: 1,
+                padding: "6px 10px",
+                borderRadius: 6,
+                border: "1px solid #ccc",
+                fontSize: 12,
+                outline: "none",
+              }}
+            />
+            <button
+              onClick={() => void saveWorkspace()}
+              style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "#1976d2", color: "#fff", fontSize: 12, cursor: "pointer" }}
+            >
+              保存
+            </button>
+            <button
+              onClick={() => setEditingWorkspace(false)}
+              style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#666", fontSize: 12, cursor: "pointer" }}
+            >
+              取消
+            </button>
+          </>
+        ) : (
+          <>
+            <span>📁 工作区:</span>
+            <span
+              style={{
+                flex: 1,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                background: "#f3f4f6",
+                borderRadius: 6,
+                padding: "4px 8px",
+              }}
+              title={workspace ?? "（默认工作目录）"}
+            >
+              {workspace ?? "（默认工作目录）"}
+            </span>
+            <button
+              onClick={() => {
+                setWorkspaceInput(workspace ?? "");
+                setEditingWorkspace(true);
+              }}
+              style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#374151", fontSize: 12, cursor: "pointer" }}
+            >
+              更换
+            </button>
+          </>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>

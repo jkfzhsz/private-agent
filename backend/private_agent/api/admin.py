@@ -990,6 +990,78 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
         )
 
 
+class WorkspaceRequest(BaseModel):
+    """PUT /sessions/{id}/workspace 请求体: 会话工作区目录(画地为牢)。"""
+
+    workspace: str | None = None  # None/空 = 清除(回退默认工作目录)
+
+
+@router.get("/workspaces", response_model=None)
+async def list_workspaces():
+    """返回候选工作区目录列表(画地为牢选择器用)。
+
+    Returns:
+        200: {
+            "workspaces": [str, ...],   # 候选目录(默认工作区 + 常用项目根)
+            "default": str,             # 当前默认工作目录(config system.workspace_root)
+        }
+    """
+    import os
+
+    cfg = await _load_cfg()
+    workspace_root = os.path.expandvars(
+        str(cfg.get("system", {}).get("workspace_root", ""))
+    )
+    candidates: list[str] = []
+    # 项目根常见目录(存在才返回)
+    for p in (
+        workspace_root,
+        "D:/Private agent",
+        "D:/WorkBuddy Tata",
+        os.path.expanduser("~/Desktop"),
+    ):
+        if p and os.path.isdir(p) and p not in candidates:
+            candidates.append(p)
+    return {"workspaces": candidates, "default": workspace_root}
+
+
+@router.put("/sessions/{session_id}/workspace", response_model=None)
+async def set_session_workspace(session_id: int, body: WorkspaceRequest):
+    """设置会话工作区目录(画地为牢: agent 操作范围 = 选定目录)。
+
+    workspace 为 None/空 → 清除, 回退默认工作目录。
+    路径须存在且为目录(校验失败返回 400)。
+
+    Returns:
+        200: {"ok": True, "session_id": int, "workspace": str | None}
+        400: {"error": "workspace_invalid"}
+        404: {"error": "session_not_found"}
+    """
+    import os
+
+    ws = (body.workspace or "").strip()
+    if ws:
+        ws = os.path.expandvars(ws)
+        if not os.path.isdir(ws):
+            return JSONResponse(
+                status_code=400, content={"error": "workspace_invalid"}
+            )
+    conn = await db.connect()
+    try:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM sessions WHERE id=$1", session_id
+        )
+        if exists is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        await conn.execute(
+            "UPDATE sessions SET workspace=$1, updated_at=now() WHERE id=$2",
+            ws or None, session_id,
+        )
+    finally:
+        await conn.close()
+    return {"ok": True, "session_id": session_id, "workspace": ws or None}
+
+
 @router.delete("/sessions/{session_id}", response_model=None)
 async def delete_session(session_id: int):
     """删除会话及其所有 messages(messages 表 FK ON DELETE CASCADE)。

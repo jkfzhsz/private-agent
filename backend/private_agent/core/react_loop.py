@@ -258,6 +258,10 @@ class ReactLoop:
         while self._iteration < self._max_iterations:
             self._iteration += 1
             self._transition(ReactLoopState.ACTING)
+            self._logger.info(
+                "run_turn[%s] iter=%d/%d: 开始(模型调用)",
+                self._session_id, self._iteration, self._max_iterations,
+            )
 
             # 构建消息列表
             messages = await self._context_manager.build_messages()
@@ -575,7 +579,30 @@ class ReactLoop:
                 async def _exec_plan(plan: dict) -> ToolResult:
                     async with sem:
                         try:
-                            return await plan["tool_def"].handler(plan["args"])
+                            # 项目优化(体验健壮性): 单工具执行加超时兜底,
+                            # 防止外部 API/子进程卡死导致整轮永久 pending
+                            # (默认 120s, config tools.tool_timeout_sec 可调)
+                            timeout_sec = float(
+                                (self._cfg or {})
+                                .get("tools", {})
+                                .get("tool_timeout_sec", 120)
+                            )
+                            return await asyncio.wait_for(
+                                plan["tool_def"].handler(plan["args"]),
+                                timeout=timeout_sec,
+                            )
+                        except asyncio.TimeoutError:
+                            self._logger.warning(
+                                "tool timeout after %ss: tool=%s",
+                                timeout_sec, plan["tool_name"],
+                            )
+                            return ToolResult(
+                                output="",
+                                error=(
+                                    f"tool timeout after {timeout_sec}s: "
+                                    f"{plan['tool_name']}"
+                                ),
+                            )
                         except Exception as e:  # noqa: BLE001
                             self._logger.exception(
                                 "Tool handler failed: tool=%s", plan["tool_name"]

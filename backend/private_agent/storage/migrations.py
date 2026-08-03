@@ -135,6 +135,10 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await conn.execute(
         "ALTER TABLE messages_archive ADD COLUMN IF NOT EXISTS reasoning_content TEXT"
     )
+    # 工作区选择(画地为牢): sessions.workspace 会话级工作目录
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS workspace TEXT"
+    )
     # §3.10.3 [MVP]: version_snapshots.scope CHECK 扩容(老部署补丁,含 stable_zone)
     await _migrate_version_snapshots_scope_check(conn)
 

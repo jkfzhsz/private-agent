@@ -465,6 +465,13 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
             )
             provider_name = model_id or (chain[0] if chain else None)
             provider_limits = resolve_provider_limits(cfg, provider_name)
+            # 会话工作区(画地为牢): 用户选定目录 > 默认 workspace_root
+            session_workspace = await conn.fetchval(
+                "SELECT workspace FROM sessions WHERE id = $1", session_id
+            )
+            if session_workspace:
+                cfg = {**cfg, "system": {**cfg.get("system", {}),
+                                          "workspace_root": session_workspace}}
             loop = ReactLoop(
                 session_id=session_id,
                 context_manager=cm,

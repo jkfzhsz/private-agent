@@ -23,7 +23,9 @@ CREATE TABLE sessions (
     -- M3 §7.3 会话锁定:Skill 激活后锁定版本,运行中拒绝切换
     locked_skill_name      VARCHAR(100),
     locked_skill_version   VARCHAR(20),
-    frozen_hash            VARCHAR(64)
+    frozen_hash            VARCHAR(64),
+    -- 工作区选择(画地为牢): 会话级工作目录(agent 操作范围告知层)
+    workspace              TEXT
 );
 
 CREATE INDEX idx_sessions_status ON sessions(status) WHERE archived_at IS NULL;
