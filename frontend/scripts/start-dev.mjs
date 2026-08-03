@@ -51,6 +51,7 @@ function waitForPort(url, timeoutMs = 30000) {
 }
 
 async function main() {
+  console.log(`[start] start-dev.mjs begin (node=${process.version}, pid=${process.pid}, cwd=${process.cwd()})`);
   // 0) 校验必要依赖
   const tscEntry = bin("typescript", "bin", "tsc");
   const viteEntry = bin("vite", "bin", "vite.js");

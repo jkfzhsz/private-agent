@@ -40,3 +40,7 @@ backend/.env
 
 # 沙箱工作目录(字面量 WORKSPACE 展开残留 + 正常路径)
 backend/${WORKSPACE}/
+frontend/dist/
+frontend/release/
+frontend/release2/
+frontend/release3/

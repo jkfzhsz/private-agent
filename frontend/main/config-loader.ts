@@ -30,8 +30,14 @@ export function loadSidecarConfig(configPath?: string): LoadedSidecarConfig {
   };
 }
 
-/** 探测可用的 Python 解释器: config.yaml 显式配置 > backend/.venv > python */
+/** 探测可用的 Python 解释器: config.yaml 显式配置 > 打包资源 venv > backend/.venv > python */
 function detectPythonCommand(configPath: string): string {
+  // 打包后: resourcesPath/backend/.venv/Scripts/python.exe
+  const packaged = packagedBackendDir();
+  if (packaged) {
+    const packagedPy = join(packaged, ".venv", "Scripts", "python.exe");
+    if (existsSync(packagedPy)) return packagedPy;
+  }
   // config.yaml 位于 backend/config/, 上一级即 backend 目录
   const backendDir = dirname(dirname(configPath));
   const venvPy =
@@ -42,13 +48,35 @@ function detectPythonCommand(configPath: string): string {
   return "python";
 }
 
+/** 打包后的资源目录(extraResources/backend): process.resourcesPath/backend */
+function packagedBackendDir(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { app } = require("electron") as typeof import("electron");
+    if (!app?.isPackaged) return null;
+    const p = join(app.getAppPath() ? process.resourcesPath : "", "backend");
+    return existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 function findConfigPath(): string {
-  // 优先相对进程工作目录查找 backend/config/config.yaml(frontend/ 下运行时)
+  // 打包后: resourcesPath/backend/config/config.yaml
+  const packaged = packagedBackendDir();
   const candidates = [
+    // 优先相对进程工作目录查找 backend/config/config.yaml(frontend/ 下运行时)
     join(process.cwd(), "backend", "config", "config.yaml"),
     join(process.cwd(), "..", "backend", "config", "config.yaml"),
     join(process.cwd(), "config.yaml"),
+    // 部署目录(D:\PA1.0 自包含)优先于项目根
+    "D:\\PA1.0\\backend\\config\\config.yaml",
+    // 轻度打包: 后端复用项目根目录(D:\Private agent\backend)
+    "D:\\Private agent\\backend\\config\\config.yaml",
   ];
+  if (packaged) {
+    candidates.unshift(join(packaged, "config", "config.yaml"));
+  }
   for (const candidate of candidates) {
     try {
       readFileSync(candidate, "utf-8");
@@ -59,3 +87,4 @@ function findConfigPath(): string {
   }
   throw new Error("config.yaml not found");
 }
+

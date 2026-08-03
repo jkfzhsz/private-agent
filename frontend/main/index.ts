@@ -22,6 +22,11 @@ if (process.env.PA_DISABLE_GPU === "1") {
   app.commandLine.appendSwitch("disable-gpu");
 }
 
+// Windows 普通用户/受限 token 环境下 Chromium 进程 sandbox 启动即崩
+// (退出码 2147483651, STATUS_BREAKPOINT)。本地单机个人应用, 安全模型
+// 靠工具权限确认而非进程 sandbox, 故默认禁用(打包版 exe 也必须带上)。
+app.commandLine.appendSwitch("no-sandbox");
+
 /** 轻量 .env 解析: 将 backend/.env 的 KEY=VALUE 并入 process.env(已存在的优先保留)。 */
 function loadDotEnv(filePath: string): void {
   if (!existsSync(filePath)) return;
@@ -67,11 +72,34 @@ function notifyMissingEnvAsync(): void {
 async function bootstrap(): Promise<void> {
   console.log("[main] bootstrap start");
   // 1) 加载 backend/.env(PA_DB_PASSWORD / PA_*_API_KEY 等, 供 Sidecar 继承)
-  loadDotEnv(join(__dirname, "..", "..", "backend", ".env"));
+  //    打包后 backend 在 resourcesPath/backend(只读, 仅读配置);
+  //    开发模式在项目根 backend/
+  const packaged = app.isPackaged;
+  // 轻度打包: exe 只含 Electron 壳, 后端复用 backend/ 目录
+  // 探测顺序: D:\PA1.0\backend(部署自包含) > D:\Private agent\backend(项目) > resourcesPath
+  const devBackend = join(__dirname, "..", "..", "backend");
+  const deployBackend = "D:\\PA1.0\\backend";
+  const projBackend = "D:\\Private agent\\backend";
+  const backendDir = existsSync(deployBackend)
+    ? deployBackend
+    : existsSync(projBackend)
+      ? projBackend
+      : packaged
+        ? join(process.resourcesPath, "backend")
+        : devBackend;
+  if (!existsSync(backendDir)) {
+    console.error(`[main] backend dir not found: ${backendDir}`);
+  }
+  loadDotEnv(join(backendDir, ".env"));
 
   // 2) 读取 Sidecar 配置并启动后端
   const config = loadSidecarConfig();
   console.log(`[main] Sidecar config: python=${config.pythonCommand} port=${config.port}`);
+  // 打包后: 数据目录用 userData(%APPDATA%/PrivateAgent, 可写),
+  // 后端代码目录为 backendDir; cwd 与 WORKSPACE 指向 userData(可写)
+  const dataDir = packaged ? app.getPath("userData") : config.workspaceRoot;
+  console.log(`[main] backend dir: ${backendDir}`);
+  console.log(`[main] backend data dir: ${dataDir}`);
   sidecarManager = new SidecarManager({
     pythonCommand: config.pythonCommand,
     moduleName: config.moduleName,
@@ -79,10 +107,10 @@ async function bootstrap(): Promise<void> {
     healthUrl: `http://127.0.0.1:${config.port}/health`,
     // 注入 WORKSPACE: 后端 config.yaml 的 workspace_root=${WORKSPACE},
     // 缺失会导致日志/产物目录错位、DB 连接异常
-    env: { WORKSPACE: config.workspaceRoot },
-    // 工作目录设为 backend: config.yaml 的 skills.storage.dev_dir="./skills"
-    // 等相对路径以此解析, 否则 Electron 拉起的后端 cwd=frontend → 技能加载为空
-    cwd: config.workspaceRoot,
+    env: { WORKSPACE: dataDir },
+    // 工作目录: dev=backend(相对路径解析), 打包=userData(可写;
+    // config.yaml 在 backendDir 只读, 但 cwd 决定 outputs/skills 落点)
+    cwd: dataDir,
   });
   await sidecarManager.start();
   console.log("[main] Sidecar health OK");
