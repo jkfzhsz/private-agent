@@ -95,11 +95,11 @@ async function bootstrap(): Promise<void> {
   // 2) 读取 Sidecar 配置并启动后端
   const config = loadSidecarConfig();
   console.log(`[main] Sidecar config: python=${config.pythonCommand} port=${config.port}`);
-  // 打包后: 数据目录用 userData(%APPDATA%/PrivateAgent, 可写),
-  // 后端代码目录为 backendDir; cwd 与 WORKSPACE 指向 userData(可写)
-  const dataDir = packaged ? app.getPath("userData") : config.workspaceRoot;
+  // cwd 必须指向 backend 目录: config.yaml 的 skills.storage.dev_dir="./skills"
+  // 等相对路径基于 cwd 解析, 否则技能加载为空(skill not found)。
+  // 轻度打包后端在外部可写目录(D:\PA1.0\backend / D:\Private agent\backend),
+  // cwd 与 WORKSPACE 都指向 backendDir, outputs/logs/skills 均正常落盘。
   console.log(`[main] backend dir: ${backendDir}`);
-  console.log(`[main] backend data dir: ${dataDir}`);
   sidecarManager = new SidecarManager({
     pythonCommand: config.pythonCommand,
     moduleName: config.moduleName,
@@ -107,10 +107,9 @@ async function bootstrap(): Promise<void> {
     healthUrl: `http://127.0.0.1:${config.port}/health`,
     // 注入 WORKSPACE: 后端 config.yaml 的 workspace_root=${WORKSPACE},
     // 缺失会导致日志/产物目录错位、DB 连接异常
-    env: { WORKSPACE: dataDir },
-    // 工作目录: dev=backend(相对路径解析), 打包=userData(可写;
-    // config.yaml 在 backendDir 只读, 但 cwd 决定 outputs/skills 落点)
-    cwd: dataDir,
+    env: { WORKSPACE: backendDir },
+    // 工作目录 = backend 目录(相对路径 ./skills ./outputs 据此解析)
+    cwd: backendDir,
   });
   await sidecarManager.start();
   console.log("[main] Sidecar health OK");
