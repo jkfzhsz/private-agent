@@ -60,12 +60,13 @@ if errorlevel 1 (
   timeout /t 6 /nobreak >nul
 )
 
-rem --- 4) backend port check ---
-netstat -ano | findstr /c:":8765 " >nul 2>&1
-if not errorlevel 1 (
-  echo [PA] WARNING: Backend port 8765 is already in use.
-  echo       A previous instance may still be running.
-  echo       Close it first, or the app may fail to start its own backend.
+rem --- 4) 残留进程自动清理(上次实例未正常退出时, vite/后端端口被占
+rem        会导致本次启动失败: vite 5173 in use → Electron 加载失败退出) ---
+for %%P in (8765 5173) do (
+  for /f "tokens=5" %%a in ('netstat -ano ^| findstr /c:":%%P " ^| findstr "LISTENING"') do (
+    echo [PA] Port %%P busy ^(PID %%a^) - killing leftover process...
+    taskkill /PID %%a /F >nul 2>&1
+  )
 )
 
 rem --- 5) Launch Electron (auto-spawns backend Sidecar + Vite) ---
