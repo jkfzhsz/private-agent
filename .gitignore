@@ -44,3 +44,7 @@ frontend/dist/
 frontend/release/
 frontend/release2/
 frontend/release3/
+
+# 测试产物
+backend/.pytest_results.xml
+backend/tests/.pytest_results.xml
