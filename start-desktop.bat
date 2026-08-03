@@ -64,11 +64,10 @@ echo [%time%] step3: check postgresql >> "%TRACE%"
 netstat -ano | findstr /c:":5432 " >nul 2>&1
 if errorlevel 1 (
   echo [PA] WARNING: PostgreSQL (port 5432) is not running.
-  echo       Auto-start script is in your Windows Startup folder,
-  echo       or start it manually:
-  echo         D:\PostgreSQL\16\bin\postgres.exe -D D:\PostgreSQL\16\data -p 5432
-  echo       Continuing in 6 seconds...
-  timeout /t 6 /nobreak >nul
+  echo       Starting it now (postgres.exe) ...
+  echo [%time%] postgres not running, starting... >> "%TRACE%"
+  start "PrivateAgent-PG" "D:\PostgreSQL\16\bin\postgres.exe" -D "D:\PostgreSQL\16\data" -p 5432
+  echo [%time%] postgres start issued >> "%TRACE%"
 )
 
 rem --- 4) leftover-port cleanup moved into start-dev.mjs ---
