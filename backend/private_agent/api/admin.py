@@ -1635,15 +1635,17 @@ async def upload_skill(body: SkillUploadRequest):
 
 @router.post("/skills/upload-zip", response_model=None)
 async def upload_skill_zip(file: UploadFile = File(...)):
-    """2026-08-04: 上传技能 zip 压缩包(简单方式, 无需手填 yaml)。
+    """2026-08-04: 上传技能 zip(支持集合包, 无需手填 yaml)。
 
-    支持两种包结构:
-      - 根目录直接含 skill.yaml(my_skill.zip/skill.yaml)
-      - 唯一子目录含 skill.yaml(my_skill.zip/my_skill/skill.yaml)
+    三种模式(按 zip 内容自动判定):
+      single     - 1 个 skill.yaml(根/子目录)     → {"name","path","files"}
+      collection - 多个 skill.yaml(技能集合包)     → {"mode":"collection","skills":[...],"total":N}
+      auto       - 无 skill.yaml 的素材库
+                    (如 awesome-design-md: design-md/<brand>/DESIGN.md)
+                    自动为每个含文档的子目录生成 skill.yaml → {"mode":"auto","skills":[...]}
 
     Returns:
-        200: {"name": str, "path": str, "files": int}
-        400: {"error": "invalid_zip" | "skill_yaml_not_found" | "invalid_skill_yaml" | "zip_path_traversal"}
+        200: 见上; 400: {"error": invalid_zip|invalid_skill_yaml|zip_path_traversal|skill_yaml_not_found}
         500: {"error": "skill_save_failed"}
     """
     import io as _io
@@ -1677,63 +1679,163 @@ async def upload_skill_zip(file: UploadFile = File(...)):
             )
         members.append((info, norm))
 
-    # 定位 skill.yaml: 根目录优先, 其次唯一子目录; 大小写不敏感(SKILL.yaml 兼容)
+    cfg = loader.load_config()
+    dev_dir = Path(cfg.get("skills", {}).get("storage", {}).get("dev_dir", "./skills"))
+    if not dev_dir.is_absolute():
+        dev_dir = Path.cwd() / dev_dir
+
+    # 收集所有 skill.yaml(任意深度, 大小写不敏感), 按技能根分组
     yaml_hits = [
         (i, n) for i, n in members
         if n.lower() == "skill.yaml" or n.lower().endswith("/skill.yaml")
     ]
-    if not yaml_hits:
-        # 2026-08-04: 错误信息带 zip 内实际文件清单, 用户可立即定位问题
-        listing = ", ".join(n for _, n in members[:10]) or "(空压缩包)"
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "skill_yaml_not_found",
-                "detail": f"压缩包内未找到 skill.yaml, 实际文件: {listing}",
-            },
-        )
-    chosen = min(yaml_hits, key=lambda t: t[1].count("/"))  # 深度最小的
-    yaml_info, yaml_norm = chosen
-    base_prefix = yaml_norm[: -len("skill.yaml")]  # 技能目录前缀(可能为空)
+    groups: dict[str, tuple] = {}
+    for info, norm in yaml_hits:
+        root = norm[: -len("skill.yaml")]  # 技能根前缀(含尾部斜杠或空)
+        groups.setdefault(root, (info, norm))
 
-    try:
-        skill_yaml_text = zf.read(yaml_info).decode("utf-8")
-        parsed = yaml.safe_load(skill_yaml_text)
-        if not isinstance(parsed, dict) or not parsed.get("name"):
-            return JSONResponse(status_code=400, content={"error": "invalid_skill_yaml"})
-        name = str(parsed["name"]).strip().lower()
-        if not _re.fullmatch(r"[a-z0-9_]+", name):
-            return JSONResponse(status_code=400, content={"error": "invalid_skill_name"})
-    except Exception:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": "invalid_skill_yaml"})
+    if groups:
+        installed = []
+        for root, (info, norm) in groups.items():
+            try:
+                yaml_text = zf.read(info).decode("utf-8")
+                parsed = yaml.safe_load(yaml_text)
+                if not isinstance(parsed, dict) or not parsed.get("name"):
+                    continue
+                name = str(parsed["name"]).strip().lower()
+                if not _re.fullmatch(r"[a-z0-9_]+", name):
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                target = dev_dir / name
+                target.mkdir(parents=True, exist_ok=True)
+                written = 0
+                for i2, n2 in members:
+                    if root and not n2.startswith(root):
+                        continue
+                    rel = n2[len(root):] if root else n2
+                    if not rel or rel.lower() == "skill.yaml":
+                        continue
+                    dest = (target / rel).resolve()
+                    if not str(dest).startswith(str(target.resolve()) + os.sep):
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(zf.read(i2))
+                    written += 1
+                (target / "skill.yaml").write_text(yaml_text, encoding="utf-8")
+                installed.append(
+                    {"name": name, "path": str(target), "files": written + 1}
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        if not installed:
+            return JSONResponse(status_code=500, content={"error": "skill_save_failed"})
+        if len(installed) == 1:
+            return installed[0]
+        return {
+            "mode": "collection",
+            "skills": installed,
+            "total": len(installed),
+            "note": "检测到技能集合包, 已批量安装",
+        }
 
-    try:
-        cfg = loader.load_config()
-        dev_dir = Path(cfg.get("skills", {}).get("storage", {}).get("dev_dir", "./skills"))
-        if not dev_dir.is_absolute():
-            dev_dir = Path.cwd() / dev_dir
-        target_dir = dev_dir / name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        written = 0
-        for info, norm in members:
-            # 只解压属于该技能的文件(排除其它子目录技能)
-            if base_prefix and not norm.startswith(base_prefix):
-                continue
-            rel = norm[len(base_prefix):] if base_prefix else norm
-            if not rel or rel == "skill.yaml":
-                # 根 skill.yaml 已单独写
-                continue
-            dest = (target_dir / rel).resolve()
-            if not str(dest).startswith(str(target_dir.resolve()) + os.sep):
-                continue  # 越界防御(不应发生, 已在上层校验)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(zf.read(info))
-            written += 1
-        (target_dir / "skill.yaml").write_text(skill_yaml_text, encoding="utf-8")
-        written += 1
-        return {"name": name, "path": str(target_dir), "files": written}
-    except Exception:  # noqa: BLE001
-        return JSONResponse(status_code=500, content={"error": "skill_save_failed"})
+    # 无 skill.yaml → 素材库自动技能化(如 awesome-design-md)
+    auto = _auto_generate_skills(zf, members, dev_dir)
+    if auto:
+        return {
+            "mode": "auto",
+            "skills": auto,
+            "total": len(auto),
+            "note": "素材库已自动转换为技能(skill.yaml 自动生成, 可编辑调整)",
+        }
+    listing = ", ".join(n for _, n in members[:10]) or "(空压缩包)"
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "skill_yaml_not_found",
+            "detail": f"压缩包内未找到 skill.yaml, 实际文件: {listing}",
+        },
+    )
+
+
+def _ext_of(name: str) -> str:
+    """取小写扩展名(无扩展名返回空)。"""
+    slash = name.rfind("/")
+    dot = name.rfind(".")
+    return name[dot:].lower() if dot > slash else ""
+
+
+def _auto_generate_skills(zf, members, dev_dir):
+    """素材库自动技能化(2026-08-04 集合包支持)。
+
+    规则: 每个"含文档文件(.md/.txt/.yaml/.json/.csv)的非隐藏子目录"生成一个
+    读取型技能(file_read), 目录名规范化为技能名, 目录内文件全部装入。
+    根目录散文件/隐藏目录(.github 等)自动跳过。
+    """
+    import re as _re
+
+    DOC_EXT = {".md", ".txt", ".yaml", ".yml", ".json", ".csv"}
+    skill_files: dict[str, list] = {}
+    for info, norm in members:
+        if _ext_of(norm) not in DOC_EXT:
+            continue
+        parts = norm.split("/")
+        if len(parts) < 2:
+            continue  # 根目录散文件
+        parent_parts = parts[:-1]
+        # 修复(2026-08-04): 顶层目录内容(GitHub zip 的 repo_root/README.md)
+        # 不是技能; 隐藏目录(.github 等)任一段以 . 开头也跳过
+        if len(parent_parts) < 2:
+            continue
+        if any(p.startswith(".") for p in parent_parts):
+            continue
+        parent = "/".join(parent_parts)  # 文件直接所在目录 = 技能根
+        skill_files.setdefault(parent, []).append((info, norm))
+    if not skill_files:
+        return []
+
+    used: set[str] = set()
+    installed = []
+    # 文件多的目录优先(主规范优先)
+    for root, files in sorted(skill_files.items(), key=lambda kv: -len(kv[1])):
+        base = root.rsplit("/", 1)[-1]
+        name = _re.sub(r"[^a-z0-9_]", "_", base.lower()).strip("_") or "design_ref"
+        if name in used:
+            i = 2
+            while f"{name}_{i}" in used:
+                i += 1
+            name = f"{name}_{i}"
+        used.add(name)
+        try:
+            target = dev_dir / name
+            target.mkdir(parents=True, exist_ok=True)
+            written = 0
+            for info, norm in files:
+                rel = norm[len(root) + 1:]
+                if not rel:
+                    continue
+                dest = (target / rel).resolve()
+                if not str(dest).startswith(str(target.resolve()) + os.sep):
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(info))
+                written += 1
+            skill_yaml = (
+                f"name: {name}\n"
+                "version: 1.0.0\n"
+                f"scenario: 需要参考或实现与 {base} 相关的设计风格/UI 规范时\n"
+                f"description: {base} 设计规范参考(素材库自动转换, 可编辑 skill.yaml 调整)\n"
+                "tools:\n"
+                "  - file_read\n"
+            )
+            (target / "skill.yaml").write_text(skill_yaml, encoding="utf-8")
+            installed.append(
+                {"name": name, "path": str(target), "files": written + 1}
+            )
+        except Exception:  # noqa: BLE001
+            continue
+    return installed
 
 
 def _posix_norm(name: str) -> str:

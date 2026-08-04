@@ -361,7 +361,13 @@ function SkillsSection(): JSX.Element {
         const detail = data.detail ?? data.error ?? `HTTP ${resp.status}`;
         throw new Error(String(detail));
       }
-      setZipMsg(`✅ 技能「${data.name}」上传成功(${data.files} 个文件)`);
+      // 2026-08-04: 支持集合包/素材库自动技能化返回(skills 数组)
+      if (Array.isArray(data.skills) && data.skills.length > 0) {
+        const names = data.skills.map((s: { name: string }) => s.name).join(", ");
+        setZipMsg(`✅ 已导入 ${data.skills.length} 个技能: ${names}`);
+      } else {
+        setZipMsg(`✅ 技能「${data.name}」上传成功(${data.files} 个文件)`);
+      }
       await load();
     } catch (err) {
       setZipMsg(`上传失败: ${String(err)}`);
