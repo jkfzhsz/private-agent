@@ -1462,7 +1462,7 @@ export default function App(): JSX.Element {
           </div>
           </div>
           )}
-          {view === "settings" && <SettingsView />}
+          {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} />}
           {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
           {view === "memory" && <MemoryView sessionId={realSessionId ?? sessionId} />}
         </main>

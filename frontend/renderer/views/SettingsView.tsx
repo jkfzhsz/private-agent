@@ -28,7 +28,7 @@ interface McpServer {
   assemble?: boolean;
 }
 
-export default function SettingsView(): JSX.Element {
+export default function SettingsView({ sessionId = 1 }: { sessionId?: number }): JSX.Element {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [fallbackChain, setFallbackChain] = useState<string[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
@@ -121,8 +121,8 @@ export default function SettingsView(): JSX.Element {
       {/* 阶段二批次 1: admin 鉴权 token 管理 */}
       <SecuritySection />
 
-      {/* 阶段三批次 1(T1.2): 会话级权限模式切换 */}
-      <PermissionModeSection />
+      {/* 阶段三批次 1(T1.2): 会话级权限模式切换(使用当前会话 id) */}
+      <PermissionModeSection sessionId={sessionId} />
 
       {/* 主题壁纸 */}
       <WallpaperSection />
@@ -214,14 +214,14 @@ function SecuritySection(): JSX.Element {
 // 权限模式(阶段三批次1 T1.2): 会话级权限模式切换(default/plan/acceptEdits/cautious/deny_all)
 // ──────────────────────────────────────────────────────────────────────────────
 
-function PermissionModeSection(): JSX.Element {
+function PermissionModeSection({ sessionId }: { sessionId: number }): JSX.Element {
   const [mode, setMode] = useState<string>("default");
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<string>("");
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const resp = await adminFetch(`${API_BASE}/settings/permission?session_id=1`);
+      const resp = await adminFetch(`${API_BASE}/settings/permission?session_id=${sessionId}`);
       if (resp.ok) {
         const data = await resp.json();
         setMode(data.mode ?? "default");
@@ -230,7 +230,7 @@ function PermissionModeSection(): JSX.Element {
     } catch {
       setStatus("⚠️ 权限模式加载失败");
     }
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     void load();
@@ -241,7 +241,7 @@ function PermissionModeSection(): JSX.Element {
       const resp = await adminFetch(`${API_BASE}/settings/permission`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: 1, mode: m }),
+        body: JSON.stringify({ session_id: sessionId, mode: m }),
       });
       if (resp.ok) {
         setMode(m);
@@ -272,11 +272,14 @@ function PermissionModeSection(): JSX.Element {
             style={{
               padding: "6px 14px",
               borderRadius: 8,
-              border: m === mode ? "2px solid var(--accent)" : "1px solid var(--border)",
-              background: m === mode ? "var(--accent)" : "var(--panel-bg)",
+              // 2026-08-04 修复: --accent 未定义导致选中按钮白底白字,
+              // 改用 --gradient-indigo(蓝紫渐变) + 加粗 + #fff 文字,对比清晰。
+              border: m === mode ? "2px solid var(--gradient-indigo)" : "1px solid var(--border)",
+              background: m === mode ? "var(--gradient-indigo)" : "var(--panel-bg)",
               color: m === mode ? "#fff" : "var(--text-primary)",
               fontSize: 12,
               cursor: "pointer",
+              fontWeight: m === mode ? 600 : 400,
             }}
           >
             {m}
@@ -912,6 +915,32 @@ function McpRow({
     }
   };
 
+  // 2026-08-04 设置页补齐: "启用"开关 —— enabled=false 时 server 整体停用
+  const toggleEnabled = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const next = !(server.enabled !== false);
+      const resp = await adminFetch(
+        `${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}/enabled`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: next }),
+        }
+      );
+      if (!resp.ok) {
+        setMsg("切换失败");
+        return;
+      }
+      onChange();
+    } catch (err) {
+      setMsg(`切换失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.5)" }}>
       <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{server.id}</span>
@@ -921,6 +950,19 @@ function McpRow({
       <span style={{ fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
         {server.url || [server.command, ...(server.args ?? [])].join(" ")}
       </span>
+      {/* 2026-08-04 补齐: 启用/禁用开关 */}
+      <label
+        style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--text-secondary)", flexShrink: 0, cursor: "pointer" }}
+        title={server.enabled !== false ? "已启用" : "已停用(整体不生效)"}
+      >
+        <input
+          type="checkbox"
+          checked={server.enabled !== false}
+          onChange={() => void toggleEnabled()}
+          disabled={busy}
+        />
+        启用
+      </label>
       <label
         style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--text-secondary)", flexShrink: 0, cursor: "pointer" }}
         title={server.assemble !== false ? "工具已装配进对话, 模型可直接调用" : "已关闭: 该 server 工具不进入对话"}
@@ -1404,18 +1446,23 @@ function WallpaperSection(): JSX.Element {
   const [rotate, setRotate] = useState(0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // 2026-08-04 加固: video/img 加载失败时显示提示(原代码静默失败用户看不到原因)
+  const [loadError, setLoadError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
+    setLoadError(null);
     try {
       const resp = await adminFetch(`${API_BASE}/wallpaper`);
       const data = await resp.json();
-      setWallpaper(
-        data.wallpaper
-          ? `${FILES_BASE}/${data.wallpaper.split("/").pop()}?t=${Date.now()}`
-          : null
-      );
-      setWpType(data.type === "video" ? "video" : "image");
+      if (data.wallpaper) {
+        // 用 127.0.0.1 避免 Electron IPv6(::1) 解析坑; 加时间戳防浏览器缓存
+        const url = `${FILES_BASE}/${data.wallpaper.split("/").pop()}?t=${Date.now()}`;
+        setWallpaper(url);
+        setWpType(data.type === "video" ? "video" : "image");
+      } else {
+        setWallpaper(null);
+      }
       if (data.style) {
         setFit(data.style.fit === "contain" ? "contain" : "cover");
         setPosX(Number(data.style.position_x) || 50);
@@ -1548,6 +1595,10 @@ function WallpaperSection(): JSX.Element {
               loop
               muted
               playsInline
+              onError={() =>
+                setLoadError(`视频加载失败: ${wallpaper}(检查后端 sidecar 是否运行)`)
+              }
+              onLoadedData={() => setLoadError(null)}
               style={{
                 width: "100%",
                 height: "100%",
@@ -1562,6 +1613,10 @@ function WallpaperSection(): JSX.Element {
             <img
               src={wallpaper}
               alt="当前壁纸"
+              onError={() =>
+                setLoadError(`图片加载失败: ${wallpaper}(检查后端 sidecar 是否运行)`)
+              }
+              onLoad={() => setLoadError(null)}
               style={{
                 width: "100%",
                 height: "100%",
@@ -1717,6 +1772,10 @@ function WallpaperSection(): JSX.Element {
             </button>
             {msg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{msg}</span>}
           </div>
+          {/* 2026-08-04: 资源加载失败时直接显示原因,避免静默空白 */}
+          {loadError && (
+            <div style={{ fontSize: 11, color: "#d32f2f", marginTop: 4 }}>{loadError}</div>
+          )}
         </div>
       </div>
     </div>

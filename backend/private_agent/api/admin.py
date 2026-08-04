@@ -1027,6 +1027,10 @@ async def update_permission_config(body: PermissionModeUpdateRequest):
 
     写入 sessions.permission_mode; 运行中 PermissionManager 在下一轮
     user_message 时由 _sync_permission_manager 同步(模式变化清缓存)。
+
+    修复(2026-08-04 设置页排查): 原 UPDATE 在会话不存在时 404, 而实际
+    会话 id 非 1(会话被删除/重建后)导致设置页权限模式切换永远失败 →
+    改 upsert, 任何 session_id 都可设置(不存在则创建占位会话记录)。
     """
     from private_agent.tools.permission_manager import PERMISSION_MODES
 
@@ -1037,12 +1041,14 @@ async def update_permission_config(body: PermissionModeUpdateRequest):
         )
     conn = await db.connect()
     try:
-        updated = await conn.execute(
-            "UPDATE sessions SET permission_mode = $1 WHERE id = $2",
-            body.mode, body.session_id,
+        await conn.execute(
+            """
+            INSERT INTO sessions (id, permission_mode, title)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (id) DO UPDATE SET permission_mode = EXCLUDED.permission_mode
+            """,
+            body.session_id, body.mode, f"session-{body.session_id}",
         )
-        if updated == "UPDATE 0":
-            raise HTTPException(status_code=404, detail="session not found")
     finally:
         await conn.close()
     return {"status": "ok", "session_id": body.session_id, "mode": body.mode}
@@ -2036,6 +2042,51 @@ async def set_mcp_assemble(name: str, body: McpAssembleRequest):
     finally:
         await conn.close()
     return {"ok": True, "server": name, "assemble": body.assemble}
+
+
+class McpEnabledRequest(BaseModel):
+    """PUT /settings/mcp/{name}/enabled 请求体(2026-08-04 设置页补齐)。"""
+
+    enabled: bool
+
+
+@router.put("/settings/mcp/{name}/enabled", response_model=None)
+async def set_mcp_enabled(name: str, body: McpEnabledRequest):
+    """设置 MCP server 启用/禁用(2026-08-04 设置页排查补齐)。
+
+    与 assemble(装配到对话)区分: enabled=false 时该 server 整体停用
+    (含测试/探活); assemble=false 仅工具不进对话。存储于 config_runtime。
+    """
+    import json as _json
+
+    conn = await db.connect()
+    try:
+        row = await conn.fetchval(
+            "SELECT value FROM config_runtime WHERE key = 'tools.mcp.servers'"
+        )
+        if row:
+            servers = _json.loads(row) if isinstance(row, str) else row
+        else:
+            cfg = await _load_cfg()
+            servers = list(cfg.get("tools", {}).get("mcp", {}).get("servers", []))
+
+        target = next(
+            (
+                s for s in servers
+                if isinstance(s, dict) and (s.get("id") == name or s.get("name") == name)
+            ),
+            None,
+        )
+        if target is None:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "server": name, "error": "server_not_found"},
+            )
+        target["enabled"] = body.enabled
+        await _set_runtime(conn, "tools.mcp.servers", servers)
+    finally:
+        await conn.close()
+    return {"ok": True, "server": name, "enabled": body.enabled}
 
 
 @router.post("/settings/mcp/{name}/test", response_model=None)
