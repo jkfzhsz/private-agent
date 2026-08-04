@@ -170,8 +170,9 @@ tools:
     # 对话流畅度优化(方向一): skill → MCP server 绑定。
     # 会话激活某 skill 时只装配绑定列表内的 server(支持 * 通配),
     # 工具池从全量收敛到 skill 相关子集; 未列出的 skill 装配全部(兼容旧行为)。
+    # 注意: 绑定不宜过窄 —— 工作模式也常问行情/新闻, 故 office 保留常用金融 MCP。
     skill_binding:
-      office: []
+      office: ["hexin-ifind-ds-stock-mcp", "hexin-ifind-ds-index-mcp", "hexin-ifind-ds-news-mcp"]
       data_analysis: ["hexin-ifind-ds-*", "mempalace"]
       frontend_design: ["mempalace"]
   # 对话流畅度优化(方向一): 每轮动态 top-N 工具注入(避免全量 schema)
