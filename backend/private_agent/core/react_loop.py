@@ -650,16 +650,33 @@ class ReactLoop:
                 async def _exec_plan(plan: dict) -> ToolResult:
                     async with sem:
                         try:
-                            # 项目优化(体验健壮性): 单工具执行加超时兜底,
-                            # 防止外部 API/子进程卡死导致整轮永久 pending
-                            # (默认 120s, config tools.tool_timeout_sec 可调)
+                            # T-1(架构修订 A.1.4): 路径校验由服务端强制 ——
+                            # 覆盖 LLM 提供的 data_dir/workspace 为会话工作区,
+                            # 防止模型省略该字段跳过 file_read/write 路径校验。
+                            args = dict(plan["args"])
+                            ws_root = os.path.expandvars(
+                                str(
+                                    (self._cfg or {})
+                                    .get("system", {})
+                                    .get("workspace_root", "")
+                                )
+                            )
+                            if ws_root:
+                                args["data_dir"] = ws_root
+                                args["workspace"] = ws_root
+                            # T-2(架构修订 A.2.5): 工具执行超时按类别分级
+                            # (config tools.timeout.categories), 不再读死键
+                            # tool_timeout_sec(恒 120s)。
+                            t_cfg = (self._cfg or {}).get("tools", {}).get(
+                                "timeout", {}
+                            )
+                            default_t = float(t_cfg.get("default_sec", 30))
+                            cats = t_cfg.get("categories", {}) or {}
                             timeout_sec = float(
-                                (self._cfg or {})
-                                .get("tools", {})
-                                .get("tool_timeout_sec", 120)
+                                cats.get(plan["tool_name"], default_t)
                             )
                             return await asyncio.wait_for(
-                                plan["tool_def"].handler(plan["args"]),
+                                plan["tool_def"].handler(args),
                                 timeout=timeout_sec,
                             )
                         except asyncio.TimeoutError:
