@@ -130,7 +130,7 @@ class MCPToolManager:
                 command=svc.get("command", ""),
                 args=list(svc.get("args") or []),
                 url=svc.get("url", ""),
-                timeout_sec=float(svc.get("timeout_sec", 30.0)),
+                timeout_sec=float(svc.get("timeout_sec", 12.0)),  # 30→12s 快速失败
                 protocol_version=svc.get("protocol_version", "auto"),
                 auth_token=auth_token,
             )
