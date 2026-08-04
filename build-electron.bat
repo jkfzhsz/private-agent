@@ -15,7 +15,7 @@ set "FRONTEND_DIR=%~dp0frontend"
 set "RCEDIT_DIR=%FRONTEND_DIR%\build\rcedit"
 set "OUTPUT_DIR=%FRONTEND_DIR%\release2"
 
-echo [1/4] Cleaning leftover build lock files...
+echo [1/5] Cleaning leftover build lock files...
 if exist "%OUTPUT_DIR%\win-unpacked.tmp.lock" (
     del /q "%OUTPUT_DIR%\win-unpacked.tmp.lock"
     echo   - removed leftover lock
@@ -25,7 +25,7 @@ if exist "%OUTPUT_DIR%\win-unpacked.tmp" (
     echo   - removed unfinished temp output dir
 )
 
-echo [2/4] Checking local rcedit (icon injection tool)...
+echo [2/5] Checking local rcedit (icon injection tool)...
 if not exist "%RCEDIT_DIR%\rcedit-x64.exe" (
     echo   ERROR: missing "%RCEDIT_DIR%\rcedit-x64.exe"
     echo   Run scripts/regen_icons.py first, or restore frontend/build/rcedit/
@@ -35,8 +35,20 @@ if not exist "%RCEDIT_DIR%\rcedit-x64.exe" (
 set "ELECTRON_BUILDER_RCEDIT_PATH=%RCEDIT_DIR%"
 echo   - using local rcedit: %RCEDIT_DIR%
 
-echo [3/4] Running electron-builder (win + nsis)...
+echo [3/5] Building frontend (tsc main + vite)...
 cd /d "%FRONTEND_DIR%"
+call npm run build
+if errorlevel 1 (
+    echo   ERROR: frontend build failed
+    pause
+    exit /b 1
+)
+
+echo [4/5] Running electron-builder (win + nsis)...
+if exist "%OUTPUT_DIR%\win-unpacked" (
+    rmdir /s /q "%OUTPUT_DIR%\win-unpacked" 2>nul
+    echo   - removed old win-unpacked (avoid stale icon cache)
+)
 call npx electron-builder --win
 if errorlevel 1 (
     echo   ERROR: packaging failed, see messages above
@@ -44,7 +56,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [4/4] Done!
+echo [5/5] Done!
 echo   Installer:   %OUTPUT_DIR%\Private Agent Setup *.exe
 echo   Portable:    %OUTPUT_DIR%\win-unpacked\Private Agent.exe
 echo   Verify: desktop shortcut / taskbar / Alt+Tab all show new PA icon

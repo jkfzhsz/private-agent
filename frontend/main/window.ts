@@ -17,6 +17,9 @@ export function createWindow(): BrowserWindow {
     title: "私人智能体",
     autoHideMenuBar: true, // 隐藏默认英文菜单栏(File/Edit/View...), 界面全中文
     backgroundColor: "#eef1f8", // 与首页底色一致, 避免加载白闪
+    // 窗口左上角/任务栏图标(开发与生产均生效; 打包后 exe/桌面快捷方式
+    // 图标由 electron-builder 的 win.icon 控制 —— 见 package.json build 段)
+    icon: join(__dirname, "..", "build", "icon-256.png"),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
       contextIsolation: true,
