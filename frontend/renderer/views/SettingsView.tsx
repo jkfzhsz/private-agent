@@ -2,6 +2,8 @@
 // 模型 provider 可编辑(地址/模型/开关/API Key/测试连通性) + MCP servers 增删测 + 主题壁纸
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { adminFetch, getAdminToken, isAdminTokenConfigured, setAdminToken } from "../utils/apiClient";
+
 const API_BASE = "http://localhost:8765/admin";
 const FILES_BASE = "http://127.0.0.1:8765/files/outputs";
 
@@ -36,8 +38,8 @@ export default function SettingsView(): JSX.Element {
   const load = useCallback(async (): Promise<void> => {
     try {
       const [provResp, mcpResp] = await Promise.all([
-        fetch(`${API_BASE}/settings/providers`),
-        fetch(`${API_BASE}/mcp/servers`),
+        adminFetch(`${API_BASE}/settings/providers`),
+        adminFetch(`${API_BASE}/mcp/servers`),
       ]);
       const provData = await provResp.json();
       const mcpData = await mcpResp.json();
@@ -57,7 +59,7 @@ export default function SettingsView(): JSX.Element {
 
   const handleDeleteProvider = async (name: string): Promise<void> => {
     try {
-      const resp = await fetch(`${API_BASE}/settings/providers/${encodeURIComponent(name)}`, {
+      const resp = await adminFetch(`${API_BASE}/settings/providers/${encodeURIComponent(name)}`, {
         method: "DELETE",
       });
       const data = await resp.json();
@@ -116,6 +118,9 @@ export default function SettingsView(): JSX.Element {
 
       {error && <div style={{ fontSize: 12, color: "var(--danger-text)" }}>加载失败: {error}</div>}
 
+      {/* 阶段二批次 1: admin 鉴权 token 管理 */}
+      <SecuritySection />
+
       {/* 主题壁纸 */}
       <WallpaperSection />
 
@@ -124,6 +129,80 @@ export default function SettingsView(): JSX.Element {
 
       {/* 关于与更新 */}
       <UpdateSection />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 安全管理: admin 控制面鉴权 token(X-Admin-Token)
+// Electron 桌面版由主进程从 backend/.env 自动注入, 无需配置;
+// 浏览器(dev)模式需在此录入 backend/.env 中的 PA_ADMIN_TOKEN 值。
+// ──────────────────────────────────────────────────────────────────────────────
+
+function SecuritySection(): JSX.Element {
+  const [tokenInput, setTokenInput] = useState(getAdminToken());
+  const [status, setStatus] = useState<string>(
+    isAdminTokenConfigured()
+      ? "已配置(控制面请求自动携带 token)"
+      : "未配置: 浏览器模式需录入 token, 否则控制面请求返回 401",
+  );
+
+  // 任一请求 401 时提示(adminFetch 派发 pa:auth-required)
+  useEffect(() => {
+    const onAuthRequired = (): void => {
+      setStatus("⚠️ 控制面请求被拒(401): 请录入正确的 admin token(backend/.env 的 PA_ADMIN_TOKEN)");
+    };
+    window.addEventListener("pa:auth-required", onAuthRequired);
+    return () => window.removeEventListener("pa:auth-required", onAuthRequired);
+  }, []);
+
+  const save = (): void => {
+    const t = tokenInput.trim();
+    setAdminToken(t);
+    setStatus(t ? "已保存并生效(控制面请求将自动携带)" : "已清空 token");
+  };
+
+  return (
+    <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
+      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+        安全管理
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
+        控制面鉴权 token(X-Admin-Token) · 桌面版自动注入无需配置 · 浏览器(dev)模式手动录入
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="password"
+          value={tokenInput}
+          onChange={(e) => setTokenInput(e.target.value)}
+          placeholder="粘贴 PA_ADMIN_TOKEN(backend/.env)"
+          style={{
+            flex: 1,
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: "var(--panel-bg)",
+            color: "var(--text-primary)",
+            fontSize: 13,
+            fontFamily: "monospace",
+          }}
+        />
+        <button
+          onClick={save}
+          style={{
+            padding: "8px 16px",
+            borderRadius: 8,
+            border: "none",
+            background: "var(--accent)",
+            color: "#fff",
+            fontSize: 13,
+            cursor: "pointer",
+          }}
+        >
+          保存
+        </button>
+      </div>
+      <div style={{ fontSize: 12, marginTop: 8, color: "var(--text-tertiary)" }}>{status}</div>
     </div>
   );
 }
@@ -150,7 +229,7 @@ function SkillsSection(): JSX.Element {
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      const resp = await fetch("http://127.0.0.1:8765/admin/skills");
+      const resp = await adminFetch("http://127.0.0.1:8765/admin/skills");
       const data = await resp.json();
       setSkills(Array.isArray(data) ? data : []);
     } catch {
@@ -171,7 +250,7 @@ function SkillsSection(): JSX.Element {
       return;
     }
     try {
-      const resp = await fetch("http://127.0.0.1:8765/admin/skills/upload", {
+      const resp = await adminFetch("http://127.0.0.1:8765/admin/skills/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -369,7 +448,7 @@ function ProviderRow({
       body.max_input_tokens = maxInput;
       body.max_output_tokens = maxOutput;
       body.max_turns = maxTurns;
-      const resp = await fetch(`${API_BASE}/settings/providers/${provider.name}`, {
+      const resp = await adminFetch(`${API_BASE}/settings/providers/${provider.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -390,7 +469,7 @@ function ProviderRow({
     setBusy(true);
     setMsg(null);
     try {
-      const resp = await fetch(`${API_BASE}/settings/providers/${provider.name}/test`, {
+      const resp = await adminFetch(`${API_BASE}/settings/providers/${provider.name}/test`, {
         method: "POST",
       });
       const data = await resp.json();
@@ -598,7 +677,7 @@ function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
         max_turns: maxTurns,
       };
       if (apiKey.trim()) body.api_key = apiKey.trim();
-      const resp = await fetch(`${API_BASE}/settings/providers`, {
+      const resp = await adminFetch(`${API_BASE}/settings/providers`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -695,7 +774,7 @@ function McpRow({
     setBusy(true);
     setMsg(null);
     try {
-      const resp = await fetch(`${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}/test`, {
+      const resp = await adminFetch(`${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}/test`, {
         method: "POST",
       });
       const data = await resp.json();
@@ -715,7 +794,7 @@ function McpRow({
     setBusy(true);
     setMsg(null);
     try {
-      await fetch(`${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}`, { method: "DELETE" });
+      await adminFetch(`${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}`, { method: "DELETE" });
       onChange();
     } catch (err) {
       setMsg(`删除失败: ${String(err)}`);
@@ -729,7 +808,7 @@ function McpRow({
     setMsg(null);
     try {
       const next = !(server.assemble !== false);
-      const resp = await fetch(
+      const resp = await adminFetch(
         `${API_BASE}/settings/mcp/${encodeURIComponent(server.id)}/assemble`,
         {
           method: "PUT",
@@ -806,7 +885,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
     setBusy(true);
     setMsg(null);
     try {
-      const resp = await fetch(`${API_BASE}/settings/mcp/import-json`, {
+      const resp = await adminFetch(`${API_BASE}/settings/mcp/import-json`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config_json: jsonText }),
@@ -855,7 +934,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
       if (authToken.trim()) {
         body.auth_token = authToken.trim();
       }
-      const resp = await fetch(`${API_BASE}/settings/mcp`, {
+      const resp = await adminFetch(`${API_BASE}/settings/mcp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -1039,7 +1118,7 @@ function SandboxSection(): JSX.Element {
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const resp = await fetch(`${API_BASE}/settings/sandbox`);
+      const resp = await adminFetch(`${API_BASE}/settings/sandbox`);
       const data = await resp.json();
       setCfg(data);
       setMsg(null);
@@ -1056,7 +1135,7 @@ function SandboxSection(): JSX.Element {
     if (!cfg) return;
     setBusy(true);
     try {
-      const resp = await fetch(`${API_BASE}/settings/sandbox`, {
+      const resp = await adminFetch(`${API_BASE}/settings/sandbox`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1084,7 +1163,7 @@ function SandboxSection(): JSX.Element {
     setBusy(true);
     setTestResult("测试中...");
     try {
-      const resp = await fetch(`${API_BASE}/settings/sandbox/test`, {
+      const resp = await adminFetch(`${API_BASE}/settings/sandbox/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1245,7 +1324,7 @@ function WallpaperSection(): JSX.Element {
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const resp = await fetch(`${API_BASE}/wallpaper`);
+      const resp = await adminFetch(`${API_BASE}/wallpaper`);
       const data = await resp.json();
       setWallpaper(
         data.wallpaper
@@ -1273,7 +1352,7 @@ function WallpaperSection(): JSX.Element {
     setBusy(true);
     setMsg(null);
     try {
-      const resp = await fetch(`${API_BASE}/wallpaper/style`, {
+      const resp = await adminFetch(`${API_BASE}/wallpaper/style`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1319,7 +1398,7 @@ function WallpaperSection(): JSX.Element {
         reader.onerror = () => reject(new Error("读取失败"));
         reader.readAsDataURL(file);
       });
-      const resp = await fetch(`${API_BASE}/wallpaper`, {
+      const resp = await adminFetch(`${API_BASE}/wallpaper`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data_url: dataUrl }),
@@ -1345,7 +1424,7 @@ function WallpaperSection(): JSX.Element {
     setBusy(true);
     setMsg(null);
     try {
-      await fetch(`${API_BASE}/wallpaper`, { method: "DELETE" });
+      await adminFetch(`${API_BASE}/wallpaper`, { method: "DELETE" });
       setWallpaper(null);
       setMsg("已恢复默认背景");
     } catch {

@@ -220,6 +220,26 @@ def test_update_ws_offset_overwrites_previous_value():
     assert asyncio.run(_run()) == 8
 
 
+def test_update_ws_offset_no_rollback_on_stale_ack():
+    """C-4(架构修订 P0-5): 单调保护 —— stale ack 不允许 offset 回退。
+
+    乱序/重复 ACK(turn 从 8 回退到 5)必须被忽略, 否则重放会重复推送
+    已确认事件, 且权威 offset 被拉低导致后续补发错乱。
+    """
+    _setup_schema()
+
+    async def _run() -> int:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            await ws_offset.update_ws_offset(conn, session_id=1, turn=8)
+            await ws_offset.update_ws_offset(conn, session_id=1, turn=5)  # stale
+            return await ws_offset.get_ws_offset(conn, session_id=1)
+        finally:
+            await conn.close()
+
+    assert asyncio.run(_run()) == 8
+
+
 def test_ws_offset_isolates_by_session():
     """不同 session 的 ws_offset 互不影响。"""
     _setup_schema()

@@ -2,6 +2,8 @@
 // 统计展示 + 文档上传(接 /admin/knowledge/stats + /admin/knowledge/upload)
 import { useCallback, useEffect, useState } from "react";
 
+import { adminFetch } from "../utils/apiClient";
+
 const API_BASE = "http://localhost:8765/admin";
 
 interface KbStats {
@@ -25,7 +27,7 @@ export default function KnowledgeView({
 
   const loadStats = useCallback(async (): Promise<void> => {
     try {
-      const resp = await fetch(`${API_BASE}/knowledge/stats`);
+      const resp = await adminFetch(`${API_BASE}/knowledge/stats`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       setStats(await resp.json());
       setStatsError("");
@@ -52,7 +54,7 @@ export default function KnowledgeView({
         content,
       });
       if (scenario.trim()) params.set("scenario", scenario.trim());
-      const resp = await fetch(
+      const resp = await adminFetch(
         `${API_BASE}/knowledge/upload?${params.toString()}`,
         { method: "POST" }
       );

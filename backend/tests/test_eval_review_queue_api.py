@@ -18,6 +18,8 @@ from private_agent.eval.repos import ReviewQueueRepo
 from private_agent.main import app
 from private_agent.storage import migrations
 
+_AUTH_HEADERS = {"X-Admin-Token": "test-admin-token"}
+
 TEST_DSN = os.environ.get(
     "PA_TEST_DSN",
     "postgresql://postgres:123123@localhost:5432/private_agent_test",
@@ -94,6 +96,9 @@ def test_list_review_queue_returns_pending_items(monkeypatch, tmp_path):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.get("/admin/eval/review-queue", params={"status": "pending"})
     assert resp.status_code == 200
     data = resp.json()
@@ -130,6 +135,9 @@ def test_list_review_queue_filter_by_status(monkeypatch, tmp_path):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp_rejected = client.get(
         "/admin/eval/review-queue", params={"status": "rejected"}
     )
@@ -169,6 +177,9 @@ def test_list_review_queue_respects_limit(monkeypatch, tmp_path):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.get("/admin/eval/review-queue", params={"limit": 2})
     assert resp.status_code == 200
     assert len(resp.json()["items"]) == 2
@@ -221,6 +232,9 @@ def test_decide_review_item_prompt_defect_edit_inserts_sample(monkeypatch, tmp_p
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         f"/admin/eval/review-queue/{item_id_holder['id']}/decide",
         json={
@@ -267,6 +281,9 @@ def test_decide_review_item_model_limitation_drop_does_not_insert(
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         f"/admin/eval/review-queue/{item_id_holder['id']}/decide",
         json={"decision": "model_limitation_drop"},
@@ -295,6 +312,9 @@ def test_decide_review_item_unknown_id_returns_404(monkeypatch, tmp_path):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         "/admin/eval/review-queue/9999/decide",
         json={"decision": "model_limitation_drop"},
@@ -327,6 +347,9 @@ def test_decide_review_item_invalid_decision_returns_400(monkeypatch, tmp_path):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         f"/admin/eval/review-queue/{item_id_holder['id']}/decide",
         json={"decision": "unknown_decision"},

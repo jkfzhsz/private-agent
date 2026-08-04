@@ -18,6 +18,8 @@ import SettingsView from "./views/SettingsView";
 import { deAIfy } from "./utils/deAIfy";
 import "./styles/design-tokens.css";
 
+import { adminFetch } from "./utils/apiClient";
+
 // ──────────────────────────────────────────────────────────────────────────────
 // 类型定义
 // ──────────────────────────────────────────────────────────────────────────────
@@ -250,7 +252,7 @@ export default function App(): JSX.Element {
       setEvents([]);
     }
     try {
-      const resp = await fetch(
+      const resp = await adminFetch(
         `http://127.0.0.1:8765/admin/sessions/${sid}/activate`,
         {
           method: "POST",
@@ -323,7 +325,7 @@ export default function App(): JSX.Element {
     let cancelled = false;
     void (async () => {
       try {
-        const resp = await fetch("http://127.0.0.1:8765/admin/skills");
+        const resp = await adminFetch("http://127.0.0.1:8765/admin/skills");
         const data = (await resp.json()) as { name: string; version: string; enabled: boolean }[];
         if (!cancelled) setAvailableSkills(Array.isArray(data) ? data : []);
       } catch {
@@ -580,7 +582,7 @@ export default function App(): JSX.Element {
           binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
         }
         const b64 = btoa(binary);
-        const resp = await fetch("http://127.0.0.1:8765/admin/files/upload", {
+        const resp = await adminFetch("http://127.0.0.1:8765/admin/files/upload", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ filename: file.name, content_base64: b64 }),
@@ -649,7 +651,7 @@ export default function App(): JSX.Element {
   // 加载默认工作区(画地为牢选择器显示用; 会话工作区后端持久化)
   useEffect(() => {
     let cancelled = false;
-    fetch("http://localhost:8765/admin/workspaces")
+    adminFetch("http://localhost:8765/admin/workspaces")
       .then((r) => r.json())
       .then((data) => {
         if (!cancelled) {
@@ -671,7 +673,7 @@ export default function App(): JSX.Element {
   const saveWorkspace = useCallback(async (): Promise<void> => {
     const path = workspaceInput.trim();
     try {
-      const resp = await fetch(
+      const resp = await adminFetch(
         `http://localhost:8765/admin/sessions/${realSessionId ?? sessionId}/workspace`,
         {
           method: "PUT",
@@ -694,7 +696,7 @@ export default function App(): JSX.Element {
   // 加载可用模型列表(模型选择器用)
   useEffect(() => {
     let cancelled = false;
-    fetch("http://localhost:8765/admin/settings/providers")
+    adminFetch("http://localhost:8765/admin/settings/providers")
       .then((r) => r.json())
       .then((data) => {
         if (!cancelled) {
@@ -717,7 +719,7 @@ export default function App(): JSX.Element {
     const target = realSessionId ?? sessionId;
     if (target <= 0) return;
     try {
-      const resp = await fetch(
+      const resp = await adminFetch(
         `http://localhost:8765/admin/sessions/${target}/model`,
         {
           method: "POST",

@@ -23,6 +23,9 @@ const api = {
     baseUrl: `http://${sidecarHost}:${sidecarPort}`,
     wsUrl: `ws://${sidecarHost}:${sidecarPort}/ws`,
   },
+  // 阶段二批次 1: admin 控制面鉴权 token(主进程从 backend/.env 补读注入;
+  // 渲染进程经 adminFetch 自动携带 X-Admin-Token 头)
+  adminToken: process.env.PA_ADMIN_TOKEN ?? "",
   envStatus: {
     dbPassword: Boolean(process.env.PA_DB_PASSWORD),
     deepseekKey: Boolean(process.env.PA_DEEPSEEK_API_KEY),

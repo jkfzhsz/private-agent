@@ -115,6 +115,19 @@ async function bootstrap(): Promise<void> {
   await sidecarManager.start();
   console.log("[main] Sidecar health OK");
 
+  // 阶段二批次 1: 补读 sidecar 首次启动时 ensure_admin_token 生成的
+  // PA_ADMIN_TOKEN(写入 backend/.env)。loadDotEnv 发生在此前, 首启时
+  // token 尚未生成; sidecar start 后重新读取并注入 preload 可访问的 env。
+  if (!process.env.PA_ADMIN_TOKEN) {
+    try {
+      const envText = readFileSync(join(backendDir, ".env"), "utf-8");
+      const match = envText.match(/^PA_ADMIN_TOKEN=(.+)$/m);
+      if (match) process.env.PA_ADMIN_TOKEN = match[1].trim();
+    } catch {
+      // .env 不可读时跳过(token 由后端校验逻辑返回 401)
+    }
+  }
+
   // 3) 创建主窗口(优先于弹窗, 确保窗口先稳定显示)
   console.log("[main] creating window ...");
   mainWindow = createWindow();

@@ -11,9 +11,11 @@ import asyncio
 import html as _html
 import os
 import re
+import urllib.parse
 
 import httpx
 
+from private_agent.security.ssrf import SSRFBlockedError
 from private_agent.tools.defs import ToolDef, ToolResult
 
 __all__ = ["web_search_handler", "WEB_SEARCH_TOOL"]
@@ -23,6 +25,21 @@ _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+# 阶段二批次 2: 搜索后端固定域名白名单(防御式——URL 目前硬编码,
+# 显式白名单防止未来参数化引入 SSRF)
+_WEB_SEARCH_ALLOWED_HOSTS = {
+    "api.duckduckgo.com",
+    "api.bochaai.com",
+    "www.bing.com",
+}
+
+
+def _check_search_endpoint(url: str) -> None:
+    """校验搜索后端 URL 域名在白名单内, 否则拒绝。"""
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if host not in _WEB_SEARCH_ALLOWED_HOSTS:
+        raise SSRFBlockedError(f"search endpoint host '{host}' not allowed")
 
 
 def _pick_backend() -> str:
@@ -67,6 +84,7 @@ async def web_search_handler(args: dict) -> ToolResult:
 
 async def _search_duckduckgo(query: str) -> ToolResult:
     """DuckDuckGo Instant Answer API(无需 key)。"""
+    _check_search_endpoint("https://api.duckduckgo.com/")
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers={"User-Agent": _UA}) as client:
         resp = await client.get(
             "https://api.duckduckgo.com/",
@@ -93,6 +111,7 @@ async def _search_duckduckgo(query: str) -> ToolResult:
 
 async def _search_bocha(query: str) -> ToolResult:
     """博查 BochaAI 搜索 API(国内可达, 需 key)。"""
+    _check_search_endpoint("https://api.bochaai.com/v1/web-search")
     key = os.environ.get("PA_BOCHA_API_KEY", "")
     if not key:
         return ToolResult(
@@ -127,6 +146,7 @@ async def _search_bocha(query: str) -> ToolResult:
 
 async def _search_bing(query: str) -> ToolResult:
     """Bing 搜索结果页 HTML 解析(尽力而为, 部分网络环境可能被反爬)。"""
+    _check_search_endpoint("https://www.bing.com/search")
     async with httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=True,

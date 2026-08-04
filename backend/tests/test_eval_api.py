@@ -18,6 +18,8 @@ from private_agent.eval.repos import EvalRunRepo, VersionSnapshotRepo
 from private_agent.main import app
 from private_agent.storage import migrations
 
+_AUTH_HEADERS = {"X-Admin-Token": "test-admin-token"}
+
 TEST_DSN = os.environ.get(
     "PA_TEST_DSN",
     "postgresql://postgres:123123@localhost:5432/private_agent_test",
@@ -116,6 +118,9 @@ def test_trigger_eval_run_endpoint_returns_run_id(monkeypatch):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         "/admin/eval/runs",
         json={
@@ -168,6 +173,9 @@ def test_compare_versions_endpoint_returns_diff(monkeypatch):
     monkeypatch.setattr("private_agent.api.eval.db.connect", _fake_connect)
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.get(
         "/admin/eval/versions/compare",
         params={
@@ -225,6 +233,9 @@ def test_rollback_endpoint_returns_rolled_back_to(monkeypatch):
     monkeypatch.setattr("private_agent.api.eval.db.connect", _fake_connect)
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         "/admin/eval/rollback",
         json={

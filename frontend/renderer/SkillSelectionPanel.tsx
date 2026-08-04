@@ -7,6 +7,8 @@
 // - 激活失败(404 skill_not_found 等)显示错误信息
 import { useCallback, useEffect, useState } from "react";
 
+import { adminFetch } from "./utils/apiClient";
+
 export interface SkillInfo {
   name: string;
   version: string;
@@ -39,7 +41,7 @@ export default function SkillSelectionPanel({
   const loadSkills = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      const resp = await fetch(`${API_BASE}/skills`);
+      const resp = await adminFetch(`${API_BASE}/skills`);
       const data = (await resp.json()) as SkillInfo[] | { error: string };
       if (Array.isArray(data)) {
         setSkills(data.filter((s) => s.enabled));
@@ -62,7 +64,7 @@ export default function SkillSelectionPanel({
       setActivating(name);
       setError("");
       try {
-        const resp = await fetch(`${API_BASE}/sessions/${sessionId}/activate`, {
+        const resp = await adminFetch(`${API_BASE}/sessions/${sessionId}/activate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ skill_name: name }),

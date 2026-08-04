@@ -2,6 +2,8 @@
 // 导航 + 任务树(可展开/收起, 点击切换会话触发后端 WS replay 加载历史)
 import { useCallback, useEffect, useState } from "react";
 
+import { adminFetch } from "../utils/apiClient";
+
 export type ViewKey = "home" | "chat" | "knowledge" | "memory" | "settings";
 
 export interface SessionItem {
@@ -114,7 +116,7 @@ function TaskTree({
     setLoading(true);
     setError("");
     try {
-      const resp = await fetch("http://127.0.0.1:8765/admin/sessions?limit=30");
+      const resp = await adminFetch("http://127.0.0.1:8765/admin/sessions?limit=30");
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       setSessions(await resp.json());
     } catch (e) {
@@ -132,7 +134,7 @@ function TaskTree({
 
   const deleteSession = async (id: number): Promise<void> => {
     try {
-      await fetch(`http://127.0.0.1:8765/admin/sessions/${id}`, { method: "DELETE" });
+      await adminFetch(`http://127.0.0.1:8765/admin/sessions/${id}`, { method: "DELETE" });
       setSessions((prev) => prev.filter((s) => s.id !== id));
     } catch (e) {
       setError(`删除失败: ${String(e)}`);

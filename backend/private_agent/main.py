@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from private_agent.api import admin, eval, files
@@ -19,20 +19,63 @@ from private_agent.core.react_loop import ReactLoop
 from private_agent.memory.manager import MemoryManager
 from private_agent.memory.memories_repo import MemoriesRepo
 from private_agent.observability.logging import setup_logger
+from private_agent.security.auth import ensure_admin_token, require_admin
 from private_agent.storage import db, ws_offset
 
 app = FastAPI(title="Private Agent Sidecar", version="0.1.0")
-# 浏览器模式(vite dev)跨域访问 8765:允许 localhost 任意端口来源
+
+# ── 阶段二批次 1: CORS 白名单收窄(审查 A.3.10/B.2.1) ──────────────────────────
+# 原 allow_origins=["*"] 全开 → 白名单(config security.cors.allow_origins 可覆盖)
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",   # vite dev 默认端口
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",   # vite preview
+    "http://127.0.0.1:4173",
+    "app://.",                 # Electron 生产(file:// 场景 origin 为 app://.)
+]
+
+
+def _cors_origins() -> list[str]:
+    """CORS 白名单: config security.cors.allow_origins > 默认本机 dev 端口。"""
+    try:
+        origins = loader.load_config().get("security", {}).get("cors", {}).get(
+            "allow_origins"
+        )
+        if origins:
+            return list(origins)
+    except Exception:  # noqa: BLE001
+        pass
+    return list(_DEFAULT_CORS_ORIGINS)
+
+
+def _cors_dev_regex() -> str | None:
+    """dev 模式放宽: PA_ENV=dev(vite 端口占用自动切换 5174 等)或 config 显式
+    dev_wildcard=true 时, 放行 localhost/127.0.0.1 任意端口。"""
+    if os.environ.get("PA_ENV") == "dev":
+        return r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+    try:
+        cfg = loader.load_config().get("security", {}).get("cors", {})
+        if cfg.get("dev_wildcard", False):
+            return r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
+    allow_origin_regex=_cors_dev_regex(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "X-Admin-Token", "Authorization"],
 )
-app.include_router(admin.router)
-app.include_router(eval.router)
-app.include_router(files.router)
+
+# 阶段二批次 1: admin/eval/files 控制面统一挂鉴权(router 级单点生效;
+# 独立 app 的单元测试不受影响, 生产入口 main.app 全量保护)
+app.include_router(admin.router, dependencies=[Depends(require_admin)])
+app.include_router(eval.router, dependencies=[Depends(require_admin)])
+app.include_router(files.router, dependencies=[Depends(require_admin)])
 
 # B1 P1-2: 模块级仅持有 logger 句柄(无 handler),file_path 由 _on_startup / run_sidecar 延迟配置
 _logger = logging.getLogger("private_agent.main")
@@ -438,6 +481,10 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
             from private_agent.tools.builtins.code_execution import set_sandbox_config
 
             set_sandbox_config(cfg.get("sandbox"))
+            # 阶段二批次 2: 注入安全配置(http_request SSRF 校验依赖模块级全局)
+            from private_agent.tools.builtins.http_request import set_security_config
+
+            set_security_config(cfg)
             conn = await db.connect()
             # 会话懒创建(蓝图 §2.10):WS 收到首条 user_message 时,
             # sessions 无该行则插入,保证 ensure_initial 外键不失败
@@ -721,6 +768,11 @@ def run_sidecar() -> None:
     cfg = loader.load_config()
     # B1 P1-2: 配置 file_path(展开环境变量)
     _configure_logger(cfg)
+    # 阶段二批次 1: 确保 admin token 可用(缺失时生成并持久化到 backend/.env)
+    try:
+        ensure_admin_token()
+    except Exception:  # noqa: BLE001
+        _logger.warning("admin token ensure failed (fallback to env)", exc_info=True)
     host = cfg["server"]["http"]["host"]
     http_port = cfg["server"]["http"]["port"]
     _logger.info(f"Sidecar started: host={host} http_port={http_port}")

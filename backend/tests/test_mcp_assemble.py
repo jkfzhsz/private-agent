@@ -20,6 +20,8 @@ from private_agent.main import app
 from private_agent.storage import db, migrations
 from private_agent.tools.mcp_tools import MCPToolManager, build_tools_guide
 
+_AUTH_HEADERS = {"X-Admin-Token": "test-admin-token"}
+
 TEST_DSN = os.environ.get(
     "PA_TEST_DSN",
     "postgresql://postgres:123123@localhost:5432/private_agent_test",
@@ -146,6 +148,9 @@ class TestAssembleEndpoint:
         _write_servers([_fake_server("s1", assemble=True)])
 
         client = TestClient(app)
+
+
+        client.headers.update(_AUTH_HEADERS)
         resp = client.put(
             "/admin/settings/mcp/s1/assemble", json={"assemble": False}
         )
@@ -161,6 +166,9 @@ class TestAssembleEndpoint:
         _write_servers([_fake_server("s1")])
 
         client = TestClient(app)
+
+
+        client.headers.update(_AUTH_HEADERS)
         resp = client.put(
             "/admin/settings/mcp/nope/assemble", json={"assemble": False}
         )

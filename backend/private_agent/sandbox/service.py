@@ -53,14 +53,31 @@ class SandboxService:
         self._default_timeout = limits_cfg.get("cpu_timeout_sec", 300)
         self._disk_limit_mb = limits_cfg.get("disk_limit_mb", 100)
         memory_limit_mb = limits_cfg.get("memory_limit_mb", 512)
+        # 网络隔离开关(config 默认 false → 默认禁网; 显式 true 才放行)
+        self._network_enabled = bool(limits_cfg.get("network_enabled", False))
         self._resource_limiter = ResourceLimiter(memory_limit_mb, self._default_timeout)
 
         lang_cfg = sandbox_cfg.get("languages", {}).get("python", {})
         python_cmd = lang_cfg.get("command", "python")
         js_lang_cfg = sandbox_cfg.get("languages", {}).get("javascript", {})
         node_cmd = js_lang_cfg.get("command", "node")
+
+        # 阶段二批次 3: Windows Job Object(内存/CPU 时间/进程数/UI 约束)
+        # + POSIX RLIMIT(preexec_fn)。attach 失败自动降级(executor 内处理)。
+        job = None
+        if os.name == "nt":
+            from private_agent.sandbox.job import SandboxJob
+
+            job = SandboxJob(
+                memory_limit_mb=memory_limit_mb,
+                cpu_timeout_sec=self._default_timeout,
+                active_process_limit=int(limits_cfg.get("active_process_limit", 4)),
+            )
         self._executor = SandboxExecutor(
-            python_command=python_cmd, node_command=node_cmd
+            python_command=python_cmd,
+            node_command=node_cmd,
+            preexec_fn=self._resource_limiter.get_preexec_fn(),
+            job=job,
         )
 
         output_cfg = sandbox_cfg.get("output", {})
@@ -109,8 +126,11 @@ class SandboxService:
         # 3. 代码预扫描(告警不阻断)
         warnings = self._code_scanner.scan(code, language) if self._code_scanner else []
 
-        # 4. 环境变量脱敏
+        # 4. 环境变量脱敏 + 网络隔离(阶段二批次 3: 接线 disable_network;
+        #    默认禁网, config limits.network_enabled=true 才放行)
         safe_env = self._env_sanitizer.sanitize(dict(os.environ))
+        if not self._network_enabled:
+            safe_env = disable_network(safe_env)
 
         # 5. 执行
         try:

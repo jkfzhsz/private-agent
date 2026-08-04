@@ -9,14 +9,24 @@ import os
 
 
 def disable_network(env: dict[str, str]) -> dict[str, str]:
-    """应用层网络隔离(蓝图 §6.7 line 5432-5444)。
+    """应用层网络隔离(蓝图 §6.7 line 5432-5444, 阶段二批次 3 修正)。
 
-    设置 HTTP_PROXY/HTTPS_PROXY 为 invalid,阻断子进程网络访问。
+    设置 HTTP_PROXY/HTTPS_PROXY 为无效代理(本机无服务的端口), 阻断子进程
+    经 HTTP 库(requests/httpx 等读环境变量的库)访问网络。
+
+    修正说明(2026-08-04): 原实现同时设置 NO_PROXY=* —— 与代理拦截
+    自相矛盾(所有主机绕过代理直连, 拦截完全失效)。现已移除 NO_PROXY。
+
+    已知边界: 仅对读环境变量代理的 HTTP 库有效; socket 直连 / Windows
+    内置 urllib(读注册表代理)可绕过 —— 见 docs/security-model.md。
     """
     result = dict(env)
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        result[key] = "invalid"
-    result["NO_PROXY"] = "*"
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                "ALL_PROXY", "all_proxy"):
+        result[key] = "http://127.0.0.1:9"  # 本机无服务的端口 → 连接必然失败
+    # 不设置 NO_PROXY(否则绕过代理直连)
+    result.pop("NO_PROXY", None)
+    result.pop("no_proxy", None)
     return result
 
 

@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 from private_agent.api import admin
 from private_agent.main import app
 
+_AUTH_HEADERS = {"X-Admin-Token": "test-admin-token"}
+
 
 class _FakeAcquire:
     async def __aenter__(self):
@@ -40,6 +42,9 @@ def test_main_app_has_admin_disk_status_route(monkeypatch):
     _patch_deps(monkeypatch, level="yellow", message="存储空间即将不足", size_bytes=1024)
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.get("/admin/disk-status")
     assert resp.status_code == 200
     body = resp.json()
@@ -61,6 +66,9 @@ def test_main_app_admin_disk_status_returns_503_on_exception(monkeypatch):
     monkeypatch.setattr(admin.db, "get_pool", _fake_get_pool)
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.get("/admin/disk-status")
     assert resp.status_code == 503
     assert resp.json() == {"error": "disk_status_unavailable"}

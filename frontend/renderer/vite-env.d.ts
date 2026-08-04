@@ -23,5 +23,7 @@ interface Window {
       kimiKey?: boolean;
     };
     checkForUpdates?: () => Promise<unknown>;
+    // 阶段二批次 1: admin 控制面鉴权 token(Electron 主进程从 backend/.env 注入)
+    adminToken?: string;
   };
 }

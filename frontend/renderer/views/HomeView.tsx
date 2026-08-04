@@ -3,6 +3,8 @@
 // 中部: 三个模式按钮(工作/分析/设计)
 import { useEffect, useMemo, useState } from "react";
 
+import { adminFetch } from "../utils/apiClient";
+
 const API_BASE = "http://127.0.0.1:8765/admin";
 const FILES_BASE = "http://127.0.0.1:8765/files/outputs";
 
@@ -96,7 +98,7 @@ export default function HomeView({
     let cancelled = false;
     (async () => {
       try {
-        const resp = await fetch(`${API_BASE}/wallpaper`);
+        const resp = await adminFetch(`${API_BASE}/wallpaper`);
         const data = await resp.json();
         if (!cancelled) {
           // URL 加时间戳强制绕过浏览器缓存(壁纸文件名固定, 换图后必须重新拉取)

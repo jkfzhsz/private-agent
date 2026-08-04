@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 from private_agent.main import app
 from private_agent.storage import migrations
 
+_AUTH_HEADERS = {"X-Admin-Token": "test-admin-token"}
+
 TEST_DSN = os.environ.get(
     "PA_TEST_DSN",
     "postgresql://postgres:123123@localhost:5432/private_agent_test",
@@ -57,6 +59,9 @@ def test_save_version_persists_snapshot_and_triggers_listener(monkeypatch):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         "/admin/skills/office/save-version",
         json={
@@ -115,6 +120,9 @@ def test_save_version_does_not_block_when_listener_fails(monkeypatch):
     )
 
     client = TestClient(app)
+
+
+    client.headers.update(_AUTH_HEADERS)
     resp = client.post(
         "/admin/skills/office/save-version",
         json={

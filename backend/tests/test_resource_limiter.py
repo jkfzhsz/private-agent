@@ -59,18 +59,20 @@ def test_sandbox_service_reads_memory_limit_mb():
 
 
 def test_disable_network_sets_invalid_proxy():
-    """AC-6: 设置无效代理。"""
+    """AC-6: 设置无效代理(阶段二批次 3 修正: 指向本机无服务端口 + 移除 NO_PROXY)。"""
     env = {"PATH": "/usr/bin", "HOME": "/home/user"}
     result = disable_network(env)
-    assert result["HTTP_PROXY"] == "invalid"
-    assert result["HTTPS_PROXY"] == "invalid"
-    assert result["http_proxy"] == "invalid"
-    assert result["https_proxy"] == "invalid"
-    assert result["NO_PROXY"] == "*"
+    assert result["HTTP_PROXY"] == "http://127.0.0.1:9"
+    assert result["HTTPS_PROXY"] == "http://127.0.0.1:9"
+    assert result["http_proxy"] == "http://127.0.0.1:9"
+    assert result["https_proxy"] == "http://127.0.0.1:9"
+    assert result["ALL_PROXY"] == "http://127.0.0.1:9"
+    # 修正点: NO_PROXY 必须移除(否则所有主机绕过代理, 拦截失效)
+    assert "NO_PROXY" not in result
 
 
 def test_disable_network_overwrites_existing_proxy():
     """AC-7: 覆盖已有代理。"""
     env = {"HTTP_PROXY": "http://real:8080"}
     result = disable_network(env)
-    assert result["HTTP_PROXY"] == "invalid"
+    assert result["HTTP_PROXY"] == "http://127.0.0.1:9"

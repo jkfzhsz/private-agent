@@ -19,6 +19,8 @@ from private_agent.main import app
 from private_agent.models.registry import build_compress_adapter, build_fallback_chain
 from private_agent.storage import db, migrations
 
+_AUTH_HEADERS = {"X-Admin-Token": "test-admin-token"}
+
 TEST_DSN = os.environ.get(
     "PA_TEST_DSN",
     "postgresql://postgres:123123@localhost:5432/private_agent_test",
@@ -133,6 +135,9 @@ class TestProvidersApiEmpty:
         _clear_runtime_providers()
 
         client = TestClient(app)
+
+
+        client.headers.update(_AUTH_HEADERS)
         resp = client.get("/admin/settings/providers")
         assert resp.status_code == 200
         body = resp.json()
@@ -146,6 +151,9 @@ class TestProvidersApiEmpty:
         _clear_runtime_providers()
 
         client = TestClient(app)
+
+
+        client.headers.update(_AUTH_HEADERS)
         resp = client.post(
             "/admin/settings/providers",
             json={

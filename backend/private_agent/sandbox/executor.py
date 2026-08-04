@@ -22,9 +22,27 @@ class SandboxExecutor:
     支持语言:python / javascript(B2 P1-7)。
     """
 
-    def __init__(self, python_command: str = "python", node_command: str = "node") -> None:
+    def __init__(
+        self,
+        python_command: str = "python",
+        node_command: str = "node",
+        preexec_fn: Callable[[], None] | None = None,
+        job: object | None = None,
+    ) -> None:
+        """初始化执行器。
+
+        Args:
+            python_command: Python 解释器路径。
+            node_command: Node 解释器路径。
+            preexec_fn: POSIX 子进程预执行回调(ResourceLimiter.get_preexec_fn,
+                设置 RLIMIT_AS/RLIMIT_CPU); Windows 无 preexec_fn, 传 None。
+            job: Windows Job Object 沙箱(SandboxJob, 阶段二批次 3);
+                子进程 spawn 后尽快 attach_pid, 结束前保持句柄存活。
+        """
         self._python_cmd = python_command
         self._node_cmd = node_command
+        self._preexec_fn = preexec_fn if os.name != "nt" else None
+        self._job = job
 
     async def execute(
         self,
@@ -58,7 +76,12 @@ class SandboxExecutor:
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace,
             env=env,
+            preexec_fn=self._preexec_fn,
         )
+        # 阶段二批次 3: Windows Job Object 约束(尽早挂入; 失败降级不阻断)
+        job_attached = False
+        if self._job is not None:
+            job_attached = self._job.attach_pid(process.pid)  # type: ignore[attr-defined]
         try:
             if on_output is not None:
                 stdout_data, stderr_data = await asyncio.wait_for(
@@ -79,6 +102,10 @@ class SandboxExecutor:
             raise SandboxTimeoutError(
                 f"Execution exceeded {timeout}s"
             ) from None
+        finally:
+            # Job 句柄在子进程结束后释放(KILL_ON_JOB_CLOSE 语义)
+            if self._job is not None:
+                self._job.close()  # type: ignore[attr-defined]
 
         elapsed = int((time.monotonic() - start) * 1000)
         return SandboxResult(

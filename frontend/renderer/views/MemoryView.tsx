@@ -2,6 +2,8 @@
 // 记忆列表(接 /admin/memories) + 手动提取(接 /admin/sessions/{id}/extract_memory)
 import { useCallback, useEffect, useState } from "react";
 
+import { adminFetch } from "../utils/apiClient";
+
 const API_BASE = "http://localhost:8765/admin";
 
 interface MemoryItem {
@@ -41,7 +43,7 @@ export default function MemoryView({
     try {
       const params = new URLSearchParams({ limit: "100" });
       if (typeFilter) params.set("type", typeFilter);
-      const resp = await fetch(`${API_BASE}/memories?${params.toString()}`);
+      const resp = await adminFetch(`${API_BASE}/memories?${params.toString()}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       setMemories(await resp.json());
     } catch (e) {
@@ -64,7 +66,7 @@ export default function MemoryView({
     setExtracting(true);
     setExtractMsg(null);
     try {
-      const resp = await fetch(`${API_BASE}/sessions/${sid}/extract_memory`, {
+      const resp = await adminFetch(`${API_BASE}/sessions/${sid}/extract_memory`, {
         method: "POST",
       });
       const data = await resp.json();

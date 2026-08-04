@@ -281,3 +281,25 @@ observability:
 injection_guard:
   enabled: true  # [runtime] 关闭则跳过全部注入扫描与截断
 
+# ------------------------------------------------------------------------------
+# 安全硬边界(阶段二批次 1: 审查 A.3.10/B.2.1)
+# ------------------------------------------------------------------------------
+security:
+  cors:
+    # admin 控制面允许的跨域来源白名单(浏览器 dev 场景必须显式列出);
+    # Electron 生产 origin 为 app://.(或 file://, 无 Origin 头则不触发 CORS)
+    allow_origins:
+      - "http://localhost:5173"
+      - "http://127.0.0.1:5173"
+      - "http://localhost:4173"
+      - "http://127.0.0.1:4173"
+      - "app://."
+    # dev 模式放宽: PA_ENV=dev(vite 端口占用自动切换)时放行 localhost 任意端口
+    dev_wildcard: true
+  ssrf:
+    # 阶段二批次 2 实施(http_request 等出网工具的 SSRF 防护)
+    enabled: true
+    allow_private: false
+    max_response_bytes: 2097152
+
+
