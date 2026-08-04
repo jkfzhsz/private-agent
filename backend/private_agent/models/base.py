@@ -86,11 +86,14 @@ class FallbackChain:
 
     按构造时传入的 adapters 顺序尝试:
     - 任一 adapter 抛 ProviderError → 记录 failed_providers,继续下一个
-    - 可重试错误(http error / upstream 5xx / 429)先指数退避重试一次
-      (V1.5:上游服务间歇性抖动时提升成功率)
+    - 可重试错误(http error / upstream 5xx / 429)先指数退避重试
+      (2026-08-04 增强: 原仅 1 次 0.5s, 对限流(429 可能持续数秒)不够,
+      改为最多 _RETRY_LIMIT 次, 退避 0.5s→1s→2s)
     - 任一 adapter 成功 → 返回 ChatResult(used_provider=成功方,failed_providers=前面失败列表)
     - 全部失败 → 抛 AllProvidersFailedError(附最后一个 provider 的错误详情)
     """
+
+    _RETRY_LIMIT = 3
 
     def __init__(self, adapters: list[ModelAdapter]):
         self._adapters = list(adapters)
@@ -111,9 +114,9 @@ class FallbackChain:
                     result = await adapter.chat(messages, tools, max_tokens=max_tokens)
                 except ProviderError as e:
                     last_error = e
-                    # 可重试错误:退避后重试一次;认证类(401/400/403)重试无意义
-                    if attempts == 1 and _is_retryable_error(e):
-                        await asyncio.sleep(0.5)
+                    # 可重试错误: 指数退避重试; 认证类(401/400/403)重试无意义
+                    if attempts < self._RETRY_LIMIT and _is_retryable_error(e):
+                        await asyncio.sleep(0.5 * (2 ** (attempts - 1)))
                         continue
                     failed.append(adapter.provider_name)
                     break
@@ -139,25 +142,32 @@ class FallbackChain:
         for adapter in self._adapters:
             capability = getattr(adapter, "capability", None)
             if capability is not None and getattr(capability, "streaming", False):
-                try:
-                    result = await adapter.chat_stream(
-                        messages, tools, max_tokens=max_tokens,
-                        on_delta=on_delta, on_reasoning=on_reasoning,
-                    )
-                    result.failed_providers = failed
-                    return result
-                except ProviderError as e:
-                    failed.append(adapter.provider_name)
-                    last_error = e
-                    continue
+                attempts = 0
+                while True:
+                    attempts += 1
+                    try:
+                        result = await adapter.chat_stream(
+                            messages, tools, max_tokens=max_tokens,
+                            on_delta=on_delta, on_reasoning=on_reasoning,
+                        )
+                        result.failed_providers = failed
+                        return result
+                    except ProviderError as e:
+                        last_error = e
+                        # 2026-08-04: 与 chat() 对齐, 429/5xx 指数退避重试
+                        if attempts < self._RETRY_LIMIT and _is_retryable_error(e):
+                            await asyncio.sleep(0.5 * (2 ** (attempts - 1)))
+                            continue
+                        failed.append(adapter.provider_name)
+                        break
             # 无流式能力: 用非流式 chat 兜底(前端无逐句效果但可用)
             try:
                 result = await adapter.chat(messages, tools, max_tokens=max_tokens)
                 result.failed_providers = failed
                 return result
             except ProviderError as e:
-                failed.append(adapter.provider_name)
                 last_error = e
+                failed.append(adapter.provider_name)
         detail = f" | last: {last_error}" if last_error else ""
         raise AllProvidersFailedError(
             f"all {len(self._adapters)} providers failed: {failed}{detail}"
