@@ -71,11 +71,14 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Admin-Token", "Authorization"],
 )
 
-# 阶段二批次 1: admin/eval/files 控制面统一挂鉴权(router 级单点生效;
+# 阶段二批次 1: admin/eval 控制面统一挂鉴权(router 级单点生效;
 # 独立 app 的单元测试不受影响, 生产入口 main.app 全量保护)
+# 2026-08-04 修复: files.router 不再挂 require_admin —— /files/outputs/* 是
+# 纯产物读取(壁纸/预览图), 前端 <img>/<video> src 直连不带 X-Admin-Token,
+# 整体鉴权导致壁纸 401 永远加载失败; 该路由无写/删操作, 公开可读可接受。
 app.include_router(admin.router, dependencies=[Depends(require_admin)])
 app.include_router(eval.router, dependencies=[Depends(require_admin)])
-app.include_router(files.router, dependencies=[Depends(require_admin)])
+app.include_router(files.router)
 
 # B1 P1-2: 模块级仅持有 logger 句柄(无 handler),file_path 由 _on_startup / run_sidecar 延迟配置
 _logger = logging.getLogger("private_agent.main")

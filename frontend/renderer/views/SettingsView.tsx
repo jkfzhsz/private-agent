@@ -312,6 +312,10 @@ function SkillsSection(): JSX.Element {
   const [skillYaml, setSkillYaml] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+  // 2026-08-04: zip 一键上传
+  const [zipBusy, setZipBusy] = useState(false);
+  const [zipMsg, setZipMsg] = useState<string | null>(null);
+  const zipRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -329,6 +333,42 @@ function SkillsSection(): JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 2026-08-04: 选择 zip 即上传(简单方式, 无需手填 yaml)
+  const uploadZip = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setZipMsg("请选择 .zip 压缩包");
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      setZipMsg("压缩包超过 50MB");
+      return;
+    }
+    setZipBusy(true);
+    setZipMsg("上传中...");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const resp = await adminFetch("http://127.0.0.1:8765/admin/skills/upload-zip", {
+        method: "POST",
+        body: fd,
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail = data.detail ?? data.error ?? `HTTP ${resp.status}`;
+        throw new Error(String(detail));
+      }
+      setZipMsg(`✅ 技能「${data.name}」上传成功(${data.files} 个文件)`);
+      await load();
+    } catch (err) {
+      setZipMsg(`上传失败: ${String(err)}`);
+    } finally {
+      setZipBusy(false);
+    }
+  };
 
   const upload = async (): Promise<void> => {
     setMsg(null);
@@ -389,9 +429,46 @@ function SkillsSection(): JSX.Element {
         )}
       </div>
 
-      {/* 上传新技能 */}
+      {/* 2026-08-04: zip 一键上传(简单方式) */}
+      <div
+        style={{
+          display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+          padding: "12px 14px", borderRadius: 10,
+          background: "rgba(129,140,248,0.06)", border: "1px dashed rgba(129,140,248,0.4)",
+          marginBottom: 14,
+        }}
+      >
+        <label
+          style={{
+            fontSize: 13, fontWeight: 600, cursor: zipBusy ? "not-allowed" : "pointer",
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "8px 16px", borderRadius: 8,
+            background: "var(--gradient-indigo)", color: "#fff",
+          }}
+        >
+          📦 上传技能压缩包(zip)
+          <input
+            ref={zipRef}
+            type="file"
+            accept=".zip"
+            style={{ display: "none" }}
+            disabled={zipBusy}
+            onChange={(e) => void uploadZip(e)}
+          />
+        </label>
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+          选 zip 即自动解析安装(skill.yaml + system_prompt.md + references/ 等全部文件)
+        </span>
+        {zipMsg && (
+          <span style={{ fontSize: 12, color: zipMsg.startsWith("✅") ? "var(--success-text)" : zipMsg.startsWith("上传中") ? "var(--text-secondary)" : "#d32f2f" }}>
+            {zipMsg}
+          </span>
+        )}
+      </div>
+
+      {/* 上传新技能(高级: 手动填写) */}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600 }}>上传新技能</div>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>高级: 手动填写 skill.yaml</div>
         <input
           type="text"
           value={name}

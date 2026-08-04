@@ -8,9 +8,10 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import os
 import yaml
 
 from private_agent.config import loader
@@ -1630,6 +1631,111 @@ async def upload_skill(body: SkillUploadRequest):
         return {"name": name, "path": str(target_dir)}
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"error": "skill_save_failed"})
+
+
+@router.post("/skills/upload-zip", response_model=None)
+async def upload_skill_zip(file: UploadFile = File(...)):
+    """2026-08-04: 上传技能 zip 压缩包(简单方式, 无需手填 yaml)。
+
+    支持两种包结构:
+      - 根目录直接含 skill.yaml(my_skill.zip/skill.yaml)
+      - 唯一子目录含 skill.yaml(my_skill.zip/my_skill/skill.yaml)
+
+    Returns:
+        200: {"name": str, "path": str, "files": int}
+        400: {"error": "invalid_zip" | "skill_yaml_not_found" | "invalid_skill_yaml" | "zip_path_traversal"}
+        500: {"error": "skill_save_failed"}
+    """
+    import io as _io
+    import re as _re
+    import zipfile as _zipfile
+    from pathlib import Path
+
+    try:
+        raw = await file.read()
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "invalid_zip"})
+    if not raw or len(raw) > 50 * 1024 * 1024:
+        return JSONResponse(
+            status_code=400, content={"error": "invalid_zip", "detail": "empty or >50MB"},
+        )
+
+    try:
+        zf = _zipfile.ZipFile(_io.BytesIO(raw))
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "invalid_zip"})
+
+    # zip slip 防护: 所有成员必须先校验相对路径合法
+    members = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        norm = _posix_norm(info.filename)
+        if norm.startswith("..") or norm.startswith("/") or ".." in norm.split("/"):
+            return JSONResponse(
+                status_code=400, content={"error": "zip_path_traversal"},
+            )
+        members.append((info, norm))
+
+    # 定位 skill.yaml: 根目录优先, 其次唯一子目录
+    yaml_hits = [(i, n) for i, n in members if n == "skill.yaml" or n.endswith("/skill.yaml")]
+    if not yaml_hits:
+        return JSONResponse(status_code=400, content={"error": "skill_yaml_not_found"})
+    chosen = min(yaml_hits, key=lambda t: t[1].count("/"))  # 深度最小的
+    yaml_info, yaml_norm = chosen
+    base_prefix = yaml_norm[: -len("skill.yaml")]  # 技能目录前缀(可能为空)
+
+    try:
+        skill_yaml_text = zf.read(yaml_info).decode("utf-8")
+        parsed = yaml.safe_load(skill_yaml_text)
+        if not isinstance(parsed, dict) or not parsed.get("name"):
+            return JSONResponse(status_code=400, content={"error": "invalid_skill_yaml"})
+        name = str(parsed["name"]).strip().lower()
+        if not _re.fullmatch(r"[a-z0-9_]+", name):
+            return JSONResponse(status_code=400, content={"error": "invalid_skill_name"})
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "invalid_skill_yaml"})
+
+    try:
+        cfg = loader.load_config()
+        dev_dir = Path(cfg.get("skills", {}).get("storage", {}).get("dev_dir", "./skills"))
+        if not dev_dir.is_absolute():
+            dev_dir = Path.cwd() / dev_dir
+        target_dir = dev_dir / name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for info, norm in members:
+            # 只解压属于该技能的文件(排除其它子目录技能)
+            if base_prefix and not norm.startswith(base_prefix):
+                continue
+            rel = norm[len(base_prefix):] if base_prefix else norm
+            if not rel or rel == "skill.yaml":
+                # 根 skill.yaml 已单独写
+                continue
+            dest = (target_dir / rel).resolve()
+            if not str(dest).startswith(str(target_dir.resolve()) + os.sep):
+                continue  # 越界防御(不应发生, 已在上层校验)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(zf.read(info))
+            written += 1
+        (target_dir / "skill.yaml").write_text(skill_yaml_text, encoding="utf-8")
+        written += 1
+        return {"name": name, "path": str(target_dir), "files": written}
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"error": "skill_save_failed"})
+
+
+def _posix_norm(name: str) -> str:
+    """zip 成员名转 POSIX 规范路径。
+
+    修复(2026-08-04): 原 lstrip(\"./\") 会把前导 ../ 的 . / 字符全部剥离,
+    导致 zip slip 第一道校验被绕过(第二道 resolve 校验兜底, 但规范上要修)。
+    normpath 保留前导 .., 由上层 startswith(\"..\") 正确拦截。
+    """
+    import posixpath as _pp
+
+    norm = _pp.normpath(name.replace("\\", "/"))
+    return "" if norm == "." else norm
 
 
 @router.post("/wallpaper", response_model=None)
