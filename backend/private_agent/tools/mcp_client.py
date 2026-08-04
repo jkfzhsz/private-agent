@@ -31,6 +31,8 @@ PROTOCOL_VERSION = "2026-07-28"   # 无状态(默认)
 LEGACY_PROTOCOL_VERSION = "2025-11-25"  # 旧有状态(自动协商降级目标)
 PROTOCOL_AUTO = "auto"            # 自动协商
 CLIENT_INFO = {"name": "private-agent", "version": "0.1.0"}
+# T-4(架构修订 P2-4): stdio 单行 JSON-RPC 大小上限(2MB, 防恶意 server 内存耗尽)
+_MAX_MCP_LINE_BYTES = 2 * 1024 * 1024
 
 
 @dataclass
@@ -559,6 +561,14 @@ class MCPClient:
                     line, buffer = buffer.split(b"\n", 1)
                     if not line.strip():
                         continue
+                    # T-4(架构修订 P2-4): stdio 行大小上限 —— 恶意/失陷
+                    # MCP server 发送超长行会耗尽内存, 超限行直接丢弃
+                    if len(line) > _MAX_MCP_LINE_BYTES:
+                        logger.warning(
+                            "MCP line too large (%d bytes) from server '%s', "
+                            "dropping line", len(line), self._config.server_id,
+                        )
+                        continue
                     try:
                         response = json.loads(line)
                         self._handle_response(response)
@@ -571,6 +581,14 @@ class MCPClient:
 
     def _handle_response(self, response: dict) -> None:
         """将 JSON-RPC 响应分发到对应的 pending Future。"""
+        # T-4(架构修订 P2-4): 校验 jsonrpc 协议版本 —— 防御失陷 server 的
+        # 伪造响应进入 pending 分发
+        if response.get("jsonrpc") not in (None, "2.0"):
+            logger.warning(
+                "invalid jsonrpc version from MCP server '%s': %r",
+                self._config.server_id, response.get("jsonrpc"),
+            )
+            return
         rid = response.get("id")
         if rid is not None and rid in self._pending:
             self._pending[rid].set_result(response)

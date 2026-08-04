@@ -108,7 +108,10 @@ async def update_ws_offset(
         """
         INSERT INTO config_runtime (key, value, updated_at)
         VALUES ($1, $2::jsonb, now())
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        ON CONFLICT (key) DO UPDATE
+        -- C-4(架构修订 P0-5): 单调保护 —— stale ack 不允许 offset 回退
+        SET value = EXCLUDED.value, updated_at = now()
+        WHERE (EXCLUDED.value::text)::int > (config_runtime.value::text)::int
         """,
         key,
         value_json,
@@ -180,10 +183,13 @@ async def build_replay_messages(
         for e in events
     ]
     # 补 user 事件(messages 表 user 消息, turn > offset) —— react_events 不存 user
+    # C-5(架构修订 P2-6): zone 过滤 —— 仅 active 用户消息重放为气泡,
+    # KB/记忆注入(zone='stable')不重放(避免界面污染与上下文误导)
     user_rows = await conn.fetch(
         """
         SELECT turn, content FROM messages
         WHERE session_id = $1 AND role = 'user' AND turn > $2
+          AND (zone IS NULL OR zone = 'active')
         ORDER BY id ASC
         """,
         session_id,
