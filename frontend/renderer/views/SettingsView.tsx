@@ -121,6 +121,9 @@ export default function SettingsView(): JSX.Element {
       {/* 阶段二批次 1: admin 鉴权 token 管理 */}
       <SecuritySection />
 
+      {/* 阶段三批次 1(T1.2): 会话级权限模式切换 */}
+      <PermissionModeSection />
+
       {/* 主题壁纸 */}
       <WallpaperSection />
 
@@ -203,6 +206,87 @@ function SecuritySection(): JSX.Element {
         </button>
       </div>
       <div style={{ fontSize: 12, marginTop: 8, color: "var(--text-tertiary)" }}>{status}</div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 权限模式(阶段三批次1 T1.2): 会话级权限模式切换(default/plan/acceptEdits/cautious/deny_all)
+// ──────────────────────────────────────────────────────────────────────────────
+
+function PermissionModeSection(): JSX.Element {
+  const [mode, setMode] = useState<string>("default");
+  const [descriptions, setDescriptions] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState<string>("");
+
+  const load = useCallback(async (): Promise<void> => {
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/permission?session_id=1`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setMode(data.mode ?? "default");
+        setDescriptions(data.mode_descriptions ?? {});
+      }
+    } catch {
+      setStatus("⚠️ 权限模式加载失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const apply = async (m: string): Promise<void> => {
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/permission`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: 1, mode: m }),
+      });
+      if (resp.ok) {
+        setMode(m);
+        setStatus(`✅ 已切换为 ${m} 模式(下轮对话生效)`);
+      } else {
+        setStatus(`⚠️ 切换失败: HTTP ${resp.status}`);
+      }
+    } catch {
+      setStatus("⚠️ 切换失败: 网络错误");
+    }
+  };
+
+  const allModes = ["default", "plan", "acceptEdits", "cautious", "deny_all"];
+
+  return (
+    <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
+      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+        权限模式
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
+        会话级工具权限策略 · 阶段三(人在环中) · 模式切换后下轮对话生效
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {allModes.map((m) => (
+          <button
+            key={m}
+            onClick={() => void apply(m)}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 8,
+              border: m === mode ? "2px solid var(--accent)" : "1px solid var(--border)",
+              background: m === mode ? "var(--accent)" : "var(--panel-bg)",
+              color: m === mode ? "#fff" : "var(--text-primary)",
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            {m}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 12, marginTop: 10, color: "var(--text-tertiary)" }}>
+        {descriptions[mode] ?? mode}
+      </div>
+      {status && <div style={{ fontSize: 12, marginTop: 6, color: "var(--text-tertiary)" }}>{status}</div>}
     </div>
   );
 }

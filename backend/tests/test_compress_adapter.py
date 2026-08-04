@@ -52,19 +52,34 @@ class TestBuildCompressAdapter:
 
         assert adapter is None
 
-    def test_returns_none_when_no_compress_model(self):
-        """无 compress_model 配置 → 返回 None(压缩降级)。"""
+    def test_returns_fallback_first_when_no_compress_model(self):
+        """阶段三 S-1: 无 compress_model 配置 → 回退 fallback_chain 首选(主模型兼压缩)。"""
         cfg = _make_cfg()
         del cfg["models"]["compress_model"]
 
         adapter = build_compress_adapter(cfg)
 
+        assert adapter is not None
+        assert adapter.provider_name == "my-llm"
+
+    def test_returns_none_when_fallback_disabled(self):
+        """阶段三 S-1: compress_fallback_main=false 时保持 None 降级语义(可回退)。"""
+        cfg = _make_cfg()
+        del cfg["models"]["compress_model"]
+        cfg["models"]["compress_fallback_main"] = False
+
+        adapter = build_compress_adapter(cfg)
+
         assert adapter is None
 
-    def test_returns_none_when_no_matching_provider(self):
-        """compress_model 无匹配 provider → None(去预置化核心: 不隐式绑定)。"""
+    def test_returns_none_when_no_matching_provider_and_no_fallback(self):
+        """compress_model 无匹配 provider 且 chain 为空 → None(去预置化核心)。"""
         cfg = _make_cfg(compress_model="ghost-model", model_name="flash-m")
-        assert build_compress_adapter(cfg) is None
+        cfg["models"]["router"]["fallback_chain"] = []
+
+        adapter = build_compress_adapter(cfg)
+
+        assert adapter is None
 
     def test_adapter_is_model_adapter_protocol(self):
         """返回的 adapter 满足 ModelAdapter Protocol。"""

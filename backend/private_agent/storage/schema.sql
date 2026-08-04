@@ -25,7 +25,11 @@ CREATE TABLE sessions (
     locked_skill_version   VARCHAR(20),
     frozen_hash            VARCHAR(64),
     -- 工作区选择(画地为牢): 会话级工作目录(agent 操作范围告知层)
-    workspace              TEXT
+    workspace              TEXT,
+    -- 阶段三批次1(T1.2): 会话级权限模式(default/plan/acceptEdits/cautious/deny_all)
+    permission_mode         VARCHAR(20) NOT NULL DEFAULT 'default'
+                            CHECK (permission_mode IN
+                            ('default','plan','acceptEdits','cautious','deny_all'))
 );
 
 CREATE INDEX idx_sessions_status ON sessions(status) WHERE archived_at IS NULL;
@@ -104,7 +108,7 @@ CREATE INDEX idx_react_created ON react_events(created_at);
 CREATE TABLE user_memories (
     id                  BIGSERIAL PRIMARY KEY,
     user_id             BIGINT NOT NULL,                    -- 单人场景固定为 1
-    type                VARCHAR(20) NOT NULL,               -- preference/fact/todo/decision
+    type                VARCHAR(20) NOT NULL,               -- preference/fact/todo/decision/correction(阶段三 T3.4)
     content             TEXT NOT NULL,
     importance          FLOAT DEFAULT 0.5,
     source_session_id   BIGINT REFERENCES sessions(id) ON DELETE SET NULL,

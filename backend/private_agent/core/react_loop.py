@@ -73,6 +73,7 @@ class ReactLoop:
         provider_limits: dict | None = None,
         permission_manager: Any | None = None,
         compress_adapter: Any | None = None,
+        hook_runner: Any | None = None,
     ) -> None:
         self._session_id = session_id
         self._context_manager = context_manager
@@ -92,6 +93,8 @@ class ReactLoop:
         self._conn = conn
         # V2 P1: 工具权限确认管理器(蓝图 §5.12), None 时跳过确认(测试/兼容)
         self._permission_manager = permission_manager
+        # 阶段三批次2(B-1): Hooks 生命周期调度器, None 时跳过(默认零回归)
+        self._hook_runner = hook_runner
         # 对话参数上限: 优先 provider 级(per-model, 设置页按模型配置),
         # 回退全局 models.limits
         limits = provider_limits
@@ -273,6 +276,32 @@ class ReactLoop:
         # (跨迭代; 跨轮模型重来, 不跨轮累积)
         self._tool_call_trace = []
         self._loop_warnings = 0
+
+        # 阶段三批次2(B-1): user_prompt_submit hook(可拒/改用户输入)
+        if self._hook_runner is not None:
+            try:
+                hook_decision = await self._hook_runner.dispatch(
+                    "user_prompt_submit",
+                    {"session_id": self._session_id, "turn": self._turn,
+                     "user_message": user_message},
+                )
+                if hook_decision.updated_input and isinstance(
+                    hook_decision.updated_input, dict
+                ):
+                    new_msg = hook_decision.updated_input.get("user_message")
+                    if isinstance(new_msg, str) and new_msg.strip():
+                        user_message = new_msg
+                if hook_decision.additional_context:
+                    await self._context_manager.append_system_message(
+                        self._conn,
+                        turn=self._turn,
+                        content=(
+                            f"[Hook Context]\n{hook_decision.additional_context}"
+                        ),
+                        zone="active",
+                    )
+            except Exception:
+                self._logger.exception("user_prompt_submit hook failed (pass-through)")
 
         # 追加 user_message 到上下文
         await self._context_manager.append_user_message(
@@ -549,8 +578,65 @@ class ReactLoop:
                         continue
 
                     # ── V2 P1: 权限确认(蓝图 §5.12) ──
+                    # 阶段三批次2(B-1): pre_tool_use hook 先行决策
+                    # (deny 阻断 / allow 跳过确认 / ask 强制确认 / updatedInput 改参)
+                    hook_decision = None
+                    if self._hook_runner is not None:
+                        try:
+                            hook_decision = await self._hook_runner.dispatch(
+                                "pre_tool_use",
+                                {"session_id": self._session_id, "turn": self._turn,
+                                 "tool_name": tool_name, "tool_call_id": tool_call_id,
+                                 "args": args},
+                            )
+                            if hook_decision.updated_input and isinstance(
+                                hook_decision.updated_input, dict
+                            ):
+                                args = hook_decision.updated_input
+                            if hook_decision.additional_context:
+                                await self._context_manager.append_system_message(
+                                    self._conn,
+                                    turn=self._turn,
+                                    content=(
+                                        f"[Hook Context]\n"
+                                        f"{hook_decision.additional_context}"
+                                    ),
+                                    zone="active",
+                                )
+                            if hook_decision.permission_decision == "deny":
+                                reason = (
+                                    f"Tool blocked by hook policy: {tool_name}"
+                                )
+                                await self._emit_event(
+                                    "tool_result",
+                                    payload={
+                                        "tool_call_id": tool_call_id,
+                                        "tool_name": tool_name,
+                                        "output": "",
+                                        "error": reason,
+                                    },
+                                )
+                                await self._context_manager.append_tool_message(
+                                    self._conn,
+                                    turn=self._turn,
+                                    tool_call_id=tool_call_id,
+                                    content="",
+                                    name=tool_name,
+                                    error=reason,
+                                )
+                                continue
+                        except Exception:
+                            self._logger.exception(
+                                "pre_tool_use hook failed (pass-through)"
+                            )
+                            hook_decision = None
+
                     # 仅 elevated 工具走确认;拒绝/超时以 error 回传模型, 循环继续
-                    if self._permission_manager is not None:
+                    hook_allow = (
+                        hook_decision is not None
+                        and hook_decision.permission_decision == "allow"
+                    )
+                    if self._permission_manager is not None and not hook_allow:
                         level = getattr(tool_def, "safety_level", "none")
                         if level == "elevated":
                             outcome = await self._permission_manager.check_and_confirm(
@@ -754,7 +840,8 @@ class ReactLoop:
                             },
                         )
 
-                        # B3 P0-2: 注入防护扫描(告警不阻断)
+                        # B3 P0-2 + 阶段三批次1(B-12): 注入防护扫描 + 净化回灌
+                        # (告警不阻断: 高危阻断原始内容回灌, 注入占位; 低危包裹不可信标记)
                         if self._injection_guard.is_enabled(self._cfg):
                             tool_output = tool_result.output or ""
                             source = "sandbox" if tool_name == "code_execution" else "mcp"
@@ -762,8 +849,10 @@ class ReactLoop:
                                 truncated = self._injection_guard.truncate_tool_result(
                                     tool_output, source
                                 )
-                                scan_result = self._injection_guard.scan(
-                                    truncated, tool_call_id, source
+                                sanitized, scan_result = (
+                                    self._injection_guard.sanitize_external(
+                                        truncated, tool_call_id, source
+                                    )
                                 )
                                 for alert in scan_result.high_alerts:
                                     await self._emit_event(
@@ -776,9 +865,36 @@ class ReactLoop:
                                             "snippet": alert.snippet,
                                         },
                                     )
-                                tool_result.output = truncated
+                                tool_result.output = sanitized
                             except Exception:
                                 self._logger.exception("injection_guard scan failed")
+
+                        # 阶段三批次2(B-1): post_tool_use hook(additionalContext 注入)
+                        if self._hook_runner is not None:
+                            try:
+                                post_decision = await self._hook_runner.dispatch(
+                                    "post_tool_use",
+                                    {"session_id": self._session_id,
+                                     "turn": self._turn,
+                                     "tool_name": tool_name,
+                                     "tool_call_id": tool_call_id,
+                                     "tool_result": tool_result.output,
+                                     "tool_error": tool_result.error},
+                                )
+                                if post_decision.additional_context:
+                                    await self._context_manager.append_system_message(
+                                        self._conn,
+                                        turn=self._turn,
+                                        content=(
+                                            f"[Hook Context]\n"
+                                            f"{post_decision.additional_context}"
+                                        ),
+                                        zone="active",
+                                    )
+                            except Exception:
+                                self._logger.exception(
+                                    "post_tool_use hook failed (pass-through)"
+                                )
 
                         # 持久化 tool message
                         await self._context_manager.append_tool_message(
@@ -1015,6 +1131,25 @@ class ReactLoop:
         if self._compress_disabled:
             return
         try:
+            # 阶段三批次2(B-1): pre_compact hook(压缩前关键信息 flush)
+            if self._hook_runner is not None:
+                try:
+                    compact_decision = await self._hook_runner.dispatch(
+                        "pre_compact",
+                        {"session_id": self._session_id, "turn": self._turn},
+                    )
+                    if compact_decision.additional_context:
+                        await self._context_manager.append_system_message(
+                            self._conn,
+                            turn=self._turn,
+                            content=(
+                                f"[Hook Context]\n"
+                                f"{compact_decision.additional_context}"
+                            ),
+                            zone="active",
+                        )
+                except Exception:
+                    self._logger.exception("pre_compact hook failed (pass-through)")
             # §3.10.3 [MVP]: Stable Zone 合并(先于 active 压缩, 防止
             # Agentic RAG 多轮检索导致 Stable Zone 膨胀)
             await self._maybe_merge_stable_zone()

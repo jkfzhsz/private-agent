@@ -166,10 +166,13 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
 export default function App(): JSX.Element {
   const [events, setEvents] = useState<ReactEvent[]>([]);
   const [input, setInput] = useState("");
+  // 阶段三批次3(T3.4): 编辑重发纠正沉淀 —— 记录被编辑的原消息(发送时提取 correction 记忆)
+  const [editingOriginal, setEditingOriginal] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnStatus>("disconnected");
   // 对话文档上传: 文件引用(上传成功后记录, 发送时附带路径)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingUpload, setPendingUpload] = useState<{ name: string; path: string } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   // 生成中状态(显示"停止"按钮)
   const [isGenerating, setIsGenerating] = useState(false);
   // 对话中切换技能弹层
@@ -604,6 +607,22 @@ export default function App(): JSX.Element {
   const sendMessage = useCallback((): void => {
     let content = input.trim();
     if (!content) return;
+    // 阶段三批次3(T3.4): 编辑重发 → 先异步沉淀纠正记忆(不阻塞发送)
+    if (editingOriginal && editingOriginal.trim() !== content) {
+      try {
+        void adminFetch(
+          `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}/extract_correction`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ original: editingOriginal, corrected: content }),
+          },
+        ).catch(() => undefined);
+      } catch {
+        // 沉淀失败不影响对话
+      }
+    }
+    setEditingOriginal(null);
     // 已上传文件: 消息头部附带文件路径(模型可用 file_read 工具读取)
     if (pendingUpload) {
       content = `[已上传文件: ${pendingUpload.name} 路径: ${pendingUpload.path}]\n${content}`;
@@ -628,7 +647,7 @@ export default function App(): JSX.Element {
     setInput("");
     setPendingUpload(null); // 发送后清除文件引用(一次一文件)
     setIsGenerating(true); // 生成中(显示"停止"按钮)
-  }, [input, sessionId, sendWs, pendingUpload]);
+  }, [input, sessionId, sendWs, pendingUpload, editingOriginal, realSessionId]);
 
   // ── 生命周期:挂载时连接,卸载时关闭 ──────────────────────────────────────
   useEffect(() => {
@@ -924,6 +943,33 @@ export default function App(): JSX.Element {
                       {formatPayload("user", userEv.payload)}
                     </pre>
                   </div>
+                  {/* 阶段三批次3(T3.4): 编辑重发(最后一条 user 消息, 非生成中) */}
+                  {!isGenerating &&
+                    turnGroups.length > 0 &&
+                    turn === turnGroups[turnGroups.length - 1][0] && (
+                      <button
+                        onClick={() => {
+                          const orig = formatPayload("user", userEv.payload);
+                          setEditingOriginal(orig);
+                          setInput(orig);
+                          inputRef.current?.focus();
+                        }}
+                        title="编辑并重发(自动沉淀纠正记忆)"
+                        style={{
+                          alignSelf: "center",
+                          marginLeft: 6,
+                          padding: "4px 8px",
+                          fontSize: 11,
+                          borderRadius: 6,
+                          border: "1px solid var(--border)",
+                          background: "var(--panel-bg)",
+                          color: "var(--text-tertiary)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        ✎ 编辑
+                      </button>
+                    )}
                 </div>
               )}
 
@@ -1091,13 +1137,19 @@ export default function App(): JSX.Element {
                       </div>
                     )}
 
-                    {/* V2 P1: 权限确认卡片 */}
+                    {/* V2 P1 + 阶段三批次1(B-8): 权限确认卡片(风险分级 + 来源解释) */}
                     {confirmEvents.length > 0 &&
                       confirmEvents.map((ce) => {
                         const args = ce.payload.args_summary as Record<string, unknown> | undefined;
                         const argsPreview = args
                           ? JSON.stringify(args).slice(0, 200)
                           : "";
+                        const risk = (ce.payload.risk_level as string) || "medium";
+                        const reason = (ce.payload.reason as string) || "";
+                        const riskColor =
+                          risk === "high" ? "#dc2626" : risk === "medium" ? "#d97706" : "#16a34a";
+                        const riskLabel =
+                          risk === "high" ? "高风险" : risk === "medium" ? "中风险" : "低风险";
                         return (
                           <div
                             key={ce.id}
@@ -1109,9 +1161,28 @@ export default function App(): JSX.Element {
                               padding: "10px 12px",
                             }}
                           >
-                            <div style={{ fontSize: 12, fontWeight: 600, color: "#92400e", marginBottom: 4 }}>
-                              ⚠️ {formatPayload("tool_confirmation_required", ce.payload)}
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                              <span style={{ fontSize: 12, fontWeight: 600, color: "#92400e" }}>
+                                ⚠️ {formatPayload("tool_confirmation_required", ce.payload)}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  color: "#fff",
+                                  background: riskColor,
+                                  borderRadius: 10,
+                                  padding: "1px 8px",
+                                }}
+                              >
+                                {riskLabel}
+                              </span>
                             </div>
+                            {reason && (
+                              <div style={{ fontSize: 11, color: "#78350f", marginBottom: 4 }}>
+                                原因: {reason}
+                              </div>
+                            )}
                             {argsPreview && (
                               <pre
                                 style={{
@@ -1173,6 +1244,28 @@ export default function App(): JSX.Element {
                                   }}
                                 >
                                   拒绝
+                                </button>
+                                {/* 阶段三批次4(B-14): 稍后决定(挂起确认, 不立即拒绝) */}
+                                <button
+                                  onClick={() => {
+                                    sendWs({
+                                      type: "approval_defer",
+                                      session_id: realSessionId ?? sessionId,
+                                      confirmation_id: ce.payload.confirmation_id,
+                                    });
+                                  }}
+                                  title="60 秒后不自动拒绝, 挂起等待后续决定"
+                                  style={{
+                                    background: "#6d28d9",
+                                    color: "#fff",
+                                    border: "none",
+                                    borderRadius: 6,
+                                    padding: "4px 14px",
+                                    fontSize: 12,
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  稍后决定
                                 </button>
                               </div>
                             )}
@@ -1328,6 +1421,7 @@ export default function App(): JSX.Element {
         )}
         <input
           type="text"
+          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {

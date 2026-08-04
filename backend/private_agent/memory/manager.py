@@ -245,6 +245,71 @@ class MemoryManager:
             await self._repo.batch_insert(parsed)
         return parsed
 
+    async def maybe_extract_from_correction(
+        self,
+        original: str,
+        corrected: str,
+        user_id: int = 1,
+    ) -> list[Memory]:
+        """阶段三批次3(T3.4, 调研 round2 §4.4.1): 用户纠正沉淀。
+
+        用户对生成结果明确纠正/编辑后重发时触发:
+        1. 有 compress_adapter → LLM 定向提取纠正要点(压缩模型通道);
+        2. 提取内容封装为 correction 类型记忆(importance 0.9 高价值);
+        3. 无 adapter → 降级启发式(差异文本摘要), 不静默失败。
+
+        Returns:
+            沉淀的记忆列表(未触发/失败 → 空列表)。
+        """
+        if not original or not corrected or original == corrected:
+            return []
+        memory: Memory
+        if self._compress_adapter:
+            try:
+                prompt = (
+                    "用户对 Agent 的回答进行了纠正。请提取一条简明经验"
+                    "（≤80 字，面向未来同类任务），说明用户偏好或正确做法。\n"
+                    f"【用户原始表达/Agent 回答】{original[:800]}\n"
+                    f"【用户纠正后内容】{corrected[:800]}\n"
+                    "输出格式: 仅一行经验文本，不要任何前缀。"
+                )
+                result = await self._compress_adapter.chat(
+                    messages=[{"role": "user", "content": prompt}], tools=[]
+                )
+                content = (result.content or "").strip()
+                if not content:
+                    return []
+            except Exception:  # noqa: BLE001 - LLM 提取失败降级启发式
+                content = ""
+        else:
+            content = ""
+        if not content:
+            # 启发式降级: 差异文本首 120 字
+            content = f"用户纠正: {corrected[:120]}（原: {original[:80]}）"
+        memory = Memory(
+            type="correction",
+            content=content,
+            importance=TYPE_IMPORTANCE_MAP.get("correction", 0.9),
+        )
+        inserted = await self._repo.insert(memory)
+        memory.id = inserted
+        if self._react_events_insert is not None:
+            try:
+                await self._react_events_insert(
+                    self._repo._conn,
+                    session_id=0,
+                    turn=0,
+                    event_type="memory_extracted",
+                    payload={
+                        "source": "correction",
+                        "memory_id": inserted,
+                        "type": "correction",
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return [memory]
+
     @staticmethod
     def _parse_extracted(
         text: str, source_session_id: int

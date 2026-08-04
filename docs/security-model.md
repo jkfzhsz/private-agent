@@ -75,3 +75,24 @@
   - 网络隔离仅对读环境变量代理的 HTTP 库（httpx/requests）有效；socket 直连、Windows 内置 urllib（读注册表代理）可绕过——主要防线是 elevated 权限确认 + Job 资源约束
   - `create_subprocess_exec` 返回后 attach 存在毫秒级竞态（超短代码可能提前完成）——严格 CREATE_SUSPENDED 方案列为后续增强
   - 沙箱为"约束 + 审计 + 确认"三层，**非强隔离**（无 Docker/WSL2，普通用户无管理员权限）
+
+---
+
+## 阶段三新增安全面（2026-08-04）
+
+### Hooks 系统（core/hooks.py）
+- **默认空列表 = 行为不变**（config `hooks: []`）；hook 失败/超时默认放行（增强非门禁）。
+- **permissionDecision=deny 是终局**（阻断工具执行）；ask 走既有 elevated 确认通道。
+- **http hook 出网强制过 `security/ssrf.py` 校验**（回调 URL 与 http_request 同口径）；command hook 子进程无 shell（直接 argv exec）。
+- **审计**：hook 执行结果（含失败原因）随 `HookDecision.results` 记录，调用方落 react_events。
+- **威胁模型**：hook 是本地可信配置（admin 鉴权保护），不暴露给不可信输入；mcp_tool hook 经 MCP client 调用（配置信任）。
+- **注入面**：hooks 输出 JSON 仅取白名单字段（permissionDecision/updatedInput/additionalContext/stop），其余丢弃。
+
+### 权限规则层（tools/permission.py + permission_manager.py）
+- 规则 DSL 仅本地配置（config/skill/session 三来源），deny 优先于一切 allow。
+- 5 权限模式中 deny_all 全拒、plan 写操作每次确认（不缓存）、cautious 不缓存——**fail-closed 默认保留**（未确认/超时即拒）。
+- `sessions.permission_mode` 与会话锁定（locked_skill）同表管理，切换仅影响本会话。
+
+### 注入防护强化（injection_guard.py sanitize_external）
+- 高危（角色劫持/清空指令）→ 原始内容**阻断回灌**（仅注入占位提示 + `<<<EXTERNAL_UNTRUSTED_CONTENT>>>` 包裹）；
+- 低危 → 原内容包裹不可信标记；无 → 原样。

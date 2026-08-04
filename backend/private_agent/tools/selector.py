@@ -59,18 +59,33 @@ class ToolSelector:
         return 0.6 * kw_score + 0.3 * usage_score + 0.1 * desc_score
 
     def select(self, tools: list[ToolDef], user_message: str) -> list[ToolDef]:
-        """从工具池挑选本轮注入子集(保持工具池原始顺序)。"""
+        """从工具池挑选本轮注入子集(保持工具池原始顺序)。
+
+        阶段三批次3(T3.3, 调研 round2 §4.3.1): is_kernel=True 的内核工具
+        作为隐含锚点始终注入(高频基础能力), 非内核工具(search_knowledge/
+        read_artifact 下沉)靠关键词/历史评分竞争 top-N —— 实现"非场景
+        工具不主动注入"的下沉效果。
+        """
         if not self.enabled or not tools:
             return tools
         if len(tools) <= self.min_pool_size:
             return tools
         query_tokens = _tokenize(user_message)
-        anchors = [t for t in tools if t.name in self.always_include]
-        rest = [t for t in tools if t.name not in self.always_include]
+        # 内核工具 + always_include 配置 → 锚点集合
+        anchors = [
+            t for t in tools
+            if t.name in self.always_include or getattr(t, "is_kernel", True)
+        ]
+        rest = [t for t in tools if t.name not in self.always_include
+                and not getattr(t, "is_kernel", True)]
         ranked = sorted(rest, key=lambda t: self._score(t, query_tokens), reverse=True)
-        budget = max(0, self.top_n - len(anchors))
-        selected = ranked[:budget]
-        chosen = {t.name for t in selected} | {t.name for t in anchors}
-        # 保持池内原始顺序返回(工具顺序稳定, 避免每次重排扰动模型)
-        ordered = [t for t in tools if t.name in chosen]
-        return ordered
+        # top-N 减去锚点数后从 rest 取(防超限)
+        remaining = max(1, self.top_n - len(anchors))
+        chosen = ranked[:remaining]
+        seen: set[str] = {t.name for t in anchors}
+        result = list(anchors)
+        for t in chosen:
+            if t.name not in seen:
+                result.append(t)
+                seen.add(t.name)
+        return result

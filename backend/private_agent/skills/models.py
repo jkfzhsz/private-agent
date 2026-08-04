@@ -30,13 +30,33 @@ class SkillDependencies(BaseModel):
     tools: list[ToolDependency] = Field(default_factory=list)
 
 
+class SkillPermissionRule(BaseModel):
+    """阶段三批次3(T3.1, 调研 round2 §4.3.2) - 细粒度权限规则声明。
+
+    示例:
+      - tool: file_write
+        paths: ["//sandbox/**"]          # 路径模式(fnmatch, 匹配 args.path)
+      - tool: http_request
+        domains: ["api.example.com"]     # 域名白名单(匹配 args.url)
+    """
+
+    tool: str
+    paths: list[str] = Field(default_factory=list)
+    domains: list[str] = Field(default_factory=list)
+
+
 class SkillPermissions(BaseModel):
-    """蓝图 §7.2 permissions 段。"""
+    """蓝图 §7.2 permissions 段。
+
+    阶段三批次3(T3.1) 新增 rules: 细粒度工具权限规则声明,
+    激活时合入权限规则层(source=skill, 见 main._build_skill_permission_rules)。
+    """
 
     allow_file_write: bool = False
     allow_network: bool = False
     sandbox_enabled: bool = False
     max_file_size_mb: int = 50
+    rules: list[SkillPermissionRule] = Field(default_factory=list)
 
 
 class SkillKnowledgeBase(BaseModel):

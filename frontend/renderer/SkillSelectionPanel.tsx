@@ -6,6 +6,7 @@
 // - 激活成功回调 onActivated(skillName)
 // - 激活失败(404 skill_not_found 等)显示错误信息
 import { useCallback, useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 
 import { adminFetch } from "./utils/apiClient";
 
@@ -14,6 +15,13 @@ export interface SkillInfo {
   version: string;
   description: string;
   enabled: boolean;
+  permissions?: {
+    allow_file_write: boolean;
+    allow_network: boolean;
+    sandbox_enabled: boolean;
+    max_file_size_mb: number;
+    rules: { tool: string; paths: string[]; domains: string[] }[];
+  };
 }
 
 interface SkillSelectionPanelProps {
@@ -27,6 +35,16 @@ const SCENARIO_LABELS: Record<string, string> = {
   office: "办公",
   data_analysis: "数据分析",
   frontend_design: "前端设计",
+};
+
+// 阶段三批次3(T3.2): Required Permissions 徽章样式
+const permChipStyle: CSSProperties = {
+  fontSize: 11,
+  color: "#6d28d9",
+  background: "#f3e8ff",
+  border: "1px solid #e9d5ff",
+  borderRadius: 10,
+  padding: "1px 8px",
 };
 
 export default function SkillSelectionPanel({
@@ -134,6 +152,34 @@ export default function SkillSelectionPanel({
               <div style={{ color: "#666", fontSize: 13, marginTop: 4 }}>
                 {skill.description}
               </div>
+              {/* 阶段三批次3(T3.2): Required Permissions 展示 */}
+              {skill.permissions && (
+                <div
+                  style={{
+                    marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6,
+                  }}
+                >
+                  {skill.permissions.allow_file_write && (
+                    <span style={permChipStyle}>📁 文件读写</span>
+                  )}
+                  {skill.permissions.allow_network && (
+                    <span style={permChipStyle}>🌐 网络访问</span>
+                  )}
+                  {skill.permissions.sandbox_enabled && (
+                    <span style={permChipStyle}>⚙️ 沙箱执行</span>
+                  )}
+                  {skill.permissions.rules.map((r, i) => (
+                    <span key={i} style={permChipStyle}>
+                      🔐 {r.tool}
+                      {r.domains.length > 0 && ` → ${r.domains.join(",")}`}
+                      {r.paths.length > 0 && ` → ${r.paths.join(",")}`}
+                    </span>
+                  ))}
+                  {skill.permissions.max_file_size_mb < 50 && (
+                    <span style={permChipStyle}>📦 ≤{skill.permissions.max_file_size_mb}MB</span>
+                  )}
+                </div>
+              )}
             </span>
             <span
               style={{

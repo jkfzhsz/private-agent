@@ -104,6 +104,77 @@ def _get_permission_manager(session_id: int):
     return pm
 
 
+async def _build_skill_permission_rules(conn, session_id: int, cfg: dict) -> list:
+    """从会话锁定 Skill 的 manifest.permissions 构建权限规则(阶段三批次1/3)。
+
+    映射(蓝图 §7.2 SkillPermissions + 阶段三 T3.1 细粒度 rules → 规则 DSL):
+    - allow_file_write → allow:file_write + allow:file_read
+    - allow_network → allow:http_request + allow:web_search
+    - permissions.rules[].paths → allow:Tool(path 模式)(source=skill)
+    - permissions.rules[].domains → allow:Tool(*domain*)(匹配 args.url)
+
+    Returns:
+        PermissionRule 列表(无锁定 Skill 或未声明 → 空列表)。
+    """
+    from private_agent.skills.loader import SkillLoader
+    from private_agent.tools.permission import parse_rule
+
+    locked_skill = await conn.fetchval(
+        "SELECT locked_skill_name FROM sessions WHERE id = $1", session_id
+    )
+    if not locked_skill:
+        return []
+    try:
+        loader = SkillLoader.from_cfg(cfg)
+        skill = await loader.load(locked_skill, conn)
+    except Exception:  # noqa: BLE001 - Skill 加载失败不阻塞权限链路
+        return []
+    perms = skill.manifest.permissions
+    rules: list = []
+    if perms.allow_file_write:
+        rules.append(parse_rule("allow:file_write", source="skill"))
+        rules.append(parse_rule("allow:file_read", source="skill"))
+    if perms.allow_network:
+        rules.append(parse_rule("allow:http_request", source="skill"))
+        rules.append(parse_rule("allow:web_search", source="skill"))
+    # T3.1: 细粒度规则声明 → 带 specifier 的 allow 规则
+    for r in getattr(perms, "rules", []) or []:
+        for path in r.paths or []:
+            try:
+                rules.append(
+                    parse_rule(f"allow:{r.tool}({path})", source="skill")
+                )
+            except Exception:  # noqa: BLE001 - 单条非法规则跳过
+                continue
+        for domain in r.domains or []:
+            try:
+                rules.append(
+                    parse_rule(f"allow:{r.tool}(*{domain}*)", source="skill")
+                )
+            except Exception:  # noqa: BLE001
+                continue
+    return rules
+
+
+async def _sync_permission_manager(pm, conn, session_id: int, cfg: dict) -> None:
+    """同步会话级权限模式与 Skill 规则(阶段三批次1 T1.2/T3.1)。
+
+    - 模式变化时 set_mode(内部清缓存, 旧确认不再适用);
+    - 规则每次重建, 仅变化时 set_rules(不频繁触发)。
+    """
+    mode = (
+        await conn.fetchval(
+            "SELECT permission_mode FROM sessions WHERE id = $1", session_id
+        )
+        or "default"
+    )
+    if mode != pm.mode:
+        pm.set_mode(mode)
+    rules = await _build_skill_permission_rules(conn, session_id, cfg)
+    if rules != pm.rules:
+        pm.set_rules(rules)
+
+
 def _get_mcp_manager():
     """惰性初始化 MCPToolManager(避免 import 时产生循环依赖)。"""
     global _mcp_manager
@@ -140,6 +211,34 @@ def _build_compress_adapter(cfg):
     """构造压缩模型适配器(蓝图 §4.2,spec AC-7),测试可 monkeypatch。"""
     from private_agent.models.registry import build_compress_adapter
     return build_compress_adapter(cfg)
+
+
+def _build_hook_runner(cfg):
+    """构造 Hooks 调度器(阶段三批次2 B-1)。
+
+    从 cfg['hooks'](config.yaml + config_runtime 合并)解析 HookConfig;
+    空配置 → None(默认零回归)。mcp_tool 类型 hook 注入 MCP 调用回调。
+    """
+    from private_agent.core.hooks import HookRunner
+
+    hooks = cfg.get("hooks") or []
+    if not hooks:
+        return None
+    try:
+        configs = HookRunner.configs_from_list(hooks)
+    except Exception:  # noqa: BLE001 - 配置非法时禁用 hooks 不崩溃
+        return None
+    if not configs:
+        return None
+    mcp_call = None
+    if any(c.type == "mcp_tool" for c in configs):
+        async def _mcp_call(server: str, tool: str, payload: dict) -> dict:
+            mgr = _get_mcp_manager()
+            result = await mgr.call_tool(server, tool, payload)
+            return {"result": result}
+
+        mcp_call = _mcp_call
+    return HookRunner(hooks=configs, mcp_call=mcp_call)
 
 
 async def _get_frozen_tools(cfg, session_id: int, conn):
@@ -445,6 +544,30 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "type": "error",
                         "message": "unknown confirmation_id",
                     })
+            elif msg_type == "approval_defer":
+                # 阶段三批次4(B-14): 用户"稍后决定"挂起确认(60s 超时后
+                # 继续等待 defer_timeout, 期间仍可 resolve)
+                try:
+                    session_id = int(msg["session_id"])
+                    confirmation_id = str(msg["confirmation_id"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid approval_defer: session_id/confirmation_id required",
+                    })
+                    continue
+                pm = _permission_managers.get(session_id)
+                if pm is None or not pm.defer(confirmation_id):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "unknown confirmation_id for defer",
+                    })
+                    continue
+                await ws.send_json({
+                    "type": "approval_deferred",
+                    "confirmation_id": confirmation_id,
+                    "message": "已挂起, 可稍后决定(期间仍可同意/拒绝)",
+                })
     except WebSocketDisconnect:
         if session_id is not None:
             try:
@@ -588,6 +711,12 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
                 # V2 上下文工程: 压缩适配器(按 compress_model 构建,
                 # 未配置时 None → 压缩降级为纯滑动窗口)
                 compress_adapter=_build_compress_adapter(cfg),
+                # 阶段三批次2(B-1): Hooks 调度器(config hooks 为空 → None 零回归)
+                hook_runner=_build_hook_runner(cfg),
+            )
+            # 阶段三批次1(T1.2/T3.1): 同步会话级权限模式 + Skill 权限规则
+            await _sync_permission_manager(
+                _get_permission_manager(session_id), conn, session_id, cfg
             )
             await loop.run_turn(content)
             # 事件已通过 event_sink 实时推送, 无需再排空 event_queue

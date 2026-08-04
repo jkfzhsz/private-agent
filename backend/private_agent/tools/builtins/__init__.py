@@ -32,9 +32,29 @@ __all__ = [
 def register_all_builtins(registry: ToolRegistry) -> None:
     """注册所有 9 类内置工具到 ToolRegistry。
 
+    阶段三批次3(T3.3, 调研 round2 §4.3.1): 内核/非内核标记 ——
+    高频基础能力(calculator/datetime/web_search/code_execution/file_*
+    /http_request)标记 is_kernel=True(ToolSelector 隐含锚点始终注入);
+    场景相关工具(search_knowledge/read_artifact)保持 False, 靠关键词/
+    历史评分竞争 top-N —— 实现"非场景工具不主动注入"的下沉效果。
+
     Args:
         registry: ToolRegistry 实例。
     """
+    # 内核工具: 高频基础能力, 始终注入模型
+    for td in (
+        CALCULATOR_TOOL,
+        CODE_EXECUTION_TOOL,
+        DATETIME_TOOL,
+        FILE_READ_TOOL,
+        FILE_WRITE_TOOL,
+        HTTP_REQUEST_TOOL,
+        WEB_SEARCH_TOOL,
+    ):
+        td.is_kernel = True
+    # 场景相关工具: 下沉为 Skill 可选(office/data_analysis 声明依赖时启用)
+    SEARCH_KNOWLEDGE_TOOL.is_kernel = False
+    READ_ARTIFACT_TOOL.is_kernel = False
     tools = [
         CALCULATOR_TOOL,
         CODE_EXECUTION_TOOL,

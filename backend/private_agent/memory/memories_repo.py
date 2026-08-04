@@ -24,11 +24,14 @@ __all__ = ["Memory", "MemoriesRepo"]
 
 
 # 蓝图 §4.3 记忆类型枚举
-MEMORY_TYPES = frozenset({"preference", "fact", "todo", "decision"})
+# 阶段三批次3(T3.4, 调研 round2 §4.4.1): 新增 correction 类型(用户纠正沉淀,
+# 高价值信号, importance 默认 high)
+MEMORY_TYPES = frozenset({"preference", "fact", "todo", "decision", "correction"})
 
 # 蓝图 §4.3 importance 初始值规则
 TYPE_IMPORTANCE_MAP: dict[str, float] = {
     "decision": 0.9,
+    "correction": 0.9,  # 阶段三: 用户纠正是高价值信号
     "fact": 0.7,
     "preference": 0.6,
     "todo": 0.5,

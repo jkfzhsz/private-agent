@@ -139,6 +139,14 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await conn.execute(
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS workspace TEXT"
     )
+    # 阶段三批次1(T1.2, 调研 round2 §4.2.1): 会话级权限模式
+    # default/plan/acceptEdits/cautious/deny_all(老部署补列,新部署 schema.sql 已含)
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS permission_mode "
+        "VARCHAR(20) NOT NULL DEFAULT 'default' "
+        "CHECK (permission_mode IN "
+        "('default','plan','acceptEdits','cautious','deny_all'))"
+    )
     # §3.10.3 [MVP]: version_snapshots.scope CHECK 扩容(老部署补丁,含 stable_zone)
     await _migrate_version_snapshots_scope_check(conn)
 

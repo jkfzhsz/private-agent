@@ -60,6 +60,11 @@ class ToolRegistry:
     def list_tools_for_session(self, whitelist: list[str] | None) -> list[ToolDef]:
         """M3 §7.5: 按 Skill 工具白名单过滤(AC-3)。
 
+        白名单语义保持不变(过滤全部工具, 含内核工具)。
+        阶段三批次3(T3.3, 调研 round2 §4.3.1): is_kernel 标记的运行时效果
+        在 ToolSelector(内核工具始终注入模型, 非内核工具靠 top-N 挑选),
+        此处白名单为强约束不豁免。
+
         Args:
             whitelist: 允许的工具名列表;None 时返回全部(保 M1 行为)。
 

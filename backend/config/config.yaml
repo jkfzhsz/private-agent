@@ -19,7 +19,19 @@ system:
     memory_limit_mb: 512                   # 单 Worker 内存上限
 
 # ------------------------------------------------------------------------------
-# 1b. 数据库配置(2.10、9.13)
+# 1c. Hooks 生命周期系统(阶段三批次2, 调研 round2 §4.2.2) [runtime]
+# 默认空列表 = 行为不变(零回归)。每个 hook:
+#   name: 唯一名; event: user_prompt_submit/pre_tool_use/post_tool_use/stop/
+#                    pre_compact/permission_request
+#   type: command(子进程, stdin JSON/stdout JSON) | http(回调 URL, 过 SSRF) |
+#         mcp_tool(MCP 工具)
+# 决策回写: permissionDecision(allow/deny/ask/defer) / updatedInput /
+#           additionalContext / stop
+# ------------------------------------------------------------------------------
+hooks: []                                  # [runtime] 由设置页 admin CRUD 管理
+
+# ------------------------------------------------------------------------------
+# 2. 数据库配置(2.10、9.13)
 # ------------------------------------------------------------------------------
 database:
   host: "127.0.0.1"
@@ -71,6 +83,9 @@ models:
   # 压缩/评测模型按"模型名"匹配 providers(设置页配置的 model_name),
   # 不配置则压缩/评测功能优雅降级(不生效不崩溃)。
   compress_model: ""                       # [runtime]
+  # 阶段三 S-1: compress_model 未配置时回退使用 fallback_chain 首选(主模型兼压缩),
+  # 保证记忆提取/纠正沉淀可用; false 保持"无压缩模型即禁用"旧语义。
+  compress_fallback_main: true             # [runtime]
 
 # ------------------------------------------------------------------------------
 # 4. 上下文工程配置(3.5、3.7、3.9、3.10、3.13)

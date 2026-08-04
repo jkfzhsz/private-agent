@@ -196,6 +196,49 @@ async def extract_memory(session_id: int):
         )
 
 
+class CorrectionExtractRequest(BaseModel):
+    """阶段三批次3(T3.4, 调研 round2 §4.4.1) - 纠正沉淀请求体。"""
+
+    original: str
+    corrected: str
+
+
+@router.post("/sessions/{session_id}/extract_correction", response_model=None)
+async def extract_correction(session_id: int, body: CorrectionExtractRequest):
+    """阶段三批次3(T3.4): 用户纠正 → correction 记忆沉淀。
+
+    前端在检测到"用户编辑消息后重发"时调用; 提取走 compress_adapter
+    (LLM 定向提取, 无适配器时启发式降级), 落 user_memories(correction 类型)。
+
+    Returns:
+        200: {"count": int, "type": "correction"}
+        500: {"error": "extract_failed"}
+    """
+    try:
+        conn = await db.connect()
+        try:
+            repo = MemoriesRepo(conn)
+            mgr = MemoryManager(
+                memories_repo=repo,
+                compress_adapter=_build_compress_adapter(await _load_cfg()),
+            )
+            memories = await mgr.maybe_extract_from_correction(
+                original=body.original, corrected=body.corrected,
+            )
+            return {
+                "count": len(memories),
+                "type": "correction",
+                "content": memories[0].content if memories else "",
+            }
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "extract_failed"},
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 知识库管理(蓝图 §4.16)
 # ══════════════════════════════════════════════════════════════════════════
@@ -339,8 +382,11 @@ async def activate_skill(session_id: int, body: ActivateSkillRequest):
 async def list_skills():
     """列出所有 enabled Skill(plan step 17)。
 
+    阶段三批次3(T3.2, 调研 round2 §4.3.2): 返回 permissions 摘要
+    (安装/激活 UI 展示 Required Permissions)。
+
     Returns:
-        200: [{name, version, description, enabled}]
+        200: [{name, version, description, enabled, permissions}]
         500: {"error": "skills_list_failed"}
     """
     try:
@@ -355,6 +401,7 @@ async def list_skills():
                     "version": s.manifest.version,
                     "description": s.manifest.description,
                     "enabled": s.manifest.enabled,
+                    "permissions": _skill_permissions_summary(s.manifest),
                 }
                 for s in skills
             ]
@@ -365,6 +412,32 @@ async def list_skills():
             status_code=500,
             content={"error": "skills_list_failed"},
         )
+
+
+def _skill_permissions_summary(manifest) -> dict:
+    """汇总 Skill 权限声明(阶段三批次3 T3.2)。
+
+    Returns:
+        {allow_file_write, allow_network, sandbox_enabled,
+         rules: [{tool, paths, domains}]}
+    """
+    perms = manifest.permissions
+    rules = []
+    for r in getattr(perms, "rules", []) or []:
+        rules.append(
+            {
+                "tool": r.tool,
+                "paths": list(r.paths or []),
+                "domains": list(r.domains or []),
+            }
+        )
+    return {
+        "allow_file_write": bool(getattr(perms, "allow_file_write", False)),
+        "allow_network": bool(getattr(perms, "allow_network", False)),
+        "sandbox_enabled": bool(getattr(perms, "sandbox_enabled", False)),
+        "max_file_size_mb": int(getattr(perms, "max_file_size_mb", 50)),
+        "rules": rules,
+    }
 
 
 @router.get("/skills/{skill_name}", response_model=None)
@@ -903,6 +976,190 @@ async def test_sandbox(body: SandboxTestRequest):
             "stderr": f"{type(e).__name__}: {e}",
             "duration_ms": 0,
         }
+
+
+# ── 阶段三批次1(T1.2, 调研 round2 §4.2.1): 会话级权限模式 ───────────────────
+
+
+class PermissionModeUpdateRequest(BaseModel):
+    """权限模式更新请求体。"""
+
+    session_id: int
+    mode: str
+
+
+@router.get("/settings/permission", response_model=None)
+async def get_permission_config(session_id: int = 1):
+    """读取会话权限模式与支持的模式列表(阶段三批次1 T1.2)。
+
+    Args:
+        session_id: 会话 ID(默认 1, 桌面单用户场景)。
+    """
+    from private_agent.tools.permission_manager import PERMISSION_MODES
+
+    conn = await db.connect()
+    try:
+        mode = (
+            await conn.fetchval(
+                "SELECT permission_mode FROM sessions WHERE id = $1", session_id
+            )
+            or "default"
+        )
+    finally:
+        await conn.close()
+    return {
+        "session_id": session_id,
+        "mode": mode,
+        "modes": list(PERMISSION_MODES),
+        "mode_descriptions": {
+            "default": "默认: safe 自动 / elevated 确认(60s 超时拒绝 + 会话缓存)",
+            "plan": "计划模式: 只读放行, 写操作每次确认(不缓存)",
+            "acceptEdits": "编辑模式: 文件类工具自动批准, 其余 elevated 走确认",
+            "cautious": "谨慎模式: 确认结果不缓存, 每次都询问",
+            "deny_all": "全拒模式: 所有工具调用直接拦截",
+        },
+    }
+
+
+@router.put("/settings/permission", response_model=None)
+async def update_permission_config(body: PermissionModeUpdateRequest):
+    """修改会话权限模式(阶段三批次1 T1.2)。
+
+    写入 sessions.permission_mode; 运行中 PermissionManager 在下一轮
+    user_message 时由 _sync_permission_manager 同步(模式变化清缓存)。
+    """
+    from private_agent.tools.permission_manager import PERMISSION_MODES
+
+    if body.mode not in PERMISSION_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid mode: {body.mode!r} (expected {list(PERMISSION_MODES)})",
+        )
+    conn = await db.connect()
+    try:
+        updated = await conn.execute(
+            "UPDATE sessions SET permission_mode = $1 WHERE id = $2",
+            body.mode, body.session_id,
+        )
+        if updated == "UPDATE 0":
+            raise HTTPException(status_code=404, detail="session not found")
+    finally:
+        await conn.close()
+    return {"status": "ok", "session_id": body.session_id, "mode": body.mode}
+
+
+# ── 阶段三批次 2(B-1, 调研 round2 §4.2.2): Hooks 管理 ───────────────────────
+
+
+class HookItemRequest(BaseModel):
+    """Hook 配置项请求体(与 HookConfig 字段对齐)。"""
+
+    name: str
+    event: str
+    type: str = "command"
+    command: str | None = None
+    url: str | None = None
+    mcp_server: str | None = None
+    mcp_tool: str | None = None
+    timeout: float = 5.0
+    enabled: bool = True
+
+
+async def _read_hooks(cfg: dict) -> list[dict]:
+    """读取 hooks 配置(yaml + config_runtime 合并, runtime > yaml)。"""
+    hooks = cfg.get("hooks") or []
+    if not isinstance(hooks, list):
+        return []
+    return [h for h in hooks if isinstance(h, dict)]
+
+
+async def _write_hooks(hooks: list[dict]) -> None:
+    """写 hooks 到 config_runtime(运行时覆盖, 重启保留)。"""
+    conn = await db.connect()
+    try:
+        if hooks:
+            await _set_runtime(conn, "hooks", hooks)
+        else:
+            await conn.execute("DELETE FROM config_runtime WHERE key = 'hooks'")
+    finally:
+        await conn.close()
+
+
+@router.get("/hooks", response_model=None)
+async def list_hooks():
+    """列出全部 hooks 配置(阶段三批次2 B-1)。"""
+    cfg = await _load_cfg()
+    return {"hooks": await _read_hooks(cfg)}
+
+
+@router.post("/hooks", response_model=None)
+async def create_hook(body: HookItemRequest):
+    """新增 hook(阶段三批次2 B-1)。"""
+    from private_agent.core.hooks import HookRunner
+
+    try:
+        HookRunner.config_from_dict(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    cfg = await _load_cfg()
+    hooks = await _read_hooks(cfg)
+    if any(h.get("name") == body.name for h in hooks):
+        raise HTTPException(status_code=409, detail=f"hook '{body.name}' already exists")
+    hooks.append(body.model_dump())
+    await _write_hooks(hooks)
+    return {"status": "ok", "hook": body.model_dump()}
+
+
+@router.put("/hooks/{name}", response_model=None)
+async def update_hook(name: str, body: HookItemRequest):
+    """更新 hook(按 name 定位; 阶段三批次2 B-1)。"""
+    from private_agent.core.hooks import HookRunner
+
+    if body.name != name:
+        raise HTTPException(status_code=422, detail="name mismatch")
+    try:
+        HookRunner.config_from_dict(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    cfg = await _load_cfg()
+    hooks = await _read_hooks(cfg)
+    idx = next((i for i, h in enumerate(hooks) if h.get("name") == name), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"hook '{name}' not found")
+    hooks[idx] = body.model_dump()
+    await _write_hooks(hooks)
+    return {"status": "ok", "hook": body.model_dump()}
+
+
+@router.delete("/hooks/{name}", response_model=None)
+async def delete_hook(name: str):
+    """删除 hook(阶段三批次2 B-1)。"""
+    cfg = await _load_cfg()
+    hooks = await _read_hooks(cfg)
+    remaining = [h for h in hooks if h.get("name") != name]
+    if len(remaining) == len(hooks):
+        raise HTTPException(status_code=404, detail=f"hook '{name}' not found")
+    await _write_hooks(remaining)
+    return {"status": "ok", "deleted": name}
+
+
+@router.get("/hooks/events", response_model=None)
+async def list_hook_events():
+    """返回支持的事件与类型(前端表单用; 阶段三批次2 B-1)。"""
+    from private_agent.core.hooks import HOOK_EVENTS, HOOK_TYPES
+
+    return {
+        "events": list(HOOK_EVENTS),
+        "types": list(HOOK_TYPES),
+        "event_descriptions": {
+            "user_prompt_submit": "用户消息提交(可拒绝/修改)",
+            "pre_tool_use": "工具执行前(permissionDecision 决策)",
+            "post_tool_use": "工具执行后(注入 additionalContext)",
+            "stop": "收尾前(可阻止过早收尾)",
+            "pre_compact": "上下文压缩前(关键信息 flush)",
+            "permission_request": "权限确认请求(外部策略接管)",
+        },
+    }
 
 
 @router.get("/sessions", response_model=None)

@@ -37,6 +37,14 @@ class ToolDef:
     - "none"/"safe": 自动执行,不打断 Agent
     - "elevated": 执行前 WS 推送确认请求(60s 超时拒绝 + 会话级缓存)
     - "dangerous": 直接拦截
+
+    risk_level(阶段三批次1 B-8, 调研 round2 §4.2.3): 确认卡片风险分级展示
+    - "low" | "medium" | "high"; 默认 "medium"; 由 assess_risk 结合参数启发式。
+
+    is_kernel(阶段三批次3 T3.3, 调研 round2 §4.3.1): 内核工具标记
+    - True: ToolSelector 作为隐含锚点始终注入(高频基础能力)
+    - False: 靠关键词/历史评分竞争 top-N(场景相关工具下沉)
+    默认 False: 仅内置工具注册时显式标记内核, 避免测试/扩展工具意外变锚点。
     """
 
     name: str
@@ -44,6 +52,8 @@ class ToolDef:
     parameters_schema: dict
     handler: Callable[[dict], Awaitable[ToolResult]]
     safety_level: str = "none"
+    risk_level: str = "medium"
+    is_kernel: bool = False
 
     def to_openai_schema(self) -> dict:
         """转换为 OpenAI tools 参数格式。"""
@@ -55,6 +65,46 @@ class ToolDef:
                 "parameters": self.parameters_schema,
             },
         }
+
+
+# 高风险参数启发式: (工具名, args 键, 值子串) → 升为 high(阶段三批次1 B-8)
+_HIGH_RISK_HINTS = (
+    ("file_write", "path", ".env"),
+    ("file_read", "path", ".env"),
+    ("http_request", "url", "169.254.169.254"),
+    ("http_request", "url", "127.0.0.1"),
+    ("http_request", "url", "localhost"),
+    ("code_execution", "code", "rm -rf"),
+    ("code_execution", "code", "os.remove"),
+)
+
+
+def assess_risk(tool_def: ToolDef, args: dict | None = None) -> str:
+    """评估工具调用的风险分级(B-8, 纯函数)。
+
+    规则:
+    - ToolDef.risk_level 为 high → 保持 high;
+    - 否则按参数启发式(路径含 .env / 内网 URL / 危险命令片段)升为 high;
+    - ToolDef.risk_level 为 low 且无启发式命中 → low;
+    - 默认 → medium。
+
+    Args:
+        tool_def: 工具定义。
+        args: 本次调用的参数(可选, 用于启发式)。
+
+    Returns:
+        "low" | "medium" | "high"。
+    """
+    base = getattr(tool_def, "risk_level", "medium")
+    if base == "high":
+        return "high"
+    args = args or {}
+    for tool_name, key, hint in _HIGH_RISK_HINTS:
+        if tool_def.name == tool_name:
+            value = args.get(key)
+            if isinstance(value, str) and hint in value:
+                return "high"
+    return base
 
 
 # ──────────────────────────────────────────────────────────────────────────────

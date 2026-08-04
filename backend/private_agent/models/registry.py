@@ -104,13 +104,28 @@ def build_compress_adapter(cfg: dict) -> ModelAdapter | None:
     V2 P3: 不再硬编码 glm/PA_GLM_API_KEY, 按 compress_model(model 名)匹配
     任意 provider。无匹配(未配置/模型不存在) → None, 压缩优雅降级。
 
+    阶段三 S-1(round2 §4.4.1): 当 compress_model 未配置或无匹配时, 若
+    cfg['models']['compress_fallback_main']=true(默认)则回退使用 fallback_chain
+    首选 provider(主模型兼作压缩模型)——保证记忆提取/纠正沉淀在未单独配置
+    压缩模型的场景(当前生产: 仅 deepseek-flash)真正可用, 而非静默失效。
+    显式 false 时保持 V2 P3 的 None 降级语义(可回退)。
+
     Returns:
-        ModelAdapter 实例;无匹配配置时返回 None。
+        ModelAdapter 实例;无匹配配置且无可用回退时返回 None。
     """
     compress_model = cfg.get("models", {}).get("compress_model")
-    if not compress_model:
-        return None
-    return build_adapter_for_model_name(cfg, compress_model)
+    if compress_model:
+        adapter = build_adapter_for_model_name(cfg, compress_model)
+        if adapter is not None:
+            return adapter
+    if cfg.get("models", {}).get("compress_fallback_main", True):
+        try:
+            chain = build_fallback_chain(cfg)
+        except Exception:  # noqa: BLE001 - 配置缺失时保持 None 降级
+            return None
+        if chain._adapters:
+            return chain._adapters[0]
+    return None
 
 
 def build_default_adapter(cfg: dict) -> ModelAdapter | None:
