@@ -391,6 +391,8 @@ class ReactLoop:
                 )
                 self._transition(ReactLoopState.ERROR)
                 await self._save_checkpoint()
+                # C-3(A.3.5): 所有退出路径统一尝试压缩, 防止上下文无限增长
+                await self._maybe_compress()
                 return
 
             # B4 P0-4: 记录对话计费
@@ -428,18 +430,18 @@ class ReactLoop:
                 has_emitted_thinking = True
 
             if result.tool_calls:
-                # 持久化 assistant 消息(含 tool_calls + reasoning_content)
-                # V2 上下文工程: reasoning_content 一并持久化, 续聊 reload 后
-                # 原样回传(DeepSeek V4 系强制要求, AI-Agents-in-Depth 2.3.1)
-                await self._context_manager.append_assistant_message(
-                    self._conn,
-                    turn=self._turn,
-                    content=result.content,
-                    tool_calls=result.tool_calls,
-                    reasoning_content=(
+                # C-2(架构修订 A.2.9): assistant 消息不立即落库, 先收集 payload,
+                # 与全部 tool 消息在 Phase C 用同一事务提交 —— 保证同轮
+                # assistant(tool_calls) + tool 消息要么全写要么全不写,
+                # 杜绝"半残状态"导致下次模型调用 400 配对错误。
+                # (reasoning_content 一并持久化, 续聊 reload 后原样回传)
+                assistant_payload = {
+                    "content": result.content,
+                    "tool_calls": result.tool_calls,
+                    "reasoning_content": (
                         getattr(result, "reasoning_content", None) or None
                     ),
-                )
+                }
                 # V2 P2: 同轮多 tool_call 并行执行(蓝图 L612-616 + L4948)
                 # Phase A(串行): 解析 + emit tool_call + 权限确认 + 构造执行计划
                 plans: list[dict] = []
@@ -508,6 +510,8 @@ class ReactLoop:
                                 },
                             )
                             self._transition(ReactLoopState.IDLE)
+                            # C-3(A.3.5): 所有退出路径统一尝试压缩
+                            await self._maybe_compress()
                             return
 
                     # 产出 tool_call event
@@ -698,82 +702,95 @@ class ReactLoop:
                         results_by_idx[p["idx"]] = tr
 
                 # Phase C(按模型原始 tool_calls 顺序): emit tool_result +
-                # 注入防护扫描 + 持久化
-                for plan in plans:
-                    tool_result = results_by_idx[plan["idx"]]
-                    tool_name = plan["tool_name"]
-                    tool_call_id = plan["tool_call_id"]
-
-                    # V2 状态栏: 记录工具结果(失败计数供状态栏渲染)
-                    self._status_bar.record_tool_result(
-                        tool_name, error=tool_result.error
-                    )
-
-                    # 产出 tool_result event
-                    await self._emit_event(
-                        "tool_result",
-                        payload={
-                            "tool_call_id": tool_call_id,
-                            "tool_name": tool_name,
-                            "output": tool_result.output,
-                            "error": tool_result.error,
-                        },
-                    )
-
-                    # B3 P0-2: 注入防护扫描(告警不阻断)
-                    if self._injection_guard.is_enabled(self._cfg):
-                        tool_output = tool_result.output or ""
-                        source = "sandbox" if tool_name == "code_execution" else "mcp"
-                        try:
-                            truncated = self._injection_guard.truncate_tool_result(
-                                tool_output, source
-                            )
-                            scan_result = self._injection_guard.scan(
-                                truncated, tool_call_id, source
-                            )
-                            for alert in scan_result.high_alerts:
-                                await self._emit_event(
-                                    "injection_alert",
-                                    payload={
-                                        "pattern": alert.pattern,
-                                        "call_id": alert.call_id,
-                                        "risk": alert.risk,
-                                        "source": alert.source,
-                                        "snippet": alert.snippet,
-                                    },
-                                )
-                            tool_result.output = truncated
-                        except Exception:
-                            self._logger.exception("injection_guard scan failed")
-
-                    # 持久化 tool message
-                    await self._context_manager.append_tool_message(
+                # 注入防护扫描 + 持久化。
+                # C-2(A.2.9): assistant + 全部 tool 消息在同一事务提交。
+                # 工具执行(Phase B)在事务外; 仅落库在一个事务内 —— 任一
+                # INSERT 失败整体回滚, DB 不留"assistant(tool_calls) 无配对
+                # tool 消息"的半残状态(400 根治)。emit 事件在事务内无碍(非 DB)。
+                async with self._conn.transaction():
+                    # 先写 assistant(含 tool_calls + reasoning_content)
+                    await self._context_manager.append_assistant_message(
                         self._conn,
                         turn=self._turn,
-                        tool_call_id=tool_call_id,
-                        content=tool_result.output,
-                        name=tool_name,
+                        content=assistant_payload["content"],
+                        tool_calls=assistant_payload["tool_calls"],
+                        reasoning_content=assistant_payload["reasoning_content"],
                     )
+                    for plan in plans:
+                        tool_result = results_by_idx[plan["idx"]]
+                        tool_name = plan["tool_name"]
+                        tool_call_id = plan["tool_call_id"]
 
-                    # §4.15 [MVP]: search_knowledge 结果额外注入 Stable Zone
-                    # (除本轮 tool message 外, 供后续轮次长期参考; 蓝图要求
-                    # "工具返回的 KB 片段由 context_manager 注入 Stable Zone")
-                    if (
-                        tool_name == "search_knowledge"
-                        and not tool_result.error
-                        and tool_result.output
-                    ):
-                        try:
-                            await self._context_manager.inject_kb_chunks(
-                                self._conn,
-                                turn=self._turn,
-                                content=tool_result.output,
-                            )
-                        except Exception:
-                            # 注入失败不影响本轮对话
-                            self._logger.exception(
-                                "inject_kb_chunks failed (turn=%s)", self._turn,
-                            )
+                        # V2 状态栏: 记录工具结果(失败计数供状态栏渲染)
+                        self._status_bar.record_tool_result(
+                            tool_name, error=tool_result.error
+                        )
+
+                        # 产出 tool_result event
+                        await self._emit_event(
+                            "tool_result",
+                            payload={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "output": tool_result.output,
+                                "error": tool_result.error,
+                            },
+                        )
+
+                        # B3 P0-2: 注入防护扫描(告警不阻断)
+                        if self._injection_guard.is_enabled(self._cfg):
+                            tool_output = tool_result.output or ""
+                            source = "sandbox" if tool_name == "code_execution" else "mcp"
+                            try:
+                                truncated = self._injection_guard.truncate_tool_result(
+                                    tool_output, source
+                                )
+                                scan_result = self._injection_guard.scan(
+                                    truncated, tool_call_id, source
+                                )
+                                for alert in scan_result.high_alerts:
+                                    await self._emit_event(
+                                        "injection_alert",
+                                        payload={
+                                            "pattern": alert.pattern,
+                                            "call_id": alert.call_id,
+                                            "risk": alert.risk,
+                                            "source": alert.source,
+                                            "snippet": alert.snippet,
+                                        },
+                                    )
+                                tool_result.output = truncated
+                            except Exception:
+                                self._logger.exception("injection_guard scan failed")
+
+                        # 持久化 tool message
+                        await self._context_manager.append_tool_message(
+                            self._conn,
+                            turn=self._turn,
+                            tool_call_id=tool_call_id,
+                            content=tool_result.output,
+                            name=tool_name,
+                        )
+
+                        # §4.15 [MVP]: search_knowledge 结果额外注入 Stable Zone
+                        # (除本轮 tool message 外, 供后续轮次长期参考; 蓝图要求
+                        # "工具返回的 KB 片段由 context_manager 注入 Stable Zone")
+                        if (
+                            tool_name == "search_knowledge"
+                            and not tool_result.error
+                            and tool_result.output
+                        ):
+                            try:
+                                await self._context_manager.inject_kb_chunks(
+                                    self._conn,
+                                    turn=self._turn,
+                                    content=tool_result.output,
+                                )
+                            except Exception:
+                                # 注入失败不影响本轮对话
+                                self._logger.exception(
+                                    "inject_kb_chunks failed (turn=%s)", self._turn,
+                                )
 
                 # OBSERVING → 继续循环
                 self._transition(ReactLoopState.OBSERVING)
@@ -807,6 +824,8 @@ class ReactLoop:
         )
         self._transition(ReactLoopState.ERROR)
         await self._save_checkpoint()
+        # C-3(A.3.5): 迭代上限退出同样触发压缩
+        await self._maybe_compress()
 
     async def _emit_delta(self, text: str) -> None:
         """流式增量回调: 产出 delta 事件(前端逐句/逐字渲染)。"""
@@ -1003,8 +1022,12 @@ class ReactLoop:
             )
             if not triggered:
                 return
-            # 触发 → 执行压缩(滑动窗口 + 可选摘要), 基于含内部 metadata 的消息
-            meta_msgs = self._context_manager.get_messages_with_meta()
+            # 触发 → 执行压缩(滑动窗口 + 可选摘要)。
+            # C-1(架构修订 P1-7): 压缩只作用于 active zone —— Frozen/Stable
+            # (system prompt/记忆/KB) 永不参与压缩, 防止被误标 compressed
+            # 过滤出 API 上下文。_apply_compression 按 msg_id 回写也只命中
+            # active zone 消息。
+            meta_msgs = list(self._context_manager.active_zone.messages)
             result = await self._compressor.execute(
                 meta_msgs,
                 keep_turns=int(cfg.get("keep_turns", 6)),

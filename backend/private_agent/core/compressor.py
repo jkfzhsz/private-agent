@@ -173,6 +173,11 @@ class Compressor:
         result = []
         for m in messages:
             msg = dict(m)
+            # C-1(P1-7) 防御: 显式 zone != active 的消息(理论上调用方已过滤)
+            # 永不标记 compressed —— system prompt/记忆/KB 常驻
+            if msg.get("zone") is not None and msg.get("zone") != "active":
+                result.append(msg)
+                continue
             turn = msg.get("turn", 0)
             if turn < keep_from:
                 # 检查是否有 tool_result 配对在 keep_from 之后
