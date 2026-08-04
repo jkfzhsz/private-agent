@@ -291,6 +291,12 @@ class ReactLoop:
             # 构建消息列表
             messages = await self._context_manager.build_messages()
 
+            # 协议兜底: 修复 tool_calls 配对完整性(压缩/恢复/并行执行边界
+            # 可能让 assistant.tool_calls 缺少对应 tool 消息 → 上游 400
+            # "tool_calls must be followed by tool messages")。扫描为
+            # 只读修复: 仅当缺配对时补占位 tool 消息, 不重复追加。
+            messages = self._repair_tool_pairing(messages)
+
             # V2 状态栏注入: 追加到上下文末尾的 user-role meta 消息
             # (AI-Agents-in-Depth §2.6.3)。仅内存注入不持久化; 追加到末尾
             # 不破坏 KV Cache 前缀(因果注意力只依赖前序 token)。
@@ -1162,6 +1168,45 @@ class ReactLoop:
             f"{tool_name} 且没有进展——这看起来是一个死循环。请停止该模式, "
             "要么换一种方法继续, 要么直接给出最终回答。"
         )
+
+    def _repair_tool_pairing(self, messages: list[dict]) -> list[dict]:
+        """修复 tool_calls 配对完整性(只读, 返回新列表)。
+
+        场景: 上下文压缩/DB 恢复/并行执行边界可能导致某条 assistant
+        消息带 tool_calls 但缺少对应 role=tool 的响应消息 → 模型 API
+        400 "assistant message with tool_calls must be followed by tool
+        messages"。这里扫描所有 assistant.tool_calls, 对缺失的
+        tool_call_id 补一条占位 tool 消息(不重复追加已存在的)。
+
+        Args:
+            messages: build_messages 输出(可能是内部引用, 不改原列表)。
+
+        Returns:
+            修复后的消息列表(新列表, 原列表不变)。
+        """
+        pending_ids: list[str] = []
+        fixed: list[dict] = []
+        for msg in messages:
+            fixed.append(msg)
+            role = msg.get("role")
+            if role == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    cid = tc.get("id") if isinstance(tc, dict) else None
+                    if cid:
+                        pending_ids.append(cid)
+            elif role == "tool" and msg.get("tool_call_id"):
+                if msg["tool_call_id"] in pending_ids:
+                    pending_ids.remove(msg["tool_call_id"])
+        # 残留未配对的 tool_call_id → 补占位 tool 消息
+        for cid in pending_ids:
+            fixed.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": cid,
+                    "content": "(工具结果缺失, 已忽略该调用)",
+                }
+            )
+        return fixed
 
     def _find_tool(self, name: str) -> ToolDef | None:
         """按名查找工具定义。

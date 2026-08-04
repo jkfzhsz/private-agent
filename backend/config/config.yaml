@@ -61,7 +61,7 @@ models:
     # context_window 可覆盖(models.providers.{name}.context_window)。
     context_window: 32768     # 原默认 8000 → 32K(压缩更晚触发)
     max_output_tokens: 4096   # 最大输出 tokens(单次模型响应, 原 2048)
-    max_turns: 20             # 最大对话轮次(单轮对话内工具迭代上限)
+    max_turns: 8              # 最大对话轮次(单轮对话内工具迭代上限, 原 20 → 8 防循环爆炸)
     # max_input_tokens 已废弃(从未被消费, 实际限制由 context_window 决定)
 
   router:
