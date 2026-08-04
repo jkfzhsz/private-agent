@@ -1677,10 +1677,21 @@ async def upload_skill_zip(file: UploadFile = File(...)):
             )
         members.append((info, norm))
 
-    # 定位 skill.yaml: 根目录优先, 其次唯一子目录
-    yaml_hits = [(i, n) for i, n in members if n == "skill.yaml" or n.endswith("/skill.yaml")]
+    # 定位 skill.yaml: 根目录优先, 其次唯一子目录; 大小写不敏感(SKILL.yaml 兼容)
+    yaml_hits = [
+        (i, n) for i, n in members
+        if n.lower() == "skill.yaml" or n.lower().endswith("/skill.yaml")
+    ]
     if not yaml_hits:
-        return JSONResponse(status_code=400, content={"error": "skill_yaml_not_found"})
+        # 2026-08-04: 错误信息带 zip 内实际文件清单, 用户可立即定位问题
+        listing = ", ".join(n for _, n in members[:10]) or "(空压缩包)"
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "skill_yaml_not_found",
+                "detail": f"压缩包内未找到 skill.yaml, 实际文件: {listing}",
+            },
+        )
     chosen = min(yaml_hits, key=lambda t: t[1].count("/"))  # 深度最小的
     yaml_info, yaml_norm = chosen
     base_prefix = yaml_norm[: -len("skill.yaml")]  # 技能目录前缀(可能为空)
