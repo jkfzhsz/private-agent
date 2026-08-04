@@ -87,6 +87,8 @@ class ReactLoop:
         from private_agent.tools.selector import ToolSelector
 
         self._tool_selector = ToolSelector(cfg or {})
+        # 保险箱: 工具配对 400 回退计数(单轮内最多 2 次)
+        self._pairing_rollbacks = 0
         self._conn = conn
         # V2 P1: 工具权限确认管理器(蓝图 §5.12), None 时跳过确认(测试/兼容)
         self._permission_manager = permission_manager
@@ -353,6 +355,33 @@ class ReactLoop:
                         max_tokens=self._max_output_tokens,
                     )
             except AllProvidersFailedError as e:
+                # 保险箱: 工具调用配对类 400(压缩/恢复/转换边界未覆盖场景) →
+                # 自动回退最近一轮工具调用, 让模型换策略重试, 不中断对话。
+                err_text = str(e)
+                if (
+                    "tool_calls" in err_text
+                    and "must be followed" in err_text
+                    and self._pairing_rollbacks < 2
+                ):
+                    self._pairing_rollbacks += 1
+                    self._logger.warning(
+                        "tool pairing 400 detected, rolling back last tool round "
+                        "(session=%s, attempt=%d)",
+                        self._session_id, self._pairing_rollbacks,
+                    )
+                    await self._emit_event(
+                        "error",
+                        payload={
+                            "message": (
+                                "工具调用数据异常, 已自动回退本轮工具调用, "
+                                "正在重新生成…"
+                            ),
+                            "stage": "model_chat_retry",
+                        },
+                    )
+                    rolled_back = await self._rollback_last_tool_round()
+                    if rolled_back:
+                        continue  # 重试(下一迭代)
                 await self._emit_event(
                     "error",
                     payload={
@@ -1168,6 +1197,50 @@ class ReactLoop:
             f"{tool_name} 且没有进展——这看起来是一个死循环。请停止该模式, "
             "要么换一种方法继续, 要么直接给出最终回答。"
         )
+
+    async def _rollback_last_tool_round(self) -> bool:
+        """回退最近一轮工具调用(保险箱): 删除最后一个 assistant(tool_calls)
+        及其后续 tool 消息, 让模型下一迭代不带这轮数据重新决策。
+
+        内存与 DB 同步清理(否则下一迭代 build_messages 从 DB 恢复又回来)。
+
+        Returns:
+            True 表示回退成功(有可回退的轮次)。
+        """
+        try:
+            az = self._context_manager.active_zone.messages
+            # 从后往前找最后一个 assistant 且带 tool_calls
+            last_idx = -1
+            for i in range(len(az) - 1, -1, -1):
+                m = az[i]
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    last_idx = i
+                    break
+            if last_idx < 0:
+                return False
+            # 收集该 assistant 及之后的消息(tool_calls id 用于匹配 tool 消息)
+            removed = az[last_idx:]
+            ids_to_del: list[int] = []
+            for m in removed:
+                mid = m.get("msg_id")
+                if mid is not None:
+                    ids_to_del.append(int(mid))
+            # 清理内存
+            del az[last_idx:]
+            # 清理 DB(该轮 assistant + tool 消息删除)
+            if ids_to_del and self._conn is not None:
+                await self._conn.execute(
+                    "DELETE FROM messages WHERE id = ANY($1::int[])",
+                    ids_to_del,
+                )
+            self._logger.info(
+                "rolled back tool round: removed %d messages (session=%s)",
+                len(removed), self._session_id,
+            )
+            return True
+        except Exception:  # noqa: BLE001
+            self._logger.exception("rollback tool round failed")
+            return False
 
     def _repair_tool_pairing(self, messages: list[dict]) -> list[dict]:
         """修复 tool_calls 配对完整性(只读, 返回新列表)。
