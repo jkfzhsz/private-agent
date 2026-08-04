@@ -59,11 +59,14 @@ class ContextManager:
         system_prompt: str,
         tools: list[ToolDef],
         memory_manager: Any | None = None,
+        cfg: dict | None = None,
     ) -> None:
         self.session_id = session_id
         self._system_prompt = system_prompt
         self._tools = list(tools)
         self._memory_manager = memory_manager
+        # 方向三: 注入精简配置(可选, 默认 None 兼容旧调用)
+        self._cfg = cfg or {}
         self.frozen_zone = Zone(name="frozen")
         self.stable_zone = Zone(name="stable")
         self.active_zone = Zone(name="active")
@@ -124,7 +127,13 @@ class ContextManager:
         memories = await self._memory_manager.load_user_memories()
         if not memories:
             return
-        memories_text = self._memory_manager.format_memories_for_stable(memories)
+        # 方向三: 单条记忆截断(默认不截; config context.memory.max_item_chars)
+        max_item_chars = (
+            self._cfg.get("context", {}).get("memory", {}).get("max_item_chars")
+        )
+        memories_text = self._memory_manager.format_memories_for_stable(
+            memories, max_item_chars=max_item_chars
+        )
         await conn.execute(
             """
             INSERT INTO messages (session_id, turn, role, content, zone)
@@ -161,8 +170,13 @@ class ContextManager:
         """
         if not content:
             return
-        # 截断防止单次注入过大(蓝图 artifact 阈值 4k token ≈ 12k 字符)
-        content = content[:12000]
+        # 方向三: KB 注入开关 + 截断长度(默认 12000 字符 ≈ 4k token;
+        # config context.kb.injection.enabled / max_chars)
+        kb_cfg = self._cfg.get("context", {}).get("kb", {}).get("injection", {})
+        if kb_cfg.get("enabled") is False:
+            return
+        max_chars = int(kb_cfg.get("max_chars", 12000))
+        content = content[:max_chars]
         kb_text = f"[KB Context]\n{content}"
         msg_id = await conn.fetchval(
             """

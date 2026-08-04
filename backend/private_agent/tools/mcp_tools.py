@@ -147,14 +147,16 @@ class MCPToolManager:
     # 工具装配
     # --------------------------------------------------------------------------
 
-    async def get_tools(self, cfg: dict) -> list[ToolDef]:
-        """从配置装配全部 MCP 工具(懒连接 + 缓存 + 并发装配)。
+    async def get_tools(self, cfg: dict, server_ids: list[str] | None = None) -> list[ToolDef]:
+        """从配置装配 MCP 工具(懒连接 + 缓存 + 并发装配)。
 
         所有启用的 server **并发**连接与发现(单个失败/超时跳过, 不阻塞其余),
         避免 17 个 server 串行连接拖慢首条消息处理。
 
         Args:
             cfg: 合并后的配置 dict(含 tools.mcp.servers)。
+            server_ids: 仅装配匹配的 server(skill 绑定过滤, 方向一)。
+                支持通配后缀/前缀(如 "hexin-ifind-ds-*"); None 时装配全部。
 
         Returns:
             ToolDef 列表(名称为 mcp__{server_id}__{original})。
@@ -167,6 +169,9 @@ class MCPToolManager:
             and s.get("assemble", True) is not False
             and (s.get("id") or s.get("name"))
         ]
+        # 流畅度优化(方向一): skill 绑定过滤 —— 只装配绑定到当前 skill 的 server
+        if server_ids is not None:
+            enabled = [s for s in enabled if _match_server_ids(s, server_ids)]
         if not enabled:
             return []
 
@@ -250,3 +255,19 @@ class MCPToolManager:
                 pass
         self._clients.clear()
         self._tools_cache.clear()
+
+
+def _match_server_ids(svc: dict, server_ids: list[str]) -> bool:
+    """判断 server 是否命中 skill 绑定列表(支持通配后缀/前缀, 方向一)。
+
+    Args:
+        svc: MCP server 配置项(含 id)。
+        server_ids: 绑定列表, 如 ["hexin-ifind-ds-*", "mempalace"]。
+
+    Returns:
+        True 表示应装配该 server。
+    """
+    sid = str(svc.get("id") or svc.get("name") or "")
+    import fnmatch
+
+    return any(fnmatch.fnmatch(sid, pat) for pat in server_ids)

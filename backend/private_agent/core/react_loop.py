@@ -79,7 +79,14 @@ class ReactLoop:
         self._adapter = adapter
         self._tools = tools
         # adapter.chat 期望 OpenAI tools schema dict(非 ToolDef 对象)
+        # 流畅度优化(方向一): 全量 schema 作兜底; 每轮由 ToolSelector 挑选
+        # top-N 注入(_round_tool_schemas), 执行侧 _find_tool 仍遍历全池
         self._tool_schemas = [t.to_openai_schema() for t in tools]
+        self._round_tool_schemas: list[dict] | None = None
+        # 工具选择器: 每轮 turn 开始时对 user_message 求值一次(迭代间固定)
+        from private_agent.tools.selector import ToolSelector
+
+        self._tool_selector = ToolSelector(cfg or {})
         self._conn = conn
         # V2 P1: 工具权限确认管理器(蓝图 §5.12), None 时跳过确认(测试/兼容)
         self._permission_manager = permission_manager
@@ -92,7 +99,9 @@ class ReactLoop:
             limits.get("max_turns") or max_iterations
         )
         self._max_output_tokens = limits.get("max_output_tokens")
-        self._max_input_tokens = limits.get("max_input_tokens")
+        # 方向二: provider 级 context_window(模型能力) → 压缩触发线
+        # min(模型能力, 配置) × 0.8; 未配置时回退 context.compression
+        self._context_window = limits.get("context_window")
         self._turn = 0
         self._turn_initialized = False  # run_turn 首次调用时从历史最大 turn 续号
         self._state = ReactLoopState.IDLE
@@ -144,6 +153,11 @@ class ReactLoop:
         self._status_bar_enabled = bool(status_cfg.get("enabled", True))
         self._status_bar_per_turn = bool(
             status_cfg.get("inject_per_turn", True)
+        )
+        # 方向三: 状态栏注入频率(迭代粒度)。默认 1 = 每迭代注入(原行为);
+        # 配 3 = 每 3 次迭代注入 1 次(减少冗余 token, 模型感知略降)
+        self._status_bar_inject_every = max(
+            1, int(status_cfg.get("inject_every_iterations", 1))
         )
         # V2 上下文工程 - 上下文压缩(AI-Agents-in-Depth §2.7.4 / 蓝图 §3.9):
         # compress_adapter 按 compress_model 构建(main.py 传入), None 时
@@ -239,6 +253,17 @@ class ReactLoop:
         self._iteration = 0
         self._transition(ReactLoopState.THINKING)
 
+        # 流畅度优化(方向一): 每轮对 user_message 求值一次工具注入子集,
+        # 迭代间固定(避免每次迭代重排 schema 破坏 KV Cache 前缀)
+        try:
+            self._round_tool_schemas = [
+                t.to_openai_schema()
+                for t in self._tool_selector.select(self._tools, user_message)
+            ]
+        except Exception:
+            self._logger.exception("tool select failed, 回退全量")
+            self._round_tool_schemas = self._tool_schemas
+
         # V2 状态栏: 新 turn 重置工具计数(状态栏反映当前轮内真实执行,
         # 跨轮累积会误导模型对"本轮进度"的判断)
         self._status_bar.reset()
@@ -269,7 +294,12 @@ class ReactLoop:
             # V2 状态栏注入: 追加到上下文末尾的 user-role meta 消息
             # (AI-Agents-in-Depth §2.6.3)。仅内存注入不持久化; 追加到末尾
             # 不破坏 KV Cache 前缀(因果注意力只依赖前序 token)。
-            if self._status_bar_enabled and self._status_bar_per_turn:
+            # 方向三: inject_every_iterations 控制注入频率(默认每迭代)。
+            if (
+                self._status_bar_enabled
+                and self._status_bar_per_turn
+                and self._iteration % self._status_bar_inject_every == 0
+            ):
                 messages = [
                     *messages,
                     {
@@ -299,11 +329,13 @@ class ReactLoop:
                 )
 
             # 调用模型(流式优先: adapter 支持 chat_stream 时使用)
+            # 工具 schema: 本轮求值的注入子集(方向一动态 top-N), 兜底全量
+            round_schemas = self._round_tool_schemas or self._tool_schemas
             try:
                 if hasattr(self._adapter, "chat_stream"):
                     result = await self._adapter.chat_stream(
                         messages,
-                        self._tool_schemas,
+                        round_schemas,
                         max_tokens=self._max_output_tokens,
                         on_delta=self._emit_delta,
                         on_reasoning=_emit_reasoning,
@@ -311,7 +343,7 @@ class ReactLoop:
                 else:
                     result = await self._adapter.chat(
                         messages,
-                        self._tool_schemas,
+                        round_schemas,
                         max_tokens=self._max_output_tokens,
                     )
             except AllProvidersFailedError as e:
@@ -918,7 +950,14 @@ class ReactLoop:
             cfg = self._cfg.get("context", {}).get("compression", {})
             if not cfg.get("enabled", True):
                 return
-            context_window = cfg.get("context_window", 8000)
+            cfg_window = cfg.get("context_window", 8000)
+            # 方向二: 触发线 = min(provider 模型能力, 配置值) × 0.8;
+            # provider 未配置 context_window 时直接用配置值
+            context_window = (
+                min(self._context_window, cfg_window)
+                if self._context_window is not None
+                else cfg_window
+            )
             messages = await self._context_manager.build_messages()
             active_turns = self._turn
             triggered = self._compressor.maybe_compress(
@@ -1133,7 +1172,10 @@ class ReactLoop:
         Returns:
             匹配的 ToolDef,未找到时返回 None。
         """
+        # 流畅度优化(方向一): 记录实际调用 → 下次评分加权。
+        # 遍历全池(安全网): 即使未被本轮注入, 模型明确请求时仍可执行
         for td in self._tools:
             if td.name == name:
+                self._tool_selector.record_usage(name)
                 return td
         return None

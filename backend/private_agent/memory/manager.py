@@ -143,18 +143,24 @@ class MemoryManager:
         return memories
 
     @staticmethod
-    def format_memories_for_stable(memories: list[Memory]) -> str:
+    def format_memories_for_stable(
+        memories: list[Memory], max_item_chars: int | None = None
+    ) -> str:
         """格式化记忆为 Stable Zone 文本(蓝图 §4.5)。
 
         Args:
             memories: 记忆列表。
+            max_item_chars: 方向三: 单条记忆最大字符数(超出截断, None 不截)。
 
         Returns:
             格式化文本。
         """
         lines = ["[User Memories]"]
         for m in memories:
-            lines.append(f"[{m.type}] {m.content}")
+            content = m.content
+            if max_item_chars and len(content) > max_item_chars:
+                content = content[:max_item_chars] + "…"
+            lines.append(f"[{m.type}] {content}")
         return "\n".join(lines)
 
     # ── 淘汰 ──────────────────────────────────────────────────────────────

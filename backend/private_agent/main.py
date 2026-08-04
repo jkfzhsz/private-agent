@@ -128,13 +128,33 @@ async def _get_frozen_tools(cfg, session_id: int, conn):
 
 
 async def _get_tools(cfg, session_id: int, conn):
-    """获取全量工具列表: 内置白名单(frozen 同源) + MCP 外轨(全量)。
+    """获取工具列表: 内置白名单(frozen 同源) + MCP 外轨(按 skill 绑定过滤)。
+
+    流畅度优化(方向一): MCP server 按当前会话 skill 的绑定列表装配
+    (config tools.mcp.skill_binding), 未绑定的 server 不装配 —— 工具池
+    从 231 收敛到 skill 相关子集; 每轮再由 ToolSelector 选 top-N 注入模型。
 
     - frozen_tools 供 ContextManager hash 锁定(与 activate 一致)
     - 全部工具供 ReactLoop 调用(内置 + mcp__ 前缀工具)
     """
     frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
-    mcp_tools = await _get_mcp_manager().get_tools(cfg)
+    # skill → MCP server 绑定(会话锁定 skill 决定装配哪些 MCP)
+    server_ids: list[str] | None = None
+    try:
+        skill_name = await conn.fetchval(
+            "SELECT locked_skill_name FROM sessions WHERE id = $1",
+            session_id,
+        )
+        if skill_name:
+            binding = (
+                cfg.get("tools", {}).get("mcp", {}).get("skill_binding", {}) or {}
+            )
+            bound = binding.get(skill_name)
+            if bound is not None:
+                server_ids = list(bound)
+    except Exception:
+        server_ids = None
+    mcp_tools = await _get_mcp_manager().get_tools(cfg, server_ids)
     return frozen_tools + mcp_tools
 
 
@@ -453,6 +473,7 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
                 ),
                 tools=frozen_tools,
                 memory_manager=memory_mgr,
+                cfg=cfg,  # 方向三: KB/记忆注入精简配置
             )
             try:
                 await cm.ensure_initial(conn)

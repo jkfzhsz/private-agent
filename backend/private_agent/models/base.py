@@ -20,6 +20,9 @@ class ModelCapability:
     function_calling: bool
     vision: bool
     json_mode: bool
+    # 对话流畅度优化(方向二): 模型上下文窗口(token 数)。None 时用
+    # 全局配置 context_window; 压缩触发线 = min(模型能力, 配置) × 0.8
+    context_window: int | None = None
 
 
 @dataclass

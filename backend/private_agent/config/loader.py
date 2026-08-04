@@ -216,12 +216,13 @@ def resolve_provider_limits(cfg: dict, provider_name: str | None = None) -> dict
         provider_name: provider 名(models.providers 的 key)。None 时仅返回全局默认。
 
     Returns:
-        {"max_input_tokens": int, "max_output_tokens": int, "max_turns": int}
+        {"max_input_tokens": int, "max_output_tokens": int, "max_turns": int,
+         "context_window": int}  # 方向二新增: 压缩触发线 min(模型,配置)×0.8
     """
     defaults = dict(cfg.get("models", {}).get("limits", {}))
     if provider_name:
         prov = cfg.get("models", {}).get("providers", {}).get(provider_name, {})
-        for key in ("max_input_tokens", "max_output_tokens", "max_turns"):
+        for key in ("max_input_tokens", "max_output_tokens", "max_turns", "context_window"):
             if prov.get(key) is not None:
                 defaults[key] = prov[key]
     return defaults

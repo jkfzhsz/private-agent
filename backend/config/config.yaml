@@ -56,9 +56,13 @@ server:
 models:
   # 对话参数上限(设置页可手工调整, runtime > yaml)
   limits:
-    max_input_tokens: 8192   # 最大输入(上下文) tokens
-    max_output_tokens: 2048  # 最大输出 tokens(单次模型响应)
-    max_turns: 20            # 最大对话轮次(单轮对话内工具迭代上限)
+    # 方向二: context_window 决定压缩触发线(80%)。模型能力 128K 时
+    # 配置 32768 → 触发线 ~26K, 压缩频率大幅下降; provider 级
+    # context_window 可覆盖(models.providers.{name}.context_window)。
+    context_window: 32768     # 原默认 8000 → 32K(压缩更晚触发)
+    max_output_tokens: 4096   # 最大输出 tokens(单次模型响应, 原 2048)
+    max_turns: 20             # 最大对话轮次(单轮对话内工具迭代上限)
+    # max_input_tokens 已废弃(从未被消费, 实际限制由 context_window 决定)
 
   router:
     type: "manual"                         # MVP: manual / V2: tag_based [runtime]
@@ -84,10 +88,21 @@ context:
   status_bar:
     enabled: true  # [runtime]
     inject_per_turn: true  # [runtime]
+    # 方向三: 状态栏注入频率(迭代粒度)。1=每迭代(原行为); 3=每 3 迭代 1 次
+    inject_every_iterations: 3  # [runtime]
+  # 方向三: 知识库片段注入精简
+  kb:
+    injection:
+      enabled: true     # false = 完全关闭 KB 片段注入
+      max_chars: 6000   # 单条截断字符数(原硬编码 12000 → 6000)
+  # 方向三: 记忆注入精简
+  memory:
+    max_item_chars: 300  # 单条记忆最大字符(超出截断, 默认不截=None)
   template:
     kb_replace_mode: false  # [runtime]
   compression:
-    active_zone_token_limit: 4000  # [runtime]
+    # active_zone_token_limit 已废弃(从未被消费, 实际触发线由
+    # models.limits.context_window × 0.8 决定, 方向二)
     stable_zone_size_limit: 20  # [runtime]
     aggressive_mode: false  # [runtime]
     kb_chunks_merge_threshold: 20  # [runtime]
@@ -152,6 +167,23 @@ tools:
     protocol_version: "2026-07-28"  # [runtime] 支持: 2026-07-28(无状态,默认) | 2025-11-25(旧有状态,兼容)
     cache_ttl_ms: 30000  # [runtime] V2 启用
     enable_server_discover: true  # [runtime] 2026-07-28 server/discover 能力探测
+    # 对话流畅度优化(方向一): skill → MCP server 绑定。
+    # 会话激活某 skill 时只装配绑定列表内的 server(支持 * 通配),
+    # 工具池从全量收敛到 skill 相关子集; 未列出的 skill 装配全部(兼容旧行为)。
+    skill_binding:
+      office: []
+      data_analysis: ["hexin-ifind-ds-*", "mempalace"]
+      frontend_design: ["mempalace"]
+  # 对话流畅度优化(方向一): 每轮动态 top-N 工具注入(避免全量 schema)
+  tool_selection:
+    enabled: true
+    strategy: "keyword_score"  # 关键词/描述匹配(确定性)
+    top_n: 15                  # 每轮注入上限(工具 schema ~2-3k token)
+    min_pool_size: 8           # 池内工具 ≤ 8 时全量注入(小池无需裁剪)
+    always_include:            # 锚点: 无条件注入
+      - "code_execution"
+      - "file_read"
+      - "file_write"
   web_search:
     backend: "duckduckgo"  # duckduckgo(国际,无 key) | bocha(已停用) | bing(HTML 解析, 当前默认 .env)
     # 外部服务统一从前端接入(MCP), 专用搜索 API(如 bocha)不再后端配置
