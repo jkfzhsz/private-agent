@@ -40,8 +40,11 @@ const TYPES = ["preference", "fact", "todo", "decision", "correction"];
 
 export default function MemoryView({
   sessionId,
+  onOpenSession,
 }: {
   sessionId: number;
+  // V1.5 规划项-8: 记忆来源跳转回调(定位来源会话, 由 App 提供)
+  onOpenSession?: (sessionId: number) => void;
 }): JSX.Element {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [typeFilter, setTypeFilter] = useState("");
@@ -365,6 +368,21 @@ export default function MemoryView({
                     重要度 {m.importance?.toFixed(2) ?? "—"} · 访问 {m.access_count} 次
                     {m.created_at ? ` · ${new Date(m.created_at).toLocaleString()}` : ""}
                   </div>
+                  {/* V1.5 规划项-8: 记忆来源跳转(点击定位来源会话) */}
+                  {m.source_session_id != null && onOpenSession && (
+                    <button
+                      onClick={() => onOpenSession(m.source_session_id!)}
+                      title={`跳转到来源会话 #${m.source_session_id}`}
+                      style={{
+                        marginTop: 6, fontSize: 11, padding: "2px 10px",
+                        borderRadius: 10, border: "1px solid rgba(139,92,246,0.3)",
+                        background: "rgba(237,233,254,0.5)", color: "#6d28d9",
+                        cursor: "pointer",
+                      }}
+                    >
+                      ↪ 来源会话 #{m.source_session_id}
+                    </button>
+                  )}
                 </div>
                 <button
                   onClick={() => void deleteMemory(m)}

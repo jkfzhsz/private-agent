@@ -2081,7 +2081,13 @@ export default function App(): JSX.Element {
           )}
           {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} />}
           {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
-          {view === "memory" && <MemoryView sessionId={realSessionId ?? sessionId} />}
+          {view === "memory" && (
+            <MemoryView
+              sessionId={realSessionId ?? sessionId}
+              // V1.5 规划项-8: 记忆来源跳转(切换会话, 有 skill 直达对话视图)
+              onOpenSession={(sid) => handleSwitchSession(sid)}
+            />
+          )}
           {view === "agents" && <AgentLibraryView onActivate={(skill) => void handlePickMode(skill)} />}
         </main>
 
