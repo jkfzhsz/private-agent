@@ -53,8 +53,11 @@ def test_eval_router_requires_auth(client):
 
 
 def test_files_router_requires_auth(client):
+    # 2026-08-04 豁免: files.router 不挂 require_admin(壁纸/预览图 <img>/<video>
+    # src 直连不带 X-Admin-Token, 整体鉴权导致壁纸 401 永远加载失败)。
+    # 无 token 也走业务逻辑 → 文件不存在 → 404(而非 401)。
     resp = client.get("/files/outputs/nonexistent.txt")
-    assert resp.status_code == 401
+    assert resp.status_code == 404
 
 
 # ── 正确 token ────────────────────────────────────────────────────────────────

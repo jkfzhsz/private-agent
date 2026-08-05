@@ -73,7 +73,8 @@
       "shortcutName": "Private Agent",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico"
-    }
+    },
+    "electronDist": "node_modules/electron/dist"
   },
   "author": "zongxin"
 }

@@ -67,6 +67,7 @@ class KnowledgeBaseService:
         content: str,
         filename: str,
         scenario: str | None = None,
+        skip_dedup: bool = False,
     ) -> tuple[int, list[Chunk]]:
         """完整文档处理流水线:类型识别 → chunking → embedding → 写入(蓝图 §4.6)。
 
@@ -74,19 +75,22 @@ class KnowledgeBaseService:
             content: 文档原始文本。
             filename: 文件名。
             scenario: 场景。
+            skip_dedup: 跳过 hash 去重(V1.3-7.3 重索引用: 旧 chunk 已清空,
+                必须强制重切, 否则走 "unchanged" 分支返回空列表)。
 
         Returns:
             (doc_id, chunks) 元组。
         """
-        # 1. 计算 hash,判断是否重复
+        # 1. 计算 hash,判断是否重复(skip_dedup 时跳过)
         content_hash = DocumentProcessor.compute_hash(content)
-        existing = await self._kb_repo.get_document_by_source(filename)
-        if existing is not None and existing.hash == content_hash:
-            logger.info("Document '%s' unchanged, skipping", filename)
-            if existing.id is not None:
-                return existing.id, await self._kb_repo.get_chunks_by_doc(
-                    existing.id
-                )
+        if not skip_dedup:
+            existing = await self._kb_repo.get_document_by_source(filename)
+            if existing is not None and existing.hash == content_hash:
+                logger.info("Document '%s' unchanged, skipping", filename)
+                if existing.id is not None:
+                    return existing.id, await self._kb_repo.get_chunks_by_doc(
+                        existing.id
+                    )
 
         # 2. 插入文档元数据
         doc_id = await self._kb_repo.insert_document(

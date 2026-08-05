@@ -11,6 +11,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LiquidBackground from "./components/LiquidBackground";
 import Sidebar, { type ViewKey } from "./components/Sidebar";
 import ArtifactPanel, { type Artifact } from "./components/ArtifactPanel";
+import AgentLibraryView from "./views/AgentLibraryView";
+import ResizeHandle from "./components/ResizeHandle";
 import HomeView from "./views/HomeView";
 import KnowledgeView from "./views/KnowledgeView";
 import MemoryView from "./views/MemoryView";
@@ -122,6 +124,74 @@ function getSessionIdFromUrl(): number {
   return Math.floor(Math.random() * 100000) + 1;
 }
 
+// V1.1-3.8 任务抽屉按钮
+const taskBtnStyle: React.CSSProperties = {
+  fontSize: 12,
+  padding: "5px 14px",
+  borderRadius: 6,
+  border: "1px solid #ddd",
+  background: "#fff",
+  color: "#334155",
+  cursor: "pointer",
+};
+
+// V1.4-8.4 系统通知(任务完成/失败): 仅应用在后台时提醒, 避免前台打扰
+function notifyUser(title: string, body: string): void {
+  try {
+    if (typeof Notification === "undefined") return;
+    if (document.visibilityState === "visible") return; // 前台不打扰
+    if (Notification.permission === "granted") {
+      new Notification(title, { body });
+    } else if (Notification.permission !== "denied") {
+      void Notification.requestPermission().then((p) => {
+        if (p === "granted") new Notification(title, { body });
+      });
+    }
+  } catch {
+    /* 通知失败静默 */
+  }
+}
+
+// V1.1-3.3 消息操作条按钮
+function MsgActionBtn({
+  label,
+  title,
+  onClick,
+  danger,
+}: {
+  label: string;
+  title: string;
+  onClick: () => void;
+  danger?: boolean;
+}): JSX.Element {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        fontSize: 11,
+        border: "1px solid #e5e7eb",
+        background: "#f9fafb",
+        color: danger ? "#dc2626" : "#6b7280",
+        borderRadius: 6,
+        padding: "3px 10px",
+        cursor: "pointer",
+        lineHeight: 1.5,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = danger ? "#fee2e2" : "#eef2ff";
+        e.currentTarget.style.color = danger ? "#b91c1c" : "#4f46e5";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "#f9fafb";
+        e.currentTarget.style.color = danger ? "#dc2626" : "#6b7280";
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function formatPayload(eventType: EventType, payload: Record<string, unknown>): string {
   switch (eventType) {
     case "user":
@@ -172,7 +242,7 @@ export default function App(): JSX.Element {
   // 对话文档上传: 文件引用(上传成功后记录, 发送时附带路径)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingUpload, setPendingUpload] = useState<{ name: string; path: string } | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   // 生成中状态(显示"停止"按钮)
   const [isGenerating, setIsGenerating] = useState(false);
   // 对话中切换技能弹层
@@ -182,6 +252,23 @@ export default function App(): JSX.Element {
   const [realSessionId, setRealSessionId] = useState<number | null>(null);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [view, setView] = useState<ViewKey>("home");
+  // V1.4-8.4 主题切换(light/dark, localStorage 持久化)
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    try {
+      return (localStorage.getItem("pa:theme") as "light" | "dark") || "light";
+    } catch {
+      return "light";
+    }
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("pa:theme", theme);
+    } catch {
+      /* 忽略 */
+    }
+  }, [theme]);
+  const toggleTheme = (): void => setTheme((t) => (t === "dark" ? "light" : "dark"));
   // 每个 turn 的"推理过程"展开状态(默认收起)
   const [openThinkingTurns, setOpenThinkingTurns] = useState<Set<number>>(new Set());
   // 会话级模型选择: "auto"(fallback 链) 或 provider 名(手动锁定)
@@ -237,12 +324,16 @@ export default function App(): JSX.Element {
 
   const [artifactsOpen, setArtifactsOpen] = useState(true);
 
+  // V1.1 布局优化: 左右分区宽度(拖拽分隔条调整, clamp 防极端值)
+  const [sidebarW, setSidebarW] = useState(220);
+  const [panelW, setPanelW] = useState(300);
+  const clampSidebar = (w: number): number => Math.min(400, Math.max(140, w));
+  const clampPanel = (w: number): number => Math.min(560, Math.max(240, w));
+
   // HomeView 模式按钮: 激活 skill + 切换到对话视图
   // 会话锁定(AC-4): 同一 session 激活后不允许切换 skill(409),
   // 因此切换到不同模式时必须新建会话(随机 session_id, 后端懒创建)
-  const handlePickMode = async (
-    skill: "office" | "data_analysis" | "frontend_design"
-  ): Promise<void> => {
+  const handlePickMode = async (skill: string): Promise<void> => {
     const needNewSession = activeSkill !== null && activeSkill !== skill;
     const sid =
       needNewSession
@@ -321,6 +412,383 @@ export default function App(): JSX.Element {
   const stopGeneration = useCallback((): void => {
     sendWs({ type: "cancel", session_id: sessionId });
   }, [sendWs, sessionId]);
+
+  // V1.1-3.3 消息精细化操作: 重生成/收藏/删除/复制
+  const [starredTurns, setStarredTurns] = useState<Set<number>>(new Set());
+  const [deletedTurns, setDeletedTurns] = useState<Set<number>>(new Set());
+
+  const getTurnMessages = useCallback(
+    async (turn: number): Promise<{ id: number; role: string; content: string | null; starred: boolean }[]> => {
+      try {
+        const resp = await adminFetch(
+          `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}/turn/${turn}/messages`
+        );
+        if (!resp.ok) return [];
+        return await resp.json();
+      } catch {
+        return [];
+      }
+    },
+    [realSessionId, sessionId]
+  );
+
+  const regenerateTurn = useCallback(
+    (turn: number): void => {
+      sendWs({ type: "regenerate", session_id: realSessionId ?? sessionId, turn });
+    },
+    [sendWs, realSessionId, sessionId]
+  );
+
+  const toggleStar = useCallback(
+    async (turn: number): Promise<void> => {
+      const msgs = await getTurnMessages(turn);
+      const target = [...msgs].reverse().find((m) => m.role === "assistant") ?? msgs[0];
+      if (!target) return;
+      const next = !target.starred;
+      try {
+        const resp = await adminFetch(`http://127.0.0.1:8765/admin/messages/${target.id}/starred`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ starred: next }),
+        });
+        if (!resp.ok) return;
+        setStarredTurns((prev) => {
+          const s = new Set(prev);
+          if (next) s.add(turn);
+          else s.delete(turn);
+          return s;
+        });
+      } catch {
+        /* 收藏失败静默 */
+      }
+    },
+    [getTurnMessages, realSessionId, sessionId]
+  );
+
+  const deleteTurnMessage = useCallback(
+    async (turn: number): Promise<void> => {
+      const msgs = await getTurnMessages(turn);
+      const target =
+        [...msgs].reverse().find((m) => m.role === "assistant" && m.content) ?? msgs[0];
+      if (!target) return;
+      if (!window.confirm("删除这条回复? (软删除, 不影响会话其余内容)")) return;
+      try {
+        const resp = await adminFetch(`http://127.0.0.1:8765/admin/messages/${target.id}`, {
+          method: "DELETE",
+        });
+        if (!resp.ok) return;
+        setDeletedTurns((prev) => new Set(prev).add(turn));
+      } catch {
+        /* 删除失败静默 */
+      }
+    },
+    [getTurnMessages]
+  );
+
+  const copyText = useCallback(async (text: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* 剪贴板失败静默 */
+    }
+  }, []);
+
+  // V1.1-3.4 输入区增强: 图片粘贴上传 + 代码块复制
+  const [pendingImage, setPendingImage] = useState<{ name: string; path: string; preview: string } | null>(null);
+
+  const uploadImage = useCallback(async (file: File): Promise<void> => {
+    const MAX = 5 * 1024 * 1024; // 图片 ≤5MB(token 成本控制, 方案 §8.4)
+    if (file.size > MAX) {
+      // eslint-disable-next-line no-alert
+      window.alert("图片超过 5MB 限制");
+      return;
+    }
+    try {
+      const buf = await file.arrayBuffer();
+      let binary = "";
+      const bytes = new Uint8Array(buf);
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      }
+      const b64 = btoa(binary);
+      const resp = await adminFetch("http://127.0.0.1:8765/admin/files/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name || "pasted-image.png", content_base64: b64 }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = (await resp.json()) as { name: string; path: string };
+      const preview = URL.createObjectURL(file);
+      setPendingImage({ name: data.name, path: data.path, preview });
+    } catch (e) {
+      // eslint-disable-next-line no-alert
+      window.alert(`图片上传失败: ${String(e)}`);
+    }
+  }, []);
+
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent): void => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith("image/")) {
+          e.preventDefault();
+          const file = item.getAsFile();
+          if (file) void uploadImage(file);
+          break;
+        }
+      }
+    },
+    [uploadImage]
+  );
+
+  // V1.4-8.4 提示词模板库(localStorage, 跨会话)
+  const [templates, setTemplates] = useState<{ name: string; content: string }[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("pa:templates") ?? "[]") as { name: string; content: string }[];
+    } catch {
+      return [];
+    }
+  });
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [tplName, setTplName] = useState("");
+  const [tplMsg, setTplMsg] = useState<string | null>(null);
+
+  const persistTemplates = (next: { name: string; content: string }[]): void => {
+    setTemplates(next);
+    try {
+      localStorage.setItem("pa:templates", JSON.stringify(next));
+    } catch {
+      /* 忽略 */
+    }
+  };
+
+  const saveCurrentAsTemplate = (): void => {
+    const content = input.trim();
+    if (!content) {
+      setTplMsg("输入区为空, 无法保存模板");
+      return;
+    }
+    const name = tplName.trim() || content.slice(0, 20);
+    persistTemplates([...templates, { name, content }]);
+    setTplName("");
+    setTplMsg(`已保存模板「${name}」`);
+  };
+
+  const insertTemplate = (content: string): void => {
+    setInput((prev) => (prev ? `${prev}\n${content}` : content));
+    setTemplatesOpen(false);
+    inputRef.current?.focus();
+  };
+
+  const removeTemplate = (name: string): void => {
+    persistTemplates(templates.filter((t) => t.name !== name));
+  };
+
+  const copyCodeBlocks = useCallback(async (text: string): Promise<void> => {
+    const re = /```(?:[a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g;
+    const blocks: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      if (m[1] && m[1].trim()) blocks.push(m[1].trim());
+    }
+    if (blocks.length === 0) return;
+    await copyText(blocks.join("\n\n"));
+  }, [copyText]);
+
+  // V1.1-3.5 上下文可控: 会话设置弹窗(记忆开关/截断/查看系统提示词)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const [truncateTurn, setTruncateTurn] = useState(0);
+  const [systemPromptText, setSystemPromptText] = useState<string | null>(null);
+  const [settingsMsg, setSettingsMsg] = useState<string | null>(null);
+  // V1.3-7.2 工作流自动化: 自动连续执行配置(会话级)
+  const [autoExec, setAutoExec] = useState(false);
+  const [autoRounds, setAutoRounds] = useState(3);
+
+  const openSettings = useCallback(async (): Promise<void> => {
+    setSettingsOpen(true);
+    setSettingsMsg(null);
+    setSystemPromptText(null);
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}`
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        setMemoryEnabled(data.memory_enabled !== false);
+        setAutoExec(data.auto_execute === true);
+        setAutoRounds(Number(data.max_rounds ?? 3));
+        setTruncateTurn(0);
+      }
+    } catch {
+      /* 详情加载失败静默 */
+    }
+  }, [realSessionId, sessionId]);
+
+  const toggleMemory = useCallback(async (): Promise<void> => {
+    const next = !memoryEnabled;
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}/memory-enabled`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: next }),
+        }
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setMemoryEnabled(next);
+      setSettingsMsg(next ? "已开启会话记忆" : "已关闭会话记忆(不再注入/提取)");
+    } catch (e) {
+      setSettingsMsg(`记忆开关失败: ${String(e)}`);
+    }
+  }, [memoryEnabled, realSessionId, sessionId]);
+
+  // V1.3-7.2 工作流自动化: 保存会话级 auto_execute/max_rounds
+  const saveAutoExec = useCallback(async (): Promise<void> => {
+    const rounds = Math.min(20, Math.max(1, Number(autoRounds) || 3));
+    setAutoRounds(rounds);
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auto_execute: autoExec, max_rounds: rounds }),
+        }
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setSettingsMsg(
+        autoExec
+          ? `已开启自动执行(最多 ${rounds} 轮, 发送消息时生效)`
+          : "已关闭自动执行"
+      );
+    } catch (e) {
+      setSettingsMsg(`自动执行配置失败: ${String(e)}`);
+    }
+  }, [autoExec, autoRounds, realSessionId, sessionId]);
+
+  const doTruncate = useCallback(async (): Promise<void> => {
+    const afterTurn = Number(truncateTurn);
+    if (!Number.isInteger(afterTurn) || afterTurn < 0) {
+      setSettingsMsg("请输入有效的轮次(>=0)");
+      return;
+    }
+    if (!window.confirm(`截断上下文: 保留 0~${afterTurn} 轮, 之后的对话将被移出上下文(可从会话导出追溯)。确定?`)) return;
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}/truncate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ after_turn: afterTurn }),
+        }
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setSettingsMsg(`已截断: ${data.truncated_messages} 条消息移出上下文`);
+    } catch (e) {
+      setSettingsMsg(`截断失败: ${String(e)}`);
+    }
+  }, [truncateTurn, realSessionId, sessionId]);
+
+  const loadSystemPrompt = useCallback(async (): Promise<void> => {
+    setSystemPromptText(null);
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}/system-prompt`
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setSystemPromptText(data.system_prompt ?? "(空)");
+    } catch (e) {
+      setSettingsMsg(`加载系统提示词失败: ${String(e)}`);
+    }
+  }, [realSessionId, sessionId]);
+
+  // V1.1-3.8 任务状态反馈: 任务列表抽屉(轮次/工具/错误/重试/终止)
+  const [tasksOpen, setTasksOpen] = useState(false);
+  const [eventsOpen, setEventsOpen] = useState(false);
+  const [diagOpen, setDiagOpen] = useState(false);
+  const [tasksData, setTasksData] = useState<{
+    status: string;
+    updated_at: string | null;
+    total_turns: number;
+    turns: { turn: number; events: Record<string, number>; error?: string; last_ts?: string | null }[];
+  } | null>(null);
+  const [tasksLoading, setTasksLoading] = useState(false);
+
+  const loadTasks = useCallback(async (): Promise<void> => {
+    setTasksLoading(true);
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/tasks?session_id=${realSessionId ?? sessionId}`
+      );
+      if (resp.ok) setTasksData(await resp.json());
+    } catch {
+      setTasksData(null);
+    } finally {
+      setTasksLoading(false);
+    }
+  }, [realSessionId, sessionId]);
+
+  // V1.2-6.2: 工具事件日志时间线(读 react_events)
+  const [eventsLog, setEventsLog] = useState<
+    { id: number; turn: number; event_type: string; ts: string | null; summary: string }[] | null
+  >(null);
+  const [eventsLoading, setEventsLoading] = useState(false);
+
+  const loadEvents = useCallback(async (): Promise<void> => {
+    setEventsLoading(true);
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/events?session_id=${realSessionId ?? sessionId}&limit=60`
+      );
+      if (resp.ok) setEventsLog(await resp.json());
+    } catch {
+      setEventsLog(null);
+    } finally {
+      setEventsLoading(false);
+    }
+  }, [realSessionId, sessionId]);
+
+  // V1.2-6.3: 用量统计 + 错误摘要(任务抽屉内)
+  const [usageData, setUsageData] = useState<{
+    total_calls: number;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_cost: number;
+    currency: string;
+  } | null>(null);
+  const [errorsData, setErrorsData] = useState<{
+    total_errors: number;
+    distinct_errors: number;
+    top: { message: string; count: number }[];
+  } | null>(null);
+  const [diagBusy, setDiagBusy] = useState(false);
+
+  const loadDiagnostics = useCallback(async (): Promise<void> => {
+    setDiagBusy(true);
+    try {
+      const [uResp, eResp] = await Promise.all([
+        adminFetch(
+          `http://127.0.0.1:8765/admin/usage?session_id=${realSessionId ?? sessionId}`
+        ),
+        adminFetch(
+          `http://127.0.0.1:8765/admin/errors/summary?session_id=${realSessionId ?? sessionId}`
+        ),
+      ]);
+      if (uResp.ok) setUsageData(await uResp.json());
+      if (eResp.ok) setErrorsData(await eResp.json());
+    } catch {
+      /* 诊断加载失败静默 */
+    } finally {
+      setDiagBusy(false);
+    }
+  }, [realSessionId, sessionId]);
 
   // 技能切换弹层: 打开时加载技能列表; 选择 → 新会话激活(handlePickMode)
   useEffect(() => {
@@ -469,15 +937,19 @@ export default function App(): JSX.Element {
       case "turn_end":
         // 一轮结束,可在此做 UI 收尾
         setIsGenerating(false);
+        // V1.4-8.4: 应用在后台时系统通知(任务完成)
+        void notifyUser("任务完成", "本轮对话已结束");
         break;
 
       case "turn_cancelled":
         // 打断/停止: 后端已取消当前 turn
         setIsGenerating(false);
+        void notifyUser("任务已停止", "你手动停止了本轮对话");
         break;
 
       case "error":
         setIsGenerating(false);
+        void notifyUser("任务出错", String(msg.message ?? "未知错误"));
         if (msg.message) {
           // B2 P1-9: skill_not_found → 自动切回首页(重新选择 Skill)
           if (/skill_not_found|skill not found/i.test(msg.message)) {
@@ -627,10 +1099,17 @@ export default function App(): JSX.Element {
     if (pendingUpload) {
       content = `[已上传文件: ${pendingUpload.name} 路径: ${pendingUpload.path}]\n${content}`;
     }
+    // V1.1-3.4 粘贴图片: 附带图片引用(模型可 file_read 尝试读取/告知已保存)
+    if (pendingImage) {
+      content = `[用户粘贴图片: ${pendingImage.name} 路径: ${pendingImage.path}]\n${content}`;
+    }
     sendWs({
       type: "user_message",
       session_id: sessionId,
       content,
+      // V1.3-7.2 工作流自动化: 携带会话级自动执行配置(后端优先取显式传参)
+      auto_execute: autoExec || undefined,
+      max_rounds: autoExec ? autoRounds : undefined,
     });
     // 用户消息立即上屏(右侧气泡)
     setEvents((prev) => [
@@ -646,8 +1125,9 @@ export default function App(): JSX.Element {
     ]);
     setInput("");
     setPendingUpload(null); // 发送后清除文件引用(一次一文件)
+    setPendingImage(null); // 发送后清除图片引用
     setIsGenerating(true); // 生成中(显示"停止"按钮)
-  }, [input, sessionId, sendWs, pendingUpload, editingOriginal, realSessionId]);
+  }, [input, sessionId, sendWs, pendingUpload, pendingImage, editingOriginal, realSessionId, autoExec, autoRounds]);
 
   // ── 生命周期:挂载时连接,卸载时关闭 ──────────────────────────────────────
   useEffect(() => {
@@ -756,15 +1236,22 @@ export default function App(): JSX.Element {
 
   // ── 渲染 ──────────────────────────────────────────────────────────────────
   // ── 渲染: FlowSpace 布局(液体背景 + 侧边栏 + 顶栏 + 内容视图) ─────────
+  // V1.1 布局优化: 外层 100vw×100vh 铺满视口(overflow hidden), 内层三栏 flex
+  // + 拖拽分隔条(ResizeHandle), 左右栏可拖拽调宽、可折叠
   return (
     <div
       style={{
         position: "relative",
-        minHeight: "100vh",
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden",
         fontFamily: "var(--font-sans)",
         color: "var(--text-primary)",
         background:
-          "linear-gradient(160deg, #eef1f8 0%, #e6ebf6 40%, #ece7f7 100%)",
+          theme === "dark"
+            ? "linear-gradient(160deg, #0f172a 0%, #1e1b4b 45%, #111827 100%)"
+            : "linear-gradient(160deg, #eef1f8 0%, #e6ebf6 40%, #ece7f7 100%)",
+        transition: "background 0.4s var(--transition-smooth)",
         WebkitFontSmoothing: "antialiased",
       }}
     >
@@ -774,10 +1261,9 @@ export default function App(): JSX.Element {
           position: "relative",
           zIndex: 1,
           display: "flex",
-          gap: 16,
-          padding: 16,
-          height: "100vh",
-          boxSizing: "border-box",
+          width: "100%",
+          height: "100%",
+          overflow: "hidden",
         }}
       >
         <Sidebar
@@ -786,8 +1272,12 @@ export default function App(): JSX.Element {
           currentSessionId={realSessionId ?? sessionId}
           onSwitchSession={handleSwitchSession}
           status={status}
+          width={sidebarW}
         />
-        <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 16, minHeight: 0 }}>
+        <ResizeHandle
+          onDrag={(delta) => setSidebarW((w) => clampSidebar(w + delta))}
+        />
+        <div style={{ flex: 1, minWidth: 0, display: "flex", minHeight: 0 }}>
           <main style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
             {view === "home" && (
               <HomeView
@@ -866,6 +1356,42 @@ export default function App(): JSX.Element {
                       </option>
                     ))}
                   </select>
+                  {/* V1.4-8.4 主题切换 */}
+                  <button
+                    onClick={toggleTheme}
+                    title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+                    style={{
+                      fontSize: 13, padding: "4px 10px", borderRadius: 8,
+                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
+                    }}
+                  >
+                    {theme === "dark" ? "☀️" : "🌙"}
+                  </button>
+                  {/* V1.1-3.5 会话设置(记忆开关/截断/系统提示词) */}
+                  <button
+                    onClick={() => void openSettings()}
+                    title="会话设置(记忆/截断/系统提示词)"
+                    style={{
+                      fontSize: 12, padding: "4px 10px", borderRadius: 8,
+                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
+                    }}
+                  >
+                    ⚙ 设置
+                  </button>
+                  {/* V1.1-3.8 任务状态(轮次/工具/错误/重试) */}
+                  <button
+                    onClick={() => {
+                      setTasksOpen(true);
+                      void loadTasks();
+                    }}
+                    title="任务执行状态"
+                    style={{
+                      fontSize: 12, padding: "4px 10px", borderRadius: 8,
+                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
+                    }}
+                  >
+                    📋 任务
+                  </button>
                 </div>
                 <div
                   style={{
@@ -1063,6 +1589,11 @@ export default function App(): JSX.Element {
                           te.event_type === "tool_result"
                             ? extractImagePaths(text)
                             : [];
+                        // V1.2-6.3: 工具耗时展示
+                        const durationMs =
+                          te.event_type === "tool_result"
+                            ? (te.payload.duration_ms as number | undefined)
+                            : undefined;
                         return (
                           <div key={te.id} style={{ marginBottom: 6 }}>
                             <div
@@ -1078,7 +1609,9 @@ export default function App(): JSX.Element {
                               {te.event_type === "tool_call" ? (
                                 <>🔧 {text}</>
                               ) : (
-                                <>✅ {text.slice(0, 120)}{text.length > 120 ? "…" : ""}</>
+                                <>✅ {text.slice(0, 120)}{text.length > 120 ? "…" : ""}
+                                  {durationMs != null ? ` · ${durationMs}ms` : ""}
+                                </>
                               )}
                             </div>
                             {imagePaths.length > 0 && (
@@ -1273,27 +1806,49 @@ export default function App(): JSX.Element {
                         );
                       })}
 
-                    {finalText ? (
-                      <div
-                        style={{
-                          backgroundColor: "#ffffff",
-                          border: "1px solid #e5e7eb",
-                          borderRadius: 12,
-                          padding: "10px 14px",
-                        }}
-                      >
-                        <pre
+                    {finalText && !deletedTurns.has(turn) ? (
+                      <div>
+                        <div
                           style={{
-                            margin: 0,
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
-                            fontSize: 13,
-                            fontFamily: "inherit",
-                            lineHeight: 1.6,
+                            backgroundColor: "#ffffff",
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 12,
+                            padding: "10px 14px",
                           }}
                         >
-                          {finalText}
-                        </pre>
+                          <pre
+                            style={{
+                              margin: 0,
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                              fontSize: 13,
+                              fontFamily: "inherit",
+                              lineHeight: 1.6,
+                            }}
+                          >
+                            {finalText}
+                          </pre>
+                        </div>
+                        {/* V1.1-3.3 消息操作条(非生成中显示) */}
+                        {!isGenerating && (
+                          <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
+                            <MsgActionBtn label="🔄 重生成" title="重新生成这条回复" onClick={() => regenerateTurn(turn)} />
+                            <MsgActionBtn
+                              label={starredTurns.has(turn) ? "★ 已收藏" : "☆ 收藏"}
+                              title="收藏/取消收藏"
+                              onClick={() => void toggleStar(turn)}
+                            />
+                            <MsgActionBtn label="🗑 删除" title="软删除这条回复" danger onClick={() => void deleteTurnMessage(turn)} />
+                            <MsgActionBtn label="📋 复制" title="复制回复内容" onClick={() => void copyText(finalText)} />
+                            {finalText.includes("```") && (
+                              <MsgActionBtn label="📄 复制代码" title="提取代码块并复制" onClick={() => void copyCodeBlocks(finalText)} />
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ) : finalText && deletedTurns.has(turn) ? (
+                      <div style={{ fontSize: 12, color: "#9ca3af", fontStyle: "italic" }}>
+                        此回复已删除
                       </div>
                     ) : isPending && !thinkingEv ? (
                       <div style={{ color: "#9ca3af", fontSize: 13 }}>💭 思考中…</div>
@@ -1414,26 +1969,88 @@ export default function App(): JSX.Element {
         >
           📎
         </button>
+        {/* V1.4-8.4 提示词模板库 */}
+        <button
+          onClick={() => setTemplatesOpen(!templatesOpen)}
+          title="提示词模板库(保存常用提示词/插入)"
+          style={{
+            padding: "10px 12px", borderRadius: 6, border: "1px solid #ddd",
+            backgroundColor: templatesOpen ? "#f5f3ff" : "#fff",
+            color: templatesOpen ? "#5b21b6" : "#333",
+            fontSize: 14, cursor: "pointer",
+          }}
+        >
+          📋
+        </button>
         {pendingUpload && (
           <span style={{ fontSize: 12, color: "#4caf50", alignSelf: "center", whiteSpace: "nowrap" }}>
             ✓ {pendingUpload.name}
           </span>
         )}
-        <input
-          type="text"
+        {pendingImage && (
+          <span
+            style={{
+              position: "relative",
+              alignSelf: "center",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <img
+              src={pendingImage.preview}
+              alt="待发送图片"
+              style={{ height: 34, borderRadius: 6, border: "1px solid #ddd" }}
+            />
+            <button
+              onClick={() => setPendingImage(null)}
+              title="移除图片"
+              style={{
+                position: "absolute",
+                top: -6,
+                right: -6,
+                width: 16,
+                height: 16,
+                borderRadius: "50%",
+                border: "none",
+                background: "#d32f2f",
+                color: "#fff",
+                fontSize: 10,
+                lineHeight: 1,
+                cursor: "pointer",
+                padding: 0,
+              }}
+            >
+              ×
+            </button>
+          </span>
+        )}
+        <textarea
           ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onPaste={handlePaste}
           onKeyDown={(e) => {
+            // V1.1-3.4: Enter 发送, Shift+Enter 换行(多行输入)
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               sendMessage();
             }
           }}
-          placeholder="输入消息,Enter 发送"
+          placeholder="输入消息,Enter 发送,Shift+Enter 换行,可直接粘贴图片"
+          rows={2}
           style={{
-            flex: 1, padding: "10px 12px", borderRadius: 6,
-            border: "1px solid #ddd", fontSize: 14, outline: "none",
+            flex: 1,
+            padding: "10px 12px",
+            borderRadius: 6,
+            border: "1px solid #ddd",
+            fontSize: 14,
+            outline: "none",
+            resize: "vertical",
+            minHeight: 40,
+            maxHeight: 160,
+            fontFamily: "inherit",
+            lineHeight: 1.5,
           }}
         />
         <button
@@ -1465,11 +2082,609 @@ export default function App(): JSX.Element {
           {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} />}
           {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
           {view === "memory" && <MemoryView sessionId={realSessionId ?? sessionId} />}
+          {view === "agents" && <AgentLibraryView onActivate={(skill) => void handlePickMode(skill)} />}
         </main>
+
+        {/* V1.1-3.5 会话设置弹窗(记忆开关/上下文截断/系统提示词) */}
+        {settingsOpen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 100,
+              background: "rgba(15,23,42,0.4)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            onClick={() => setSettingsOpen(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: 560,
+                maxWidth: "90vw",
+                maxHeight: "80vh",
+                overflowY: "auto",
+                background: "#fff",
+                borderRadius: 14,
+                padding: "20px 24px",
+                boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                <span style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)" }}>
+                  ⚙ 会话设置
+                </span>
+                <button
+                  onClick={() => setSettingsOpen(false)}
+                  style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+                >
+                  ×
+                </button>
+              </div>
+
+              {/* 记忆开关 */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>会话记忆</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                  <input type="checkbox" checked={memoryEnabled} onChange={() => void toggleMemory()} />
+                  开启记忆(自动提取并注入长期记忆)
+                </label>
+              </div>
+
+              {/* V1.3-7.2 自动执行 */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>自动执行(工作流)</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={autoExec}
+                    onChange={(e) => setAutoExec(e.target.checked)}
+                  />
+                  开启后,发一条消息自动连续执行多轮(无需逐条追问)
+                </label>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+                  <span style={{ fontSize: 12, color: "#64748b" }}>最多</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={autoRounds}
+                    onChange={(e) => setAutoRounds(Number(e.target.value))}
+                    disabled={!autoExec}
+                    style={{
+                      width: 70, padding: "4px 8px", borderRadius: 6,
+                      border: "1px solid #ddd", fontSize: 13,
+                    }}
+                  />
+                  <span style={{ fontSize: 12, color: "#64748b" }}>轮</span>
+                  <button
+                    onClick={() => void saveAutoExec()}
+                    style={{
+                      fontSize: 12, padding: "5px 14px", borderRadius: 6,
+                      border: "1px solid #6d28d9", background: "#f5f3ff",
+                      color: "#5b21b6", cursor: "pointer",
+                    }}
+                  >
+                    保存
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>
+                  每轮模型自动继续(直到任务完成或达到轮次上限); 可在任意时刻点"停止"
+                </div>
+              </div>
+
+              {/* 上下文截断 */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>上下文截断</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: "#64748b" }}>保留 0 ~</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={truncateTurn}
+                    onChange={(e) => setTruncateTurn(Number(e.target.value))}
+                    style={{
+                      width: 80, padding: "4px 8px", borderRadius: 6,
+                      border: "1px solid #ddd", fontSize: 13,
+                    }}
+                  />
+                  <span style={{ fontSize: 12, color: "#64748b" }}>轮</span>
+                  <button
+                    onClick={() => void doTruncate()}
+                    style={{
+                      fontSize: 12, padding: "5px 14px", borderRadius: 6,
+                      border: "1px solid #d97706", background: "#fffbeb",
+                      color: "#92400e", cursor: "pointer",
+                    }}
+                  >
+                    截断
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>
+                  之后的对话将移出模型上下文(软删除, 可从会话导出追溯)
+                </div>
+              </div>
+
+              {/* 系统提示词 */}
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>系统提示词</div>
+                <button
+                  onClick={() => void loadSystemPrompt()}
+                  style={{
+                    fontSize: 12, padding: "5px 14px", borderRadius: 6,
+                    border: "1px solid #ddd", background: "#f8fafc",
+                    color: "#334155", cursor: "pointer", marginBottom: 8,
+                  }}
+                >
+                  {systemPromptText === null ? "查看完整系统提示词" : "重新加载"}
+                </button>
+                {systemPromptText !== null && (
+                  <textarea
+                    readOnly
+                    value={systemPromptText}
+                    style={{
+                      width: "100%", boxSizing: "border-box", minHeight: 180,
+                      resize: "vertical", fontSize: 12, fontFamily: "Consolas, monospace",
+                      border: "1px solid #e2e8f0", borderRadius: 8, padding: 10,
+                      color: "#334155", background: "#f8fafc",
+                    }}
+                  />
+                )}
+              </div>
+
+              {settingsMsg && (
+                <div style={{ fontSize: 12, color: "#059669", marginTop: 8 }}>{settingsMsg}</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* V1.1-3.8 任务状态抽屉 */}
+        {/* V1.4-8.4 提示词模板库弹窗 */}
+        {templatesOpen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 110,
+              background: "rgba(15,23,42,0.4)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            onClick={() => setTemplatesOpen(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: 440,
+                maxWidth: "90vw",
+                maxHeight: "70vh",
+                overflowY: "auto",
+                background: "#fff",
+                borderRadius: 14,
+                padding: "18px 22px",
+                boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)" }}>📋 提示词模板</span>
+                <button
+                  onClick={() => setTemplatesOpen(false)}
+                  style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+                >
+                  ×
+                </button>
+              </div>
+
+              {tplMsg && (
+                <div style={{ fontSize: 12, color: tplMsg.startsWith("已保存") ? "#059669" : "#dc2626", marginBottom: 8 }}>
+                  {tplMsg}
+                </div>
+              )}
+
+              {/* 保存当前输入为模板 */}
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <input
+                  value={tplName}
+                  onChange={(e) => setTplName(e.target.value)}
+                  placeholder="模板名(默认取输入前 20 字)"
+                  style={{
+                    flex: 1, padding: "6px 10px", borderRadius: 6,
+                    border: "1px solid #ddd", fontSize: 12,
+                  }}
+                />
+                <button
+                  onClick={saveCurrentAsTemplate}
+                  style={{
+                    fontSize: 12, padding: "6px 14px", borderRadius: 6,
+                    border: "1px solid #6d28d9", background: "#f5f3ff",
+                    color: "#5b21b6", cursor: "pointer", whiteSpace: "nowrap",
+                  }}
+                >
+                  + 保存当前输入
+                </button>
+              </div>
+
+              {/* 模板列表 */}
+              {templates.length === 0 && (
+                <div style={{ fontSize: 12, color: "#94a3b8", textAlign: "center", padding: "16px 0" }}>
+                  暂无模板。在输入区写好内容后点"+ 保存当前输入"。
+                </div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {templates.map((t) => (
+                  <div
+                    key={t.name}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "8px 10px", borderRadius: 8,
+                      background: "rgba(245,243,255,0.6)", fontSize: 12,
+                    }}
+                  >
+                    <button
+                      onClick={() => insertTemplate(t.content)}
+                      title="插入到输入区"
+                      style={{
+                        flex: 1, textAlign: "left", border: "none",
+                        background: "transparent", cursor: "pointer",
+                        color: "var(--text-primary)", fontSize: 12,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>{t.name}</div>
+                      <div style={{ fontSize: 10, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {t.content}
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => removeTemplate(t.name)}
+                      title="删除模板"
+                      style={{ border: "none", background: "transparent", color: "#ef4444", cursor: "pointer", fontSize: 13 }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tasksOpen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 100,
+              background: "rgba(15,23,42,0.4)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            onClick={() => setTasksOpen(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: 620,
+                maxWidth: "92vw",
+                maxHeight: "80vh",
+                overflowY: "auto",
+                background: "#fff",
+                borderRadius: 14,
+                padding: "20px 24px",
+                boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                <span style={{ fontSize: 16, fontWeight: 700 }}>
+                  📋 任务执行状态
+                  {tasksData && (
+                    <span
+                      style={{
+                        marginLeft: 10,
+                        fontSize: 11,
+                        padding: "2px 10px",
+                        borderRadius: 10,
+                        background:
+                          tasksData.status === "active"
+                            ? "rgba(16,185,129,0.12)"
+                            : tasksData.status === "error"
+                              ? "rgba(220,38,38,0.12)"
+                              : "rgba(245,158,11,0.12)",
+                        color:
+                          tasksData.status === "active"
+                            ? "#059669"
+                            : tasksData.status === "error"
+                              ? "#dc2626"
+                              : "#d97706",
+                      }}
+                    >
+                      {tasksData.status === "active" ? "进行中" : tasksData.status === "error" ? "出错" : tasksData.status}
+                    </span>
+                  )}
+                </span>
+                <button
+                  onClick={() => setTasksOpen(false)}
+                  style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+                >
+                  ×
+                </button>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <button
+                  onClick={() => void loadTasks()}
+                  style={taskBtnStyle}
+                  disabled={tasksLoading}
+                >
+                  {tasksLoading ? "…" : "刷新"}
+                </button>
+                {/* V1.2-6.2: 工具事件日志时间线 */}
+                <button
+                  onClick={() => {
+                    setEventsOpen(!eventsOpen);
+                    if (!eventsLog && !eventsOpen) void loadEvents();
+                  }}
+                  style={{ ...taskBtnStyle, color: eventsOpen ? "#6d28d9" : "#334155" }}
+                >
+                  📜 事件日志
+                </button>
+                {/* V1.2-6.3: 用量统计 + 错误摘要 */}
+                <button
+                  onClick={() => {
+                    setDiagOpen(!diagOpen);
+                    if (!usageData && !errorsData && !diagOpen) void loadDiagnostics();
+                  }}
+                  style={{ ...taskBtnStyle, color: diagOpen ? "#6d28d9" : "#334155" }}
+                >
+                  📊 用量/错误
+                </button>
+                {isGenerating && (
+                  <button
+                    onClick={stopGeneration}
+                    style={{ ...taskBtnStyle, color: "#dc2626", borderColor: "#fca5a5" }}
+                  >
+                    ⏹ 终止当前生成
+                  </button>
+                )}
+              </div>
+
+              {/* V1.2-6.2: 事件时间线(倒序, 最新在上) */}
+              {eventsOpen && (
+                <div
+                  style={{
+                    maxHeight: 240,
+                    overflowY: "auto",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: 10,
+                    padding: 8,
+                    marginBottom: 12,
+                    background: "#f8fafc",
+                  }}
+                >
+                  {eventsLoading && (
+                    <div style={{ fontSize: 12, color: "#94a3b8", padding: 8 }}>加载中…</div>
+                  )}
+                  {!eventsLoading && (!eventsLog || eventsLog.length === 0) && (
+                    <div style={{ fontSize: 12, color: "#94a3b8", padding: 8 }}>暂无事件记录</div>
+                  )}
+                  {(eventsLog ?? []).map((ev) => (
+                    <div
+                      key={ev.id}
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "baseline",
+                        padding: "3px 4px",
+                        fontSize: 11,
+                        borderBottom: "1px solid rgba(148,163,184,0.12)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          flexShrink: 0,
+                          width: 64,
+                          color: "#94a3b8",
+                          fontVariantNumeric: "tabular-nums",
+                        }}
+                      >
+                        {ev.ts ? new Date(ev.ts).toLocaleTimeString() : "--:--:--"}
+                      </span>
+                      <span
+                        style={{
+                          flexShrink: 0,
+                          fontWeight: 600,
+                          color:
+                            ev.event_type === "error" || ev.event_type === "tool_error"
+                              ? "#dc2626"
+                              : ev.event_type === "tool_call"
+                                ? "#6d28d9"
+                                : ev.event_type === "final"
+                                  ? "#059669"
+                                  : "#64748b",
+                        }}
+                      >
+                        #{ev.turn} {ev.event_type}
+                      </span>
+                      <span
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          color: "#475569",
+                        }}
+                        title={ev.summary}
+                      >
+                        {ev.summary}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* V1.2-6.3: 用量统计 + 错误摘要 */}
+              {diagOpen && (
+                <div
+                  style={{
+                    maxHeight: 240,
+                    overflowY: "auto",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: 10,
+                    padding: 12,
+                    marginBottom: 12,
+                    background: "#f8fafc",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                  }}
+                >
+                  {diagBusy && (
+                    <div style={{ fontSize: 12, color: "#94a3b8" }}>加载中…</div>
+                  )}
+                  {usageData && (
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+                        📊 LLM 用量
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                        {[
+                          { label: "调用次数", value: usageData.total_calls },
+                          { label: "总 Token", value: usageData.total_tokens.toLocaleString() },
+                          {
+                            label: `成本(${usageData.currency})`,
+                            value: usageData.total_cost.toFixed(4),
+                          },
+                        ].map((s) => (
+                          <div key={s.label} style={{ background: "#fff", borderRadius: 8, padding: "8px 10px" }}>
+                            <div style={{ fontSize: 10, color: "#94a3b8" }}>{s.label}</div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: "#334155" }}>{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 4 }}>
+                        输入 {usageData.input_tokens.toLocaleString()} · 输出 {usageData.output_tokens.toLocaleString()}
+                      </div>
+                    </div>
+                  )}
+                  {errorsData && (
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+                        ⚠️ 错误摘要({errorsData.total_errors} 次 / {errorsData.distinct_errors} 类)
+                      </div>
+                      {(errorsData.top ?? []).map((t) => (
+                        <div
+                          key={t.message}
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            fontSize: 11,
+                            color: "#dc2626",
+                            padding: "3px 0",
+                            borderBottom: "1px solid rgba(220,38,38,0.1)",
+                          }}
+                        >
+                          <span style={{ flexShrink: 0, fontWeight: 700 }}>×{t.count}</span>
+                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={t.message}>
+                            {t.message}
+                          </span>
+                        </div>
+                      ))}
+                      {(errorsData.top ?? []).length === 0 && (
+                        <div style={{ fontSize: 11, color: "#94a3b8" }}>暂无错误记录 🎉</div>
+                      )}
+                    </div>
+                  )}
+                  {!diagBusy && !usageData && !errorsData && (
+                    <div style={{ fontSize: 12, color: "#94a3b8" }}>暂无诊断数据</div>
+                  )}
+                </div>
+              )}
+
+              {!tasksData && !tasksLoading && (
+                <div style={{ fontSize: 12, color: "#94a3b8", padding: "20px 0", textAlign: "center" }}>
+                  暂无任务数据
+                </div>
+              )}
+
+              {tasksData && tasksData.total_turns === 0 && (
+                <div style={{ fontSize: 12, color: "#94a3b8", padding: "20px 0", textAlign: "center" }}>
+                  还没有执行轮次
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {(tasksData?.turns ?? []).map((t) => {
+                  const toolCalls = t.events.tool_call ?? 0;
+                  const hasError = !!t.error;
+                  return (
+                    <div
+                      key={t.turn}
+                      style={{
+                        border: "1px solid #e2e8f0",
+                        borderRadius: 10,
+                        padding: "10px 14px",
+                        background: hasError ? "#fff7f7" : "#fafafa",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 13, fontWeight: 700 }}>第 {t.turn} 轮</span>
+                        {toolCalls > 0 && (
+                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                            🔧 工具调用 {toolCalls} 次
+                          </span>
+                        )}
+                        {(t.events.thinking ?? 0) > 0 && (
+                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                            💭 推理 {(t.events.thinking ?? 0)} 段
+                          </span>
+                        )}
+                        {(t.events.tool_result ?? 0) > 0 && (
+                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                            ✅ 结果 {(t.events.tool_result ?? 0)} 个
+                          </span>
+                        )}
+                        {t.last_ts && (
+                          <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>
+                            {new Date(t.last_ts).toLocaleTimeString()}
+                          </span>
+                        )}
+                      </div>
+                      {hasError && (
+                        <div style={{ fontSize: 12, color: "#dc2626", marginTop: 6, wordBreak: "break-all" }}>
+                          ❌ {t.error}
+                        </div>
+                      )}
+                      {!isGenerating && (
+                        <button
+                          onClick={() => {
+                            setTasksOpen(false);
+                            regenerateTurn(t.turn);
+                          }}
+                          style={{ ...taskBtnStyle, marginTop: 8 }}
+                        >
+                          🔄 重试此轮
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+        <ResizeHandle
+          onDrag={(delta) => setPanelW((w) => clampPanel(w - delta))}
+        />
         <ArtifactPanel
           open={artifactsOpen}
           artifacts={artifacts}
           onToggle={() => setArtifactsOpen(!artifactsOpen)}
+          width={panelW}
         />
 
         {/* 对话中切换技能弹层 */}

@@ -87,12 +87,19 @@ class TestUpdatePermissionConfig:
         )
         assert resp.status_code == 422
 
-    async def test_update_missing_session_404(self, client):
+    async def test_update_missing_session_upserts(self, client):
+        """2026-08-04 修复: 会话不存在时 upsert 而非 404(设置页权限切换)。"""
         resp = await client.put(
             "/admin/settings/permission",
             json={"session_id": 888, "mode": "plan"},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert resp.json()["mode"] == "plan"
+        # 读取确认已创建
+        get_resp = await client.get(
+            "/admin/settings/permission", params={"session_id": 888}
+        )
+        assert get_resp.json()["mode"] == "plan"
 
     async def test_cycle_all_modes(self, client):
         """五种模式逐一写入均可读取。"""

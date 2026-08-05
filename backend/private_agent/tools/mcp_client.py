@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -62,6 +63,8 @@ class MCPClientConfig:
     protocol_version: str = PROTOCOL_AUTO
     health_check_interval_sec: float = 30.0
     auth_token: str = ""  # Bearer token(http 模式认证, 请求带 Authorization 头)
+    # V1.2-6.2: 额外环境变量(stdio 模式启动子进程时注入, 如 API Key)
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -179,6 +182,11 @@ class MCPClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # V1.2-6.2: 注入 server 级 env(合并进系统环境变量, 如 API Key)
+                env={
+                    **os.environ,
+                    **{k: str(v) for k, v in self._config.env.items()},
+                },
             ),
             timeout=self._config.timeout_sec,
         )

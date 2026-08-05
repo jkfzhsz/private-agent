@@ -149,6 +149,25 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     )
     # §3.10.3 [MVP]: version_snapshots.scope CHECK 扩容(老部署补丁,含 stable_zone)
     await _migrate_version_snapshots_scope_check(conn)
+    # V1.1-3.1 会话管理闭环: sessions.folder 文件夹分组(老部署补列,新部署 schema.sql 已含)
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS folder VARCHAR(100)"
+    )
+    # V1.1-3.3 消息精细化操作: messages.starred 收藏标记(老部署补列,新部署 schema.sql 已含)
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS starred BOOLEAN NOT NULL DEFAULT FALSE"
+    )
+    # V1.1-3.5 上下文可控: sessions.memory_enabled 会话级记忆开关
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS memory_enabled BOOLEAN NOT NULL DEFAULT TRUE"
+    )
+    # V1.3-7.2 工作流自动化: sessions.auto_execute / max_rounds 自动连续执行
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_execute BOOLEAN NOT NULL DEFAULT FALSE"
+    )
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_rounds INT NOT NULL DEFAULT 3"
+    )
 
 
 async def _migrate_version_snapshots_scope_check(conn: asyncpg.Connection) -> None:

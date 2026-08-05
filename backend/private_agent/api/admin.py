@@ -296,7 +296,7 @@ async def knowledge_upload(
             repo = KnowledgeBaseRepo(conn)
             svc = KnowledgeBaseService(
                 kb_repo=repo,
-                processor=DocumentProcessor(),
+                processor=_build_kb_processor(cfg),
             )
             doc_id, chunks = await svc.process_document(
                 content=content,
@@ -311,6 +311,376 @@ async def knowledge_upload(
             status_code=500,
             content={"error": "upload_failed"},
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# V1.2-6.4 基础 RAG: 知识库列表/删除/文档/文件上传(库 = scenario 分组)
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/knowledge", response_model=None)
+async def list_knowledge_bases():
+    """知识库列表(V1.2-6.4): 按 scenario 分组统计 + 文档清单。"""
+    try:
+        conn = await db.connect()
+        try:
+            repo = KnowledgeBaseRepo(conn)
+            stats = await repo.get_stats()
+            docs = await repo.list_documents(limit=500)
+            from collections import defaultdict
+
+            groups: dict[str, dict] = defaultdict(
+                lambda: {"scenario": None, "documents": [], "chunks": 0}
+            )
+            for d in docs:
+                sc = d.scenario or "未分类"
+                g = groups[sc]
+                g["scenario"] = sc
+                g["documents"].append({
+                    "doc_id": d.id,
+                    "source": d.source,
+                    "created_at": d.created_at.isoformat() if d.created_at else None,
+                })
+            scenarios = []
+            for sc, g in groups.items():
+                sc_stats = (stats.get("scenarios") or {}).get(sc, {}) if sc != "未分类" else {}
+                g["chunks"] = int(sc_stats.get("chunks", 0))
+                scenarios.append(g)
+            scenarios.sort(key=lambda g: -len(g["documents"]))
+            return {
+                "total_documents": int(stats.get("total_documents", 0)),
+                "total_chunks": int(stats.get("total_chunks", 0)),
+                "bases": scenarios,
+            }
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "kb_list_failed"})
+
+
+@router.delete("/knowledge/{scenario}", response_model=None)
+async def delete_knowledge_base(scenario: str):
+    """删除知识库(V1.2-6.4): 软删该 scenario 全部文档(soft-delete, 可追溯)。"""
+    try:
+        conn = await db.connect()
+        try:
+            repo = KnowledgeBaseRepo(conn)
+            docs = await repo.list_documents(scenario=scenario, limit=1000)
+            for d in docs:
+                if d.id:
+                    await repo.deactivate_document(d.id)
+            return {"ok": True, "scenario": scenario, "deleted_documents": len(docs)}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "kb_delete_failed"})
+
+
+@router.get("/knowledge/{scenario}/documents", response_model=None)
+async def list_kb_documents(scenario: str, limit: int = 100):
+    """库内文档列表(V1.2-6.4)。"""
+    try:
+        conn = await db.connect()
+        try:
+            repo = KnowledgeBaseRepo(conn)
+            docs = await repo.list_documents(
+                scenario=scenario, limit=min(max(int(limit), 1), 500)
+            )
+            return [
+                {
+                    "doc_id": d.id,
+                    "source": d.source,
+                    "created_at": d.created_at.isoformat() if d.created_at else None,
+                }
+                for d in docs
+            ]
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "kb_documents_failed"})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# V1.3-7.3 知识库专业升级: 切片配置 / 批量重索引 / 检索测试
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _build_kb_processor(cfg: dict):
+    """按 config_runtime 覆盖构造 DocumentProcessor(切片参数全局生效)。"""
+    from private_agent.knowledge.document_processor import (
+        DEFAULT_CHUNK_PARAMS,
+        DocumentProcessor,
+    )
+
+    chunking = (cfg.get("knowledge") or {}).get("chunking") or {}
+    params = dict(DEFAULT_CHUNK_PARAMS)
+    for doc_type, overrides in chunking.items():
+        if not isinstance(overrides, dict):
+            continue
+        base = dict(params.get(doc_type, {}))
+        for k in ("chunk_size", "chunk_overlap"):
+            v = overrides.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                base[k] = int(v)
+        params[doc_type] = base
+    return DocumentProcessor(chunk_params=params)
+
+
+class KnowledgeConfigRequest(BaseModel):
+    """PUT /admin/knowledge/config 请求体(V1.3-7.3): 切片参数。
+
+    chunking: {"markdown": {"chunk_size": 512, "chunk_overlap": 64}, ...}
+    仅更新传入的类型/键; 不传 = 不更新。
+    """
+
+    chunking: dict | None = None
+
+
+@router.get("/knowledge/config", response_model=None)
+async def get_knowledge_config():
+    """读取切片配置(yaml + config_runtime 合并, V1.3-7.3)。"""
+    cfg = await _load_cfg()
+    from private_agent.knowledge.document_processor import DEFAULT_CHUNK_PARAMS
+
+    chunking = dict(DEFAULT_CHUNK_PARAMS)
+    merged = (cfg.get("knowledge") or {}).get("chunking") or {}
+    for doc_type, overrides in merged.items():
+        if isinstance(overrides, dict):
+            chunking[doc_type] = {**chunking.get(doc_type, {}), **overrides}
+    return {"chunking": chunking}
+
+
+@router.put("/knowledge/config", response_model=None)
+async def update_knowledge_config(body: KnowledgeConfigRequest):
+    """修改切片参数(写入 config_runtime, 下次上传/重索引生效, V1.3-7.3)。"""
+    if not body.chunking:
+        return {"status": "ok", "unchanged": True}
+    # 合并写: 逐类型逐键写点分 key
+    conn = await db.connect()
+    try:
+        for doc_type, overrides in body.chunking.items():
+            if not isinstance(overrides, dict):
+                continue
+            for k, v in overrides.items():
+                if k not in ("chunk_size", "chunk_overlap"):
+                    continue
+                try:
+                    iv = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if iv <= 0:
+                    continue
+                await _set_runtime(
+                    conn, f"knowledge.chunking.{doc_type}.{k}", iv
+                )
+    finally:
+        await conn.close()
+    return {"status": "ok"}
+
+
+class KnowledgeReindexRequest(BaseModel):
+    """POST /admin/knowledge/reindex 请求体(V1.3-7.3): 批量重向量化。
+
+    scenario: 目标库(必填)。chunk_size/overlap 可选覆盖(一次性, 不落配置)。
+    """
+
+    scenario: str
+    chunk_size: int | None = None
+    chunk_overlap: int | None = None
+
+
+@router.post("/knowledge/reindex", response_model=None)
+async def reindex_knowledge(body: KnowledgeReindexRequest):
+    """批量重索引(V1.3-7.3): 删除该库全部 chunk 后按当前切片配置重切重向量化。
+
+    Returns:
+        200: {"ok": true, "documents": n, "chunks": m}
+        404: {"error": "kb_not_found"}
+        500: {"error": "reindex_failed"}
+    """
+    scenario = (body.scenario or "").strip()
+    if not scenario:
+        return JSONResponse(status_code=400, content={"error": "scenario_required"})
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.knowledge.kb_service import KnowledgeBaseService
+
+            cfg = await _load_cfg()
+            processor = _build_kb_processor(cfg)
+            # 一次性覆盖(不落配置)
+            if body.chunk_size or body.chunk_overlap:
+                from private_agent.knowledge.document_processor import (
+                    DEFAULT_CHUNK_PARAMS,
+                )
+
+                params = dict(processor._chunk_params)
+                for dt, base in DEFAULT_CHUNK_PARAMS.items():
+                    cur = dict(params.get(dt, base))
+                    if body.chunk_size:
+                        cur["chunk_size"] = body.chunk_size
+                    if body.chunk_overlap:
+                        cur["chunk_overlap"] = body.chunk_overlap
+                    params[dt] = cur
+                processor = DocumentProcessor(chunk_params=params)
+
+            repo = KnowledgeBaseRepo(conn)
+            docs = await repo.list_documents(
+                scenario=scenario, limit=5000
+            )
+            if not docs:
+                return JSONResponse(
+                    status_code=404, content={"error": "kb_not_found"}
+                )
+            # 清空旧 chunk(重向量化)
+            await conn.execute(
+                "DELETE FROM kb_chunks WHERE scenario = $1", scenario
+            )
+            svc = KnowledgeBaseService(
+                kb_repo=repo, processor=processor,
+            )
+            total_chunks = 0
+            for d in docs:
+                if not d.content:
+                    continue
+                _, chunks = await svc.process_document(
+                    content=d.content,
+                    filename=d.source or "doc.txt",
+                    scenario=scenario,
+                    skip_dedup=True,
+                )
+                total_chunks += len(chunks)
+            return {"ok": True, "documents": len(docs), "chunks": total_chunks}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=500, content={"error": "reindex_failed"}
+        )
+
+
+class KnowledgeSearchTestRequest(BaseModel):
+    """POST /admin/knowledge/search_test 请求体(V1.3-7.3): 检索测试。"""
+
+    query: str
+    scenario: str | None = None
+    top_k: int = 5
+
+
+@router.post("/knowledge/search_test", response_model=None)
+async def knowledge_search_test(body: KnowledgeSearchTestRequest):
+    """检索测试面板(V1.3-7.3): 复用生产检索流水线(search_with_rerank)。
+
+    Returns:
+        200: {"results": [{chunk_id, text, score, source, doc_type}]}
+        400: {"error": "query_required"}
+        503: {"error": "search_failed"}
+    """
+    query = (body.query or "").strip()
+    if not query:
+        return JSONResponse(status_code=400, content={"error": "query_required"})
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.knowledge.kb_service import KnowledgeBaseService
+
+            cfg = await _load_cfg()
+            repo = KnowledgeBaseRepo(conn)
+            svc = KnowledgeBaseService(
+                kb_repo=repo,
+                processor=_build_kb_processor(cfg),
+                config=cfg.get("knowledge", {}),
+            )
+            chunks = await svc.search_with_rerank(
+                query=query,
+                scenario=body.scenario or None,
+                top_k=min(max(int(body.top_k), 1), 20),
+            )
+            return {
+                "results": [
+                    {
+                        "chunk_id": c.chunk_id,
+                        "text": c.text,
+                        "score": round(float(c.score or 0), 4),
+                        "source": c.source,
+                        "doc_type": c.doc_type,
+                    }
+                    for c in chunks
+                ]
+            }
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "search_failed"}
+        )
+
+
+class KnowledgeFileUploadRequest(BaseModel):
+    """POST /admin/knowledge/upload-file 请求体(V1.2-6.4): 文件上传入库。
+
+    filename: 文件名(扩展名决定文档类型)。
+    content_base64: 文件内容(base64, 文本文件 utf-8/gbk)。
+    scenario: 目标知识库(缺省按文件名/类型归类)。
+    """
+
+    filename: str
+    content_base64: str
+    scenario: str | None = None
+
+
+@router.post("/knowledge/upload-file", response_model=None)
+async def knowledge_upload_file(body: KnowledgeFileUploadRequest):
+    """文件上传入库(V1.2-6.4): base64 → 文本 → 切片向量化。
+
+    支持文本类文件(md/txt/csv/json/代码等, utf-8/gbk); 二进制/PDF 请
+    先转文本再上传(个人应用, 不内置文档解析器)。
+    """
+    import base64 as _b64
+    import re as _re
+    from pathlib import Path
+
+    safe_name = _re.sub(r'[\\/:*?"<>|]', "_", Path(body.filename).name or "upload.txt")
+    try:
+        decoded = _b64.b64decode(body.content_base64, validate=False)
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "invalid_file"})
+    if len(decoded) > 10 * 1024 * 1024:
+        return JSONResponse(status_code=400, content={"error": "file_too_large"})
+    # 文本解码(utf-8 优先, gbk 兜底)
+    text = None
+    for enc in ("utf-8", "gbk"):
+        try:
+            text = decoded.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "unsupported_binary_file"},
+        )
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.knowledge.kb_service import KnowledgeBaseService
+
+            cfg = await _load_cfg()
+            repo = KnowledgeBaseRepo(conn)
+            svc = KnowledgeBaseService(
+                kb_repo=repo,
+                processor=_build_kb_processor(cfg),
+                config=cfg.get("knowledge", {}),
+            )
+            doc_id, chunks = await svc.process_document(
+                content=text,
+                filename=safe_name,
+                scenario=body.scenario,
+            )
+            return {"doc_id": doc_id, "chunks": len(chunks), "filename": safe_name}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "upload_failed"})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -402,6 +772,9 @@ async def list_skills():
                     "version": s.manifest.version,
                     "description": s.manifest.description,
                     "enabled": s.manifest.enabled,
+                    # V1.1-3.6: getattr 防御(兼容 mock/旧 manifest 无新字段)
+                    "avatar": getattr(s.manifest, "avatar", ""),
+                    "tags": list(getattr(s.manifest, "tags", None) or []),
                     "permissions": _skill_permissions_summary(s.manifest),
                 }
                 for s in skills
@@ -463,6 +836,10 @@ async def get_skill_detail(skill_name: str):
                 "version": skill.manifest.version,
                 "description": skill.manifest.description,
                 "enabled": skill.manifest.enabled,
+                # V1.1-3.6: getattr 防御(兼容 mock/旧 manifest 无新字段)
+                "avatar": getattr(skill.manifest, "avatar", ""),
+                "tags": list(getattr(skill.manifest, "tags", None) or []),
+                "model_params": dict(getattr(skill.manifest, "model_params", None) or {}),
                 "system_prompt_preview": skill.system_prompt[:500],
                 "tools": [
                     {
@@ -486,18 +863,330 @@ async def get_skill_detail(skill_name: str):
         )
 
 
+def _skill_dev_dir() -> Path:
+    """skill 开发目录(config skills.storage.dev_dir, 默认 ./skills)。"""
+    from pathlib import Path
+
+    cfg = loader.load_config()
+    dev_dir = Path(cfg.get("skills", {}).get("storage", {}).get("dev_dir", "./skills"))
+    if not dev_dir.is_absolute():
+        dev_dir = Path.cwd() / dev_dir
+    return dev_dir
+
+
+class SkillMetaRequest(BaseModel):
+    """PUT /admin/skills/{name}/meta 请求体(V1.1-3.6): 智能体元数据。
+
+    description/avatar/enabled/model_params 传 None 不更新; tags 传 None 不更新,
+    传 [] 清空。model_params 支持 {temperature, top_p, max_tokens}(仅存元数据,
+    运行时 max_tokens 注入, temperature/top_p 视 provider 能力)。
+    """
+
+    description: str | None = None
+    avatar: str | None = None
+    tags: list[str] | None = None
+    enabled: bool | None = None
+    model_params: dict | None = None
+
+
+@router.put("/skills/{skill_name}/meta", response_model=None)
+async def update_skill_meta(skill_name: str, body: SkillMetaRequest):
+    """更新智能体基础信息(V1.1-3.6): 写 skill.yaml + 同步 PG skills 表。"""
+    import shutil as _shutil
+    from pathlib import Path
+
+    try:
+        cfg = loader.load_config()
+        loader_ = _build_skill_loader(cfg)
+        conn = await db.connect()
+        try:
+            skill = await loader_.load(skill_name, conn)
+        finally:
+            await conn.close()
+    except Exception:
+        raise HTTPException(status_code=404, detail="skill_not_found")
+
+    # 1. 更新 skill.yaml
+    skill_dir = _skill_dev_dir() / skill_name
+    yaml_path = skill_dir / "skill.yaml"
+    if not yaml_path.exists():
+        raise HTTPException(status_code=404, detail="skill_yaml_not_found")
+    try:
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        if body.description is not None:
+            data["description"] = body.description.strip()
+        if body.avatar is not None:
+            data["avatar"] = body.avatar.strip()
+        if body.tags is not None:
+            data["tags"] = [str(t).strip() for t in body.tags if str(t).strip()]
+        if body.model_params is not None:
+            mp = {}
+            for k in ("temperature", "top_p", "max_tokens"):
+                if body.model_params.get(k) is not None:
+                    mp[k] = body.model_params[k]
+            data["model_params"] = mp
+        if body.enabled is not None:
+            data["enabled"] = bool(body.enabled)
+        yaml_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "skill_meta_save_failed"})
+
+    # 2. 同步 PG skills 表 manifest(存在才更新)
+    try:
+        conn = await db.connect()
+        try:
+            await conn.execute(
+                """
+                UPDATE skills SET manifest = $1, description = $2,
+                    is_enabled = $3, updated_at = now()
+                WHERE name = $4
+                """,
+                __import__("json").dumps(data, ensure_ascii=False),
+                data.get("description"),
+                data.get("enabled", True),
+                skill_name,
+            )
+        finally:
+            await conn.close()
+    except Exception:
+        pass  # PG 同步失败不影响文件系统源
+    return {"ok": True, "name": skill_name}
+
+
+@router.post("/skills/{skill_name}/clone", response_model=None)
+async def clone_skill(skill_name: str):
+    """克隆智能体(V1.1-3.6): 复制 skill 目录为 {name}-copy + 同步 PG 行。"""
+    import re as _re
+    import shutil as _shutil
+    from pathlib import Path
+
+    src_dir = _skill_dev_dir() / skill_name
+    if not src_dir.exists():
+        raise HTTPException(status_code=404, detail="skill_not_found")
+    new_name = f"{skill_name}-copy"
+    if _re.fullmatch(r"[a-z0-9_-]+", new_name) is None:
+        new_name = f"{skill_name}-{int(__import__('time').time())}"
+    dst_dir = _skill_dev_dir() / new_name
+    if dst_dir.exists():
+        # 已存在同名副本 → 追加序号
+        i = 2
+        while dst_dir.exists():
+            dst_dir = _skill_dev_dir() / f"{new_name}{i}"
+            i += 1
+        new_name = dst_dir.name
+    try:
+        _shutil.copytree(src_dir, dst_dir)
+        # 改 yaml name
+        yaml_path = dst_dir / "skill.yaml"
+        if yaml_path.exists():
+            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            data["name"] = new_name
+            yaml_path.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+        # 同步 PG 行: 源有 PG 行则复制; 无则从文件系统组装(保证 db_first 可读)
+        conn = await db.connect()
+        try:
+            existing = await conn.fetchrow(
+                "SELECT manifest, system_prompt, tools FROM skills WHERE name = $1",
+                skill_name,
+            )
+            if existing is not None:
+                import json as _json
+
+                manifest = _json.loads(existing["manifest"]) if existing["manifest"] else {}
+                manifest["name"] = new_name
+                new_manifest = _json.dumps(manifest, ensure_ascii=False)
+                new_prompt = existing["system_prompt"]
+                new_tools = existing["tools"] if existing["tools"] else "[]"
+                new_version = str((manifest.get("version") or "1.0.0"))
+                new_desc = manifest.get("description")
+            else:
+                import json as _json
+
+                yaml_text = (
+                    (dst_dir / "skill.yaml").read_text(encoding="utf-8")
+                    if (dst_dir / "skill.yaml").exists() else "{}"
+                )
+                parsed = yaml.safe_load(yaml_text) or {}
+                parsed["name"] = new_name
+                new_manifest = _json.dumps(parsed, ensure_ascii=False)
+                new_prompt = (
+                    (dst_dir / "system_prompt.md").read_text(encoding="utf-8")
+                    if (dst_dir / "system_prompt.md").exists() else ""
+                )
+                tools_file = dst_dir / "tools.yaml"
+                tools_parsed = (
+                    yaml.safe_load(tools_file.read_text(encoding="utf-8"))
+                    if tools_file.exists() else []
+                )
+                new_tools = _json.dumps(tools_parsed or [], ensure_ascii=False)
+                new_version = str(parsed.get("version") or "1.0.0")
+                new_desc = parsed.get("description")
+            await conn.execute(
+                """
+                INSERT INTO skills (name, version, description, manifest, system_prompt, tools, is_enabled)
+                VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, TRUE)
+                """,
+                new_name,
+                new_version,
+                new_desc,
+                new_manifest,
+                new_prompt,
+                new_tools,
+            )
+        finally:
+            await conn.close()
+        return {"ok": True, "name": new_name, "path": str(dst_dir)}
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "skill_clone_failed"})
+
+
+@router.delete("/skills/{skill_name}", response_model=None)
+async def delete_skill(skill_name: str):
+    """删除技能(V1.1 技能库): 删 skill 目录 + PG 行。
+
+    安全约束: 若存在激活了该技能的活跃会话 → 400 拒绝(防历史会话续聊失败)。
+    """
+    import shutil as _shutil
+
+    try:
+        conn = await db.connect()
+        try:
+            # 被活跃会话锁定的技能不允许删
+            locked = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM sessions
+                WHERE locked_skill_name = $1 AND status IN ('active', 'interrupted')
+                """,
+                skill_name,
+            )
+            if (locked or 0) > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"skill_in_use: {locked} 个会话正在使用该技能",
+                )
+            await conn.execute("DELETE FROM skills WHERE name = $1", skill_name)
+        finally:
+            await conn.close()
+
+        skill_dir = _skill_dev_dir() / skill_name
+        if skill_dir.exists():
+            _shutil.rmtree(skill_dir)
+        return {"ok": True, "name": skill_name, "deleted": True}
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "skill_delete_failed"},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# V1.2-6.1 技能配置编辑器: 系统提示词读/写 + 自动快照 + token 估算
+# ══════════════════════════════════════════════════════════════════════════
+
+class SkillPromptRequest(BaseModel):
+    """PUT /admin/skills/{name}/prompt 请求体(V1.2-6.1): 系统提示词全文。"""
+
+    system_prompt: str
+
+
+@router.get("/skills/{skill_name}/prompt", response_model=None)
+async def get_skill_prompt(skill_name: str):
+    """读取技能系统提示词(V1.2-6.1): 内容 + token 估算 + 当前版本。"""
+    try:
+        cfg = loader.load_config()
+        loader_ = _build_skill_loader(cfg)
+        conn = await db.connect()
+        try:
+            skill = await loader_.load(skill_name, conn)
+        finally:
+            await conn.close()
+    except Exception:
+        raise HTTPException(status_code=404, detail="skill_not_found")
+    from private_agent.core.token_estimator import TokenEstimator
+
+    try:
+        tokens = TokenEstimator().estimate(skill.system_prompt)
+    except Exception:  # noqa: BLE001
+        tokens = None
+    return {
+        "name": skill_name,
+        "system_prompt": skill.system_prompt,
+        "token_count": tokens,
+        "version": skill.manifest.version,
+    }
+
+
+@router.put("/skills/{skill_name}/prompt", response_model=None)
+async def update_skill_prompt(skill_name: str, body: SkillPromptRequest):
+    """写系统提示词(V1.2-6.1): 落盘 system_prompt.md + 自动快照 + 同步 PG。
+
+    注: 提示词变化会改变 frozen_hash → 旧会话续聊自动重建 Frozen Zone(已有机制)。
+    """
+    import time as _time
+
+    prompt = body.system_prompt
+    skill_dir = _skill_dev_dir() / skill_name
+    if not skill_dir.exists():
+        raise HTTPException(status_code=404, detail="skill_not_found")
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.eval.repos import VersionSnapshotRepo
+
+            # 1. 自动快照(scope=prompt, 版本=时间戳; 失败不阻塞保存)
+            try:
+                repo = VersionSnapshotRepo(conn)
+                await repo.save(
+                    scope="prompt",
+                    version=_time.strftime("%Y%m%d%H%M%S"),
+                    payload={"skill_name": skill_name, "system_prompt": prompt},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            # 2. 同步 PG skills.system_prompt(存在才更新, db_first 运行时生效)
+            await conn.execute(
+                "UPDATE skills SET system_prompt = $1, updated_at = now() WHERE name = $2",
+                prompt,
+                skill_name,
+            )
+        finally:
+            await conn.close()
+        # 3. 落盘(skill.yaml 同目录)
+        (skill_dir / "system_prompt.md").write_text(prompt, encoding="utf-8")
+        from private_agent.core.token_estimator import TokenEstimator
+
+        try:
+            tokens = TokenEstimator().estimate(prompt)
+        except Exception:  # noqa: BLE001
+            tokens = None
+        return {"ok": True, "name": skill_name, "token_count": tokens}
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "skill_prompt_save_failed"})
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 记忆/设置查询端点(V1.5 Phase 1 Task 12, 供前端记忆页/设置页)
 # ══════════════════════════════════════════════════════════════════════════
 
 
 @router.get("/memories", response_model=None)
-async def list_memories(type: str | None = None, limit: int = 100):
+async def list_memories(type: str | None = None, limit: int = 100, q: str | None = None):
     """查询活跃用户记忆列表(蓝图 §4.3)。
 
     Args:
         type: 记忆类型过滤(preference/fact/todo/decision,可选)。
         limit: 返回条数上限(默认 100)。
+        q: 内容关键字检索(V1.3-7.1, ILIKE 匹配, 可选)。
 
     Returns:
         200: [{id, type, content, importance, source_session_id, created_at,
@@ -512,11 +1201,14 @@ async def list_memories(type: str | None = None, limit: int = 100):
                 SELECT id, type, content, importance, source_session_id,
                        created_at, last_accessed_at, access_count
                 FROM user_memories
-                WHERE is_active = TRUE AND ($1::text IS NULL OR type = $1)
+                WHERE is_active = TRUE
+                  AND ($1::text IS NULL OR type = $1)
+                  AND ($2::text IS NULL OR content ILIKE '%' || $2 || '%')
                 ORDER BY importance DESC, created_at DESC
-                LIMIT $2
+                LIMIT $3
                 """,
                 type,
+                (q or "").strip() or None,
                 min(max(int(limit), 1), 500),
             )
             return [
@@ -543,6 +1235,90 @@ async def list_memories(type: str | None = None, limit: int = 100):
         return JSONResponse(
             status_code=503,
             content={"error": "memories_list_failed"},
+        )
+
+
+class MemoryCreateRequest(BaseModel):
+    """POST /memories 请求体(V1.3-7.1): 手动新增记忆。
+
+    content: 记忆内容(必填非空)。
+    type: 记忆类型(preference/fact/todo/decision/correction, 默认 fact)。
+    importance: 重要性 0~1(默认 0.5)。
+    """
+
+    content: str
+    type: str = "fact"
+    importance: float = 0.5
+
+
+@router.post("/memories", response_model=None)
+async def create_memory(body: MemoryCreateRequest):
+    """手动新增用户记忆(V1.3-7.1)。
+
+    Returns:
+        200: {"ok": true, "id": int}
+        400: {"error": "memory_invalid_content"}
+        503: {"error": "memory_create_failed"}
+    """
+    content = (body.content or "").strip()
+    if not content:
+        return JSONResponse(
+            status_code=400, content={"error": "memory_invalid_content"}
+        )
+    mtype = body.type if body.type in (
+        "preference", "fact", "todo", "decision", "correction"
+    ) else "fact"
+    importance = min(max(float(body.importance), 0.0), 1.0)
+    try:
+        conn = await db.connect()
+        try:
+            mid = await conn.fetchval(
+                """
+                INSERT INTO user_memories (user_id, type, content, importance)
+                VALUES (1, $1, $2, $3)
+                RETURNING id
+                """,
+                mtype, content, importance,
+            )
+        finally:
+            await conn.close()
+        return {"ok": True, "id": mid}
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "memory_create_failed"}
+        )
+
+
+@router.delete("/memories/{memory_id}", response_model=None)
+async def delete_memory(memory_id: int):
+    """软删除记忆(V1.3-7.1): is_active=FALSE, 保留历史供审计。
+
+    Returns:
+        200: {"ok": true}
+        404: {"error": "memory_not_found"}
+    """
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                """
+                UPDATE user_memories
+                SET is_active = FALSE
+                WHERE id = $1 AND is_active = TRUE
+                RETURNING id
+                """,
+                memory_id,
+            )
+        finally:
+            await conn.close()
+        if row is None:
+            return JSONResponse(
+                status_code=404, content={"error": "memory_not_found"}
+            )
+        return {"ok": True}
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "memory_delete_failed"}
         )
 
 
@@ -573,6 +1349,10 @@ async def get_providers():
             "enabled": prov.get("enabled", True),
             "model_name": prov.get("model_name"),
             "base_url": prov.get("base_url"),
+            # V1.4-8.2: 分组元数据(前端分组展示)
+            "group": prov.get("group"),
+            "sort_order": prov.get("sort_order", 0),
+            "kind": prov.get("kind", "cloud"),
             # 不返回 key 明文,仅返回是否已配置(非空且非 test-key 占位)
             "api_key_configured": bool(key_val) and key_val != "test-key",
             # per-provider 对话参数上限(已解析: provider 级 > 全局默认)
@@ -637,6 +1417,7 @@ class ProviderUpdateRequest(BaseModel):
     """PUT /settings/providers/{name} 请求体(至少一项)。
 
     含 per-provider 对话参数上限(覆盖全局 models.limits 默认)。
+    V1.4-8.2: group/sort_order/kind 分组元数据(展示用, 不影响运行)。
     """
 
     base_url: str | None = None
@@ -646,6 +1427,9 @@ class ProviderUpdateRequest(BaseModel):
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
     max_turns: int | None = None
+    group: str | None = None
+    sort_order: int | None = None
+    kind: str | None = None  # cloud | local
 
 
 @router.put("/settings/providers/{name}", response_model=None)
@@ -673,6 +1457,23 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
             await _set_runtime(conn, f"{prefix}.model_name", body.model_name)
         if body.enabled is not None:
             await _set_runtime(conn, f"{prefix}.enabled", bool(body.enabled))
+
+        # V1.4-8.2: 分组元数据(group 空串=清除, sort_order/kind 直接落)
+        if body.group is not None:
+            g = (body.group or "").strip()
+            if g:
+                await _set_runtime(conn, f"{prefix}.group", g)
+            else:
+                await conn.execute(
+                    "DELETE FROM config_runtime WHERE key = $1",
+                    f"{prefix}.group",
+                )
+        if body.sort_order is not None:
+            await _set_runtime(conn, f"{prefix}.sort_order", int(body.sort_order))
+        if body.kind is not None:
+            k = (body.kind or "").strip()
+            if k in ("cloud", "local"):
+                await _set_runtime(conn, f"{prefix}.kind", k)
 
         # per-provider 对话参数上限(0 表示删除覆盖回退全局默认, 空表示不更新)
         for key, field in (
@@ -979,7 +1780,212 @@ async def test_sandbox(body: SandboxTestRequest):
         }
 
 
-# ── 阶段三批次1(T1.2, 调研 round2 §4.2.1): 会话级权限模式 ───────────────────
+class MemoryConfigUpdateRequest(BaseModel):
+    """PUT /settings/memory 请求体(V1.3-7.1): 记忆注入强度/开关配置。
+
+    全部可选, 传 None 不更新。写入 config_runtime, 下一轮生效。
+    """
+
+    enabled: bool | None = None
+    inject_limit: int | None = None
+    extract_interval_turns: int | None = None
+    eviction_max_active_count: int | None = None
+    eviction_min_importance_threshold: float | None = None
+    eviction_expire_days: int | None = None
+
+
+@router.get("/settings/memory", response_model=None)
+async def get_memory_config():
+    """读取记忆配置(yaml + config_runtime 合并, V1.3-7.1)。"""
+    cfg = await _load_cfg()
+    mem = cfg.get("memory", {}) or {}
+    eviction = mem.get("eviction", {}) or {}
+    return {
+        "enabled": mem.get("enabled", True),
+        "inject_limit": mem.get("inject_limit", 10),
+        "extract_interval_turns": mem.get("extract_interval_turns", 8),
+        "eviction": {
+            "max_active_count": eviction.get("max_active_count", 200),
+            "min_importance_threshold": eviction.get(
+                "min_importance_threshold", 0.3
+            ),
+            "expire_days": eviction.get("expire_days", 30),
+        },
+    }
+
+
+@router.put("/settings/memory", response_model=None)
+async def update_memory_config(body: MemoryConfigUpdateRequest):
+    """修改记忆配置(写入 config_runtime, 下一轮生效, V1.3-7.1)。
+
+    enabled=False 等价于全部会话 memory_enabled=False(不注入/不提取)。
+    """
+    conn = await db.connect()
+    try:
+        if body.enabled is not None:
+            await _set_runtime(conn, "memory.enabled", bool(body.enabled))
+        if body.inject_limit is not None:
+            await _set_runtime(
+                conn, "memory.inject_limit",
+                min(max(int(body.inject_limit), 1), 50),
+            )
+        if body.extract_interval_turns is not None:
+            await _set_runtime(
+                conn, "memory.extract_interval_turns",
+                min(max(int(body.extract_interval_turns), 1), 100),
+            )
+        if body.eviction_max_active_count is not None:
+            await _set_runtime(
+                conn, "memory.eviction.max_active_count",
+                min(max(int(body.eviction_max_active_count), 10), 5000),
+            )
+        if body.eviction_min_importance_threshold is not None:
+            await _set_runtime(
+                conn, "memory.eviction.min_importance_threshold",
+                min(max(float(body.eviction_min_importance_threshold), 0.0), 1.0),
+            )
+        if body.eviction_expire_days is not None:
+            await _set_runtime(
+                conn, "memory.eviction.expire_days",
+                min(max(int(body.eviction_expire_days), 1), 3650),
+            )
+    finally:
+        await conn.close()
+    return {"status": "ok"}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# V1.4-8.3 系统设置完善: 存储路径 / 缓存清理 / 代理 / 日志 / master key
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@router.post("/cache/clear", response_model=None)
+async def clear_cache():
+    """清理运行时缓存(V1.4-8.3)。
+
+    - outputs/ 产物目录: 删除超过 retention 天(默认 7)的临时文件
+    - Python 进程内: 触发 token_estimator / MCP tools 缓存重建(如有)
+    Returns:
+        200: {"ok": true, "cleaned_files": n, "freed_bytes": n}
+    """
+    from datetime import datetime, timezone
+
+    retention_days = 7
+    try:
+        cfg = await _load_cfg()
+        retention_days = int(
+            (cfg.get("system") or {}).get("logs", {}).get(
+                "retention_days", 7
+            )
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    root = _workspace_root()
+    outputs_dir = root / "outputs"
+    cleaned = 0
+    freed = 0
+    now = datetime.now(timezone.utc)
+    if outputs_dir.exists():
+        for p in outputs_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                age = now - datetime.fromtimestamp(
+                    p.stat().st_mtime, tz=timezone.utc
+                )
+                if age.days >= retention_days:
+                    size = p.stat().st_size
+                    p.unlink(missing_ok=True)
+                    cleaned += 1
+                    freed += size
+            except OSError:
+                continue
+    return {"ok": True, "cleaned_files": cleaned, "freed_bytes": freed,
+            "retention_days": retention_days}
+
+
+class SystemSettingsRequest(BaseModel):
+    """PUT /settings/system 请求体(V1.4-8.3): 系统级设置。
+
+    workspace_root: 工作区存储路径(改动影响文件工具路径, 建议重启后完整生效)。
+    log_level: 日志级别(DEBUG/INFO/WARNING/ERROR)。
+    log_retention_days: logs 日志保留天数(清理用)。
+    proxy_http / proxy_https: 网络代理地址(空串清除)。
+    """
+
+    workspace_root: str | None = None
+    log_level: str | None = None
+    log_retention_days: int | None = None
+    proxy_http: str | None = None
+    proxy_https: str | None = None
+
+
+@router.get("/settings/system", response_model=None)
+async def get_system_settings():
+    """读取系统设置 + master key 状态(V1.4-8.3)。"""
+    import os
+
+    cfg = await _load_cfg()
+    sys_cfg = cfg.get("system", {}) or {}
+    logs_cfg = sys_cfg.get("logs", {}) or {}
+    proxy = sys_cfg.get("proxy", {}) or {}
+    master_key = os.environ.get("PA_MASTER_KEY", "")
+    return {
+        "app_name": sys_cfg.get("app_name", "Private Agent"),
+        "version": sys_cfg.get("version", "0.1.0"),
+        "workspace_root": str(_workspace_root()),
+        "log_level": (sys_cfg.get("sidecar") or {}).get("log_level", "INFO"),
+        "log_retention_days": logs_cfg.get("retention_days", 7),
+        "proxy_http": proxy.get("http"),
+        "proxy_https": proxy.get("https"),
+        "master_key_configured": bool(master_key) and master_key != "test-key",
+        "database": cfg.get("database", {}).get("name", "private_agent"),
+    }
+
+
+@router.put("/settings/system", response_model=None)
+async def update_system_settings(body: SystemSettingsRequest):
+    """修改系统设置(写入 config_runtime, V1.4-8.3)。
+
+    workspace_root 与代理: 存入配置供启动/加载时应用(运行时改存储路径
+    需重启后端完整生效); log_level 即时由日志模块读取。
+    """
+    conn = await db.connect()
+    try:
+        if body.workspace_root is not None and body.workspace_root.strip():
+            await _set_runtime(
+                conn, "system.workspace_root", body.workspace_root.strip()
+            )
+        if body.log_level is not None:
+            lvl = (body.log_level or "").strip().upper()
+            if lvl in ("DEBUG", "INFO", "WARNING", "ERROR"):
+                await _set_runtime(
+                    conn, "system.sidecar.log_level", lvl
+                )
+        if body.log_retention_days is not None:
+            await _set_runtime(
+                conn, "system.logs.retention_days",
+                min(max(int(body.log_retention_days), 1), 3650),
+            )
+        if body.proxy_http is not None:
+            ph = (body.proxy_http or "").strip()
+            if ph:
+                await _set_runtime(conn, "system.proxy.http", ph)
+            else:
+                await conn.execute(
+                    "DELETE FROM config_runtime WHERE key = 'system.proxy.http'"
+                )
+        if body.proxy_https is not None:
+            ps = (body.proxy_https or "").strip()
+            if ps:
+                await _set_runtime(conn, "system.proxy.https", ps)
+            else:
+                await conn.execute(
+                    "DELETE FROM config_runtime WHERE key = 'system.proxy.https'"
+                )
+    finally:
+        await conn.close()
+    return {"status": "ok"}
 
 
 class PermissionModeUpdateRequest(BaseModel):
@@ -1170,17 +2176,22 @@ async def list_hook_events():
 
 
 @router.get("/sessions", response_model=None)
-async def list_sessions(limit: int = 50, has_messages: bool = True):
+async def list_sessions(
+    limit: int = 50,
+    has_messages: bool = True,
+    folder: str | None = None,
+):
     """列出历史会话(供侧边栏任务树, 蓝图 §2.10)。
 
     Args:
         limit: 返回条数上限(默认 50)。
         has_messages: 仅返回有真实对话消息的会话(默认 True, 过滤掉
             测试/占位产生的空会话, 让任务树只显示日常对话)。
+        folder: 按文件夹过滤; "unfiled"=未分组; None=全部(V1.1-3.1)。
 
     Returns:
         200: [{
-            id, title, status, model_id, summary,
+            id, title, status, model_id, summary, folder,
             locked_skill_name, locked_skill_version,
             created_at, updated_at, last_turn,
         }]
@@ -1191,7 +2202,7 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
         try:
             rows = await conn.fetch(
                 """
-                SELECT s.id, s.title, s.status, s.model_id, s.summary,
+                SELECT s.id, s.title, s.status, s.model_id, s.summary, s.folder,
                        s.locked_skill_name, s.locked_skill_version,
                        s.created_at, s.updated_at,
                        COALESCE(
@@ -1211,18 +2222,22 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
                            ORDER BY m.id ASC LIMIT 1
                        ) AS first_user_content
                 FROM sessions s
-                WHERE NOT $2::bool
+                WHERE (NOT $2::bool
                    -- 仅"发生过对话"的会话入历史任务: 至少有一条 AI 回复
                    -- (只有提问没有回答/被打断的空会话不显示)
                    OR EXISTS (
                        SELECT 1 FROM messages m
                        WHERE m.session_id = s.id AND m.role = 'assistant'
-                   )
+                   ))
+                  AND ($3::text IS NULL
+                       OR ($3 = 'unfiled' AND s.folder IS NULL)
+                       OR s.folder = $3::text)
                 ORDER BY s.updated_at DESC
                 LIMIT $1
                 """,
                 min(max(int(limit), 1), 200),
                 bool(has_messages),
+                folder,
             )
             result = []
             for r in rows:
@@ -1239,6 +2254,7 @@ async def list_sessions(limit: int = 50, has_messages: bool = True):
                     "status": r["status"],
                     "model_id": r["model_id"],
                     "summary": r["summary"],
+                    "folder": r["folder"],
                     "locked_skill_name": r["locked_skill_name"],
                     "locked_skill_version": r["locked_skill_version"],
                     "user_msg_count": r["user_msg_count"],
@@ -1358,6 +2374,1602 @@ async def delete_session(session_id: int):
             status_code=500,
             content={"error": "session_delete_failed"},
         )
+
+
+class SessionCreateRequest(BaseModel):
+    """POST /admin/sessions 请求体(V1.1-3.1 会话管理闭环)。
+
+    全部可选: 前端新建会话时通常只传空的 {}。
+    """
+
+    title: str | None = None
+    folder: str | None = None
+    skill_name: str | None = None
+
+
+class SessionUpdateRequest(BaseModel):
+    """PUT /admin/sessions/{id} 请求体(V1.1-3.1 + V1.3-7.2)。
+
+    仅更新传入的非空字段; title=None 不触碰, status 必须为
+    ('active','interrupted','archived','error') 之一。
+    auto_execute/max_rounds(V1.3-7.2): 会话级自动连续执行配置。
+    """
+
+    title: str | None = None
+    status: str | None = None
+    auto_execute: bool | None = None
+    max_rounds: int | None = None
+
+
+class SessionFolderRequest(BaseModel):
+    """PUT /admin/sessions/{id}/folder 请求体(V1.1-3.1): 设置/清除文件夹。
+
+    folder: 文件夹名(非空), 或 None/空串 = 移出分组(置 NULL)。
+    """
+
+    folder: str | None = None
+
+
+@router.post("/sessions", response_model=None)
+async def create_session(body: SessionCreateRequest | None = None):
+    """新建会话(V1.1-3.1 会话管理闭环)。
+
+    前端"新建会话"入口: 创建一条空会话并返回 id, 前端切换过去。
+    """
+    body = body or SessionCreateRequest()
+    title = (body.title or "").strip() or None
+    folder = (body.folder or "").strip() or None
+    skill_name = (body.skill_name or "").strip() or None
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO sessions (title, folder, locked_skill_name, status)
+                VALUES ($1, $2, $3, 'active')
+                RETURNING id, created_at
+                """,
+                title,
+                folder,
+                skill_name,
+            )
+            return {"ok": True, "id": row["id"], "created_at": row["created_at"].isoformat()}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_create_failed"},
+        )
+
+
+@router.put("/sessions/{session_id}", response_model=None)
+async def update_session(session_id: int, body: SessionUpdateRequest):
+    """重命名 / 归档 / 取消归档会话(V1.1-3.1)。
+
+    - title 非空 → 更新标题(空串清除标题)
+    - status 合法 → 更新状态; archived → 同时置 archived_at; 非 archived → 清除 archived_at
+    """
+    status = (body.status or "").strip() if body.status is not None else None
+    if status is not None and status not in ("active", "interrupted", "archived", "error"):
+        raise HTTPException(status_code=400, detail=f"invalid_status: {status}")
+    try:
+        conn = await db.connect()
+        try:
+            exists = await conn.fetchval(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if exists is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+
+            sets: list[str] = []
+            params: list = []
+            if body.title is not None:
+                params.append((body.title or "").strip() or None)
+                sets.append(f"title = ${len(params)}")
+            if status is not None:
+                if status == "archived":
+                    params.append(status)
+                    sets.append(f"status = ${len(params)}")
+                    sets.append("archived_at = now()")
+                else:
+                    params.append(status)
+                    sets.append(f"status = ${len(params)}")
+                    sets.append("archived_at = NULL")
+            if body.auto_execute is not None:
+                params.append(bool(body.auto_execute))
+                sets.append(f"auto_execute = ${len(params)}")
+            if body.max_rounds is not None:
+                params.append(min(max(int(body.max_rounds), 1), 20))
+                sets.append(f"max_rounds = ${len(params)}")
+            if not sets:
+                return {"ok": True, "id": session_id, "unchanged": True}
+
+            sets.append("updated_at = now()")
+            params.append(session_id)
+            await conn.execute(
+                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ${len(params)}",
+                *params,
+            )
+            return {"ok": True, "id": session_id}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_update_failed"},
+        )
+
+
+@router.put("/sessions/{session_id}/folder", response_model=None)
+async def set_session_folder(session_id: int, body: SessionFolderRequest):
+    """设置/清除会话文件夹(V1.1-3.1 会话管理闭环)。
+
+    body.folder: 非空 → 置入该文件夹; None/空 → 移出分组(folder=NULL)。
+    """
+    folder = (body.folder or "").strip() or None
+    try:
+        conn = await db.connect()
+        try:
+            exists = await conn.fetchval(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if exists is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            await conn.execute(
+                "UPDATE sessions SET folder = $1, updated_at = now() WHERE id = $2",
+                folder,
+                session_id,
+            )
+            return {"ok": True, "id": session_id, "folder": folder}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_folder_failed"},
+        )
+
+
+@router.get("/sessions/search", response_model=None)
+async def search_sessions(q: str = "", limit: int = 50):
+    """历史会话全文搜索(V1.1-3.2)。
+
+    匹配范围: 会话 title / summary / 消息全文(含归档会话, 满足"搜索覆盖归档"约定)。
+    Returns:
+        200: [{id, title, status, folder, summary, msg_count, updated_at, hit_snippet}]
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    pattern = f"%{q}%"
+    try:
+        conn = await db.connect()
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (s.id)
+                       s.id, s.title, s.status, s.folder, s.summary,
+                       s.updated_at,
+                       m.content AS hit_content,
+                       (SELECT COUNT(*) FROM messages c
+                        WHERE c.session_id = s.id) AS msg_count
+                FROM sessions s
+                LEFT JOIN messages m ON m.session_id = s.id
+                WHERE s.title ILIKE $1 OR s.summary ILIKE $1 OR m.content ILIKE $1
+                ORDER BY s.id, s.updated_at DESC
+                LIMIT $2
+                """,
+                pattern,
+                min(max(int(limit), 1), 100),
+            )
+            result = []
+            for r in rows:
+                title = r["title"] or r["summary"]
+                if not title or (isinstance(title, str) and title.startswith("session-")):
+                    title = f"#{r['id']}"
+                hit = r["hit_content"] or ""
+                # 命中片段: 截取关键词附近文本
+                idx = hit.lower().find(q.lower())
+                start = max(0, idx - 40)
+                snippet = ("…" if start > 0 else "") + hit[start:start + 120] + ("…" if start + 120 < len(hit) else "")
+                result.append({
+                    "id": r["id"],
+                    "title": title,
+                    "status": r["status"],
+                    "folder": r["folder"],
+                    "msg_count": r["msg_count"],
+                    "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+                    "hit_snippet": snippet[:160],
+                })
+            return result
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "sessions_search_failed"},
+        )
+
+
+@router.get("/sessions/{session_id}/export", response_model=None)
+async def export_session(session_id: int, format: str = "md"):
+    """导出会话(V1.1-3.2): format=md|json。
+
+    - md: 对话流 Markdown(User/Assistant 分节)
+    - json: 完整结构(含 meta + 全部消息, 压缩/工具消息含原始字段)
+    前端拿到 content 后 Blob 下载; PDF 由前端打印实现, 后端不生成。
+    """
+    fmt = (format or "md").lower()
+    if fmt not in ("md", "json"):
+        raise HTTPException(status_code=400, detail=f"invalid_format: {format}")
+    try:
+        conn = await db.connect()
+        try:
+            meta = await conn.fetchrow(
+                "SELECT id, title, status, folder, summary, model_id, "
+                "locked_skill_name, created_at, updated_at FROM sessions WHERE id = $1",
+                session_id,
+            )
+            if meta is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            msgs = await conn.fetch(
+                "SELECT id, turn, role, content, tool_calls, tool_call_id, name, "
+                "created_at FROM messages WHERE session_id = $1 "
+                "ORDER BY id ASC",
+                session_id,
+            )
+            title = meta["title"] or f"会话 #{session_id}"
+            from datetime import datetime, timezone
+            exported_at = datetime.now(timezone.utc).isoformat()
+            if fmt == "json":
+                content = {
+                    "meta": {
+                        "id": meta["id"],
+                        "title": title,
+                        "status": meta["status"],
+                        "folder": meta["folder"],
+                        "summary": meta["summary"],
+                        "model_id": meta["model_id"],
+                        "locked_skill_name": meta["locked_skill_name"],
+                        "created_at": meta["created_at"].isoformat() if meta["created_at"] else None,
+                        "updated_at": meta["updated_at"].isoformat() if meta["updated_at"] else None,
+                    },
+                    "messages": [
+                        {
+                            "id": m["id"],
+                            "turn": m["turn"],
+                            "role": m["role"],
+                            "content": m["content"],
+                            "tool_calls": m["tool_calls"],
+                            "tool_call_id": m["tool_call_id"],
+                            "name": m["name"],
+                            "created_at": m["created_at"].isoformat() if m["created_at"] else None,
+                        }
+                        for m in msgs
+                    ],
+                }
+            else:
+                lines = [f"# {title}", "", f"> 导出时间: {exported_at}", ""]
+                for m in msgs:
+                    role_label = {
+                        "user": "用户",
+                        "assistant": "私人智能体",
+                        "tool": "工具",
+                        "system": "系统",
+                    }.get(m["role"], m["role"])
+                    body = m["content"] or ""
+                    if m["role"] == "tool":
+                        body = f"工具: {m['name'] or m['tool_call_id'] or '?'}\n\n```\n{body}\n```"
+                    lines.append(f"## {role_label}")
+                    lines.append("")
+                    lines.append(body)
+                    lines.append("")
+                content = "\n".join(lines)
+
+            return {
+                "ok": True,
+                "format": fmt,
+                "title": title,
+                "session_id": session_id,
+                "content": content,
+            }
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_export_failed"},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# V1.4-8.1 导入导出与备份体系: 全局备份 / 事务还原 / 会话批量导出
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _skill_dev_dir() -> Path:
+    """技能源目录(config skills.storage.dev_dir, 相对 backend cwd)。"""
+    from pathlib import Path
+
+    cfg = loader.load_config()
+    dev = (cfg.get("skills") or {}).get("storage", {}).get("dev_dir", "./skills")
+    return Path(os.path.expandvars(str(dev))).resolve()
+
+
+async def _dump_json_lines(conn, table: str) -> list[dict]:
+    """导出表全量数据(JSON 行), 兼容 asyncpg JSONB 返回 str 的约定。"""
+    import base64 as _b64
+
+    rows = await conn.fetch(f"SELECT * FROM {table}")
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k, v in d.items():
+            if isinstance(v, (bytes, memoryview)):
+                d[k] = {"__bytes_b64__": _b64.b64encode(bytes(v)).decode("ascii")}
+            elif isinstance(v, str) and k in (
+                "manifest", "tools", "tool_calls", "compressed_from", "payload",
+            ):
+                # JSONB 文本字段保持原样(json.dumps 时再序列化)
+                pass
+        out.append(d)
+    return out
+
+
+@router.get("/backup", response_model=None)
+async def create_backup():
+    """全局一键备份(V1.4-8.1): config_runtime + skills 目录 + 核心表打包 zip。
+
+    表: sessions / messages / messages_archive / user_memories /
+        kb_documents / react_events。kb_chunks 不导出(向量大, 还原后重建)。
+    config_runtime 含 API Key 密文(备份=完整还原, 请妥善保管 zip)。
+    """
+    from datetime import datetime, timezone
+    from io import BytesIO
+    import json as _json
+    import zipfile
+
+    root = _workspace_root()
+    buffer = BytesIO()
+    try:
+        conn = await db.connect()
+        try:
+            tables = (
+                "sessions", "messages", "messages_archive", "user_memories",
+                "kb_documents", "react_events",
+            )
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                meta = {
+                    "app": "private-agent",
+                    "backup_version": 1,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "tables": list(tables),
+                    "notes": "kb_chunks 未导出, 还原后在知识库页重索引重建",
+                }
+                zf.writestr("backup.json", _json.dumps(meta, ensure_ascii=False, indent=1))
+                # config_runtime(asyncpg JSONB 返回 str, 需 json.loads)
+                cr = await conn.fetch("SELECT key, value FROM config_runtime")
+                zf.writestr(
+                    "config_runtime.json",
+                    _json.dumps(
+                        {
+                            r["key"]: (
+                                _json.loads(r["value"])
+                                if isinstance(r["value"], str)
+                                else r["value"]
+                            )
+                            for r in cr
+                        },
+                        ensure_ascii=False, indent=1,
+                    ),
+                )
+                # 表数据
+                for t in tables:
+                    rows = await _dump_json_lines(conn, t)
+                    zf.writestr(
+                        f"db/{t}.json",
+                        _json.dumps(rows, ensure_ascii=False, default=str),
+                    )
+                # skills 源目录(仅 manifest/prompt/tools/小素材, 跳过输出与日志)
+                dev = _skill_dev_dir()
+                if dev.exists():
+                    for p in sorted(dev.rglob("*")):
+                        if p.is_file() and p.stat().st_size <= 2 * 1024 * 1024:
+                            rel = p.relative_to(dev).as_posix()
+                            if rel.startswith(("outputs/", "logs/", "__pycache__/")):
+                                continue
+                            zf.write(str(p), f"skills/{rel}")
+        finally:
+            await conn.close()
+        from fastapi.responses import Response
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="pa-backup-{ts}.zip"'
+            },
+        )
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "backup_failed"})
+
+
+class SessionBatchExportRequest(BaseModel):
+    """POST /sessions/export_batch 请求体(V1.4-8.1): 批量导出。"""
+
+    session_ids: list[int]
+    format: str = "md"
+
+
+@router.post("/sessions/export_batch", response_model=None)
+async def export_sessions_batch(body: SessionBatchExportRequest):
+    """会话批量导出(V1.4-8.1): 多会话合并导出(md/json 单文件)。"""
+    fmt = (body.format or "md").lower()
+    if fmt not in ("md", "json"):
+        raise HTTPException(status_code=400, detail=f"invalid_format: {fmt}")
+    if not body.session_ids:
+        raise HTTPException(status_code=400, detail="session_ids_required")
+    import json as _json
+    try:
+        conn = await db.connect()
+        try:
+            from datetime import datetime, timezone
+
+            exported_at = datetime.now(timezone.utc).isoformat()
+            parts: list[str] = []
+            json_data: dict = {"exported_at": exported_at, "sessions": []}
+            for sid in body.session_ids:
+                meta = await conn.fetchrow(
+                    "SELECT id, title, status, summary, model_id, created_at "
+                    "FROM sessions WHERE id = $1",
+                    sid,
+                )
+                if meta is None:
+                    continue
+                msgs = await conn.fetch(
+                    "SELECT id, turn, role, content, name, created_at "
+                    "FROM messages WHERE session_id = $1 ORDER BY id ASC",
+                    sid,
+                )
+                title = meta["title"] or f"会话 #{sid}"
+                if fmt == "json":
+                    json_data["sessions"].append({
+                        "meta": {
+                            "id": meta["id"], "title": title,
+                            "status": meta["status"], "summary": meta["summary"],
+                            "model_id": meta["model_id"],
+                        },
+                        "messages": [
+                            {
+                                "turn": m["turn"], "role": m["role"],
+                                "content": m["content"], "name": m["name"],
+                            }
+                            for m in msgs
+                        ],
+                    })
+                    continue
+                parts.append(f"# {title}")
+                parts.append("")
+                for m in msgs:
+                    label = {
+                        "user": "用户", "assistant": "私人智能体",
+                        "tool": "工具", "system": "系统",
+                    }.get(m["role"], m["role"])
+                    body = m["content"] or ""
+                    if m["role"] == "tool":
+                        body = f"工具: {m['name'] or '?'}\n\n```\n{body}\n```"
+                    parts.append(f"## {label}")
+                    parts.append("")
+                    parts.append(body)
+                    parts.append("")
+                parts.append("---")
+                parts.append("")
+            content = (
+                _json.dumps(json_data, ensure_ascii=False, indent=1)
+                if fmt == "json" else "\n".join(parts)
+            )
+            return {"ok": True, "format": fmt, "content": content,
+                    "exported_sessions": len(json_data["sessions"]) if fmt == "json"
+                    else parts.count("# ")}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500, content={"error": "export_batch_failed"}
+        )
+
+
+@router.post("/backup/restore", response_model=None)
+async def restore_backup(file: UploadFile = File(...)):
+    """上传备份 zip 还原(V1.4-8.1, 事务回滚保护)。
+
+    流程: 解析 zip(校验 backup.json) → DB 恢复在单事务内执行(任一失败
+    整体回滚) → 提交后落盘 skills 目录(失败仅警告)。kb_chunks 不还原,
+    返回 chunks_rebuild_pending 提示到知识库页重索引。
+    """
+    import base64 as _b64
+    import json as _json
+    import zipfile
+    from io import BytesIO as _BytesIO
+
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="invalid_backup_zip")
+    try:
+        raw = await file.read()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="invalid_backup_zip")
+    if len(raw) > 200 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="backup_too_large")
+
+    try:
+        zf = zipfile.ZipFile(_BytesIO(raw))
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="invalid_backup_zip")
+    names = set(zf.namelist())
+    if "backup.json" not in names:
+        raise HTTPException(status_code=400, detail="not_a_backup: backup.json missing")
+    try:
+        meta = _json.loads(zf.read("backup.json").decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="backup.json corrupted")
+
+    def _load_json(name: str) -> list[dict]:
+        if name not in names:
+            return []
+        return _json.loads(zf.read(name).decode("utf-8"))
+
+    tables = ("sessions", "messages", "messages_archive", "user_memories",
+              "kb_documents", "react_events")
+    table_data: dict[str, list[dict]] = {
+        t: _load_json(f"db/{t}.json") for t in tables
+    }
+    # config_runtime
+    cr_data: dict = {}
+    if "config_runtime.json" in names:
+        cr_data = _json.loads(zf.read("config_runtime.json").decode("utf-8"))
+
+    conn = await db.connect()
+    restored = {}
+    try:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            # config_runtime 全量替换
+            await conn.execute("DELETE FROM config_runtime")
+            for k, v in cr_data.items():
+                await conn.execute(
+                    "INSERT INTO config_runtime (key, value) VALUES ($1, $2::jsonb)",
+                    k, _json.dumps(v, ensure_ascii=False),
+                )
+            # 各表: 清空 + 批量插入(保留原 id)
+            from datetime import datetime as _dt
+
+            for t in tables:
+                await conn.execute(f"DELETE FROM {t}")
+                rows = table_data[t]
+                for r in rows:
+                    cols = list(r.keys())
+                    placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
+                    vals = []
+                    for c in cols:
+                        v = r[c]
+                        if (
+                            isinstance(v, dict)
+                            and "__bytes_b64__" in v
+                        ):
+                            vals.append(_b64.b64decode(v["__bytes_b64__"]))
+                        elif (
+                            isinstance(v, str)
+                            and c.endswith("_at")
+                            and v
+                        ):
+                            # datetime 列: ISO 字符串 → datetime(备份 default=str 序列化)
+                            try:
+                                vals.append(_dt.fromisoformat(v))
+                            except ValueError:
+                                vals.append(v)
+                        else:
+                            vals.append(v)
+                    await conn.execute(
+                        f"INSERT INTO {t} ({', '.join(cols)}) "
+                        f"VALUES ({placeholders})",
+                        *vals,
+                    )
+                restored[t] = len(rows)
+            await tr.commit()
+        except Exception:  # noqa: BLE001
+            await tr.rollback()
+            return JSONResponse(
+                status_code=500,
+                content={"error": "restore_failed_rolled_back"},
+            )
+    finally:
+        await conn.close()
+
+    # 提交后落盘 skills(失败仅警告, 不阻塞)
+    skills_ok = True
+    try:
+        dev = _skill_dev_dir()
+        dev.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            if not name.startswith("skills/"):
+                continue
+            rel = name[len("skills/"):]
+            if not rel:
+                continue
+            target = (dev / rel).resolve()
+            if target != dev and dev not in target.parents:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(name))
+    except Exception:  # noqa: BLE001
+        skills_ok = False
+
+    return {
+        "ok": True,
+        "restored": restored,
+        "skills_restored": skills_ok,
+        "chunks_rebuild_pending": True,
+        "hint": "kb_chunks 未在备份中, 请到知识库页对各库执行重索引",
+    }
+
+
+@router.get("/sessions/{session_id}/turn/{turn}/messages", response_model=None)
+async def list_turn_messages(session_id: int, turn: int):
+    """查询某轮的全部消息(V1.1-3.3, 供前端收藏/删除定位 msg_id)。
+
+    Returns:
+        200: [{id, role, content, starred, tool_call_id, name}]
+    """
+    try:
+        conn = await db.connect()
+        try:
+            exists = await conn.fetchval(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if exists is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            rows = await conn.fetch(
+                """
+                SELECT id, role, content, starred, tool_call_id, name
+                FROM messages
+                WHERE session_id = $1 AND turn = $2
+                ORDER BY id ASC
+                """,
+                session_id,
+                turn,
+            )
+            return [
+                {
+                    "id": r["id"],
+                    "role": r["role"],
+                    "content": r["content"],
+                    "starred": r["starred"],
+                    "tool_call_id": r["tool_call_id"],
+                    "name": r["name"],
+                }
+                for r in rows
+            ]
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "turn_messages_failed"},
+        )
+
+
+class MessageStarredRequest(BaseModel):
+    """PUT /admin/messages/{id}/starred 请求体(V1.1-3.3): 收藏/取消收藏。"""
+
+    starred: bool
+
+
+@router.put("/messages/{message_id}/starred", response_model=None)
+async def set_message_starred(message_id: int, body: MessageStarredRequest):
+    """收藏/取消收藏单条消息(V1.1-3.3)。"""
+    try:
+        conn = await db.connect()
+        try:
+            exists = await conn.fetchval(
+                "SELECT id FROM messages WHERE id = $1", message_id
+            )
+            if exists is None:
+                raise HTTPException(status_code=404, detail="message_not_found")
+            await conn.execute(
+                "UPDATE messages SET starred = $1 WHERE id = $2",
+                bool(body.starred),
+                message_id,
+            )
+            return {"ok": True, "id": message_id, "starred": bool(body.starred)}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "message_starred_failed"},
+        )
+
+
+@router.delete("/messages/{message_id}", response_model=None)
+async def delete_message(message_id: int):
+    """软删除单条消息(V1.1-3.3)。
+
+    策略(保持压缩/回写一致性): 完整副本写入 messages_archive(original_msg_id 关联),
+    原消息标记 compressed=true 使其被 get_messages 排除出模型上下文;
+    禁止物理删除(Stable Zone 合并/压缩回写依赖完整消息链)。
+    """
+    try:
+        conn = await db.connect()
+        try:
+            msg = await conn.fetchrow(
+                "SELECT id, session_id, turn, role, content, reasoning_content, "
+                "tool_calls, zone FROM messages WHERE id = $1",
+                message_id,
+            )
+            if msg is None:
+                raise HTTPException(status_code=404, detail="message_not_found")
+            # 完整副本入归档(压缩存档同一张表, archive_reason 区分: compressed|deleted)
+            await conn.execute(
+                """
+                INSERT INTO messages_archive (
+                    original_msg_id, session_id, turn, role, content,
+                    reasoning_content, tool_calls, zone, archived_at
+                )
+                SELECT id, session_id, turn, role, content,
+                       reasoning_content, tool_calls, zone, now()
+                FROM messages WHERE id = $1
+                """,
+                message_id,
+            )
+            # 原消息标记 compressed(排除出上下文) + deleted 标识
+            await conn.execute(
+                """
+                UPDATE messages
+                SET compressed = TRUE,
+                    compressed_from = jsonb_build_object(
+                        'deleted_at', to_char(now(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    )
+                WHERE id = $1
+                """,
+                message_id,
+            )
+            return {"ok": True, "id": message_id, "deleted": True}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "message_delete_failed"},
+        )
+
+
+@router.get("/sessions/{session_id}", response_model=None)
+async def get_session_detail(session_id: int):
+    """会话详情(V1.1-3.5, 会话设置弹窗用): 元数据 + memory_enabled + folder。"""
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                "SELECT id, title, status, folder, model_id, summary, "
+                "memory_enabled, auto_execute, max_rounds, locked_skill_name, "
+                "created_at, updated_at "
+                "FROM sessions WHERE id = $1",
+                session_id,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            return {
+                "id": row["id"],
+                "title": row["title"],
+                "status": row["status"],
+                "folder": row["folder"],
+                "model_id": row["model_id"],
+                "summary": row["summary"],
+                "memory_enabled": row["memory_enabled"],
+                "auto_execute": row["auto_execute"],
+                "max_rounds": row["max_rounds"],
+                "locked_skill_name": row["locked_skill_name"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            }
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "session_detail_failed"},
+        )
+
+
+class SessionTruncateRequest(BaseModel):
+    """POST /admin/sessions/{id}/truncate 请求体(V1.1-3.5): 上下文截断。
+
+    after_turn: 保留 <= after_turn 的轮次, 之后的消息 soft-delete 出上下文。
+    """
+
+    after_turn: int
+
+
+class SessionMemoryRequest(BaseModel):
+    """PUT /admin/sessions/{id}/memory-enabled 请求体(V1.1-3.5): 记忆开关。"""
+
+    enabled: bool
+
+
+@router.post("/sessions/{session_id}/truncate", response_model=None)
+async def truncate_session(session_id: int, body: SessionTruncateRequest):
+    """截断会话上下文(V1.1-3.5): soft-delete after_turn 之后的消息。
+
+    复用软删除语义: 完整副本入 messages_archive + compressed 标记,
+    保持压缩/Stable Zone 回写一致性(禁止硬删)。
+    """
+    after_turn = int(body.after_turn)
+    if after_turn < 0:
+        raise HTTPException(status_code=400, detail="after_turn must be >= 0")
+    try:
+        conn = await db.connect()
+        try:
+            exists = await conn.fetchval(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if exists is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            # 1. 副本入 archive
+            await conn.execute(
+                """
+                INSERT INTO messages_archive (
+                    original_msg_id, session_id, turn, role, content,
+                    reasoning_content, tool_calls, zone, archived_at
+                )
+                SELECT id, session_id, turn, role, content,
+                       reasoning_content, tool_calls, zone, now()
+                FROM messages
+                WHERE session_id = $1 AND turn > $2
+                """,
+                session_id,
+                after_turn,
+            )
+            # 2. 原消息标记 compressed(排除出上下文)
+            rows = await conn.fetch(
+                """
+                UPDATE messages
+                SET compressed = TRUE,
+                    compressed_from = jsonb_build_object(
+                        'truncated_at', to_char(now(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                        'after_turn', $2::int
+                    )
+                WHERE session_id = $1 AND turn > $2
+                RETURNING id
+                """,
+                session_id,
+                after_turn,
+            )
+            n = len(rows)
+            return {"ok": True, "id": session_id, "truncated_messages": n, "after_turn": after_turn}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_truncate_failed"},
+        )
+
+
+@router.put("/sessions/{session_id}/memory-enabled", response_model=None)
+async def set_session_memory_enabled(session_id: int, body: SessionMemoryRequest):
+    """会话级记忆开关(V1.1-3.5)。关闭后该会话不再注入/提取记忆。"""
+    try:
+        conn = await db.connect()
+        try:
+            exists = await conn.fetchval(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if exists is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            await conn.execute(
+                "UPDATE sessions SET memory_enabled = $1 WHERE id = $2",
+                bool(body.enabled),
+                session_id,
+            )
+            return {"ok": True, "id": session_id, "memory_enabled": bool(body.enabled)}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "session_memory_failed"},
+        )
+
+
+@router.get("/sessions/{session_id}/system-prompt", response_model=None)
+async def get_session_system_prompt(session_id: int):
+    """查看组装后的完整系统提示词(V1.1-3.5, 调试用)。
+
+    延迟 import main(避免循环依赖): 运行时 main 已加载。
+    包含: skill prompt(模板+少样本) + 身份段 + MCP 工具速查指南。
+    """
+    try:
+        from private_agent import main as main_mod
+    except Exception:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"error": "main_module_unavailable"},
+        )
+    try:
+        conn = await db.connect()
+        try:
+            exists = await conn.fetchval(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if exists is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            cfg = await _load_cfg()
+            prompt = await main_mod._get_system_prompt(cfg, session_id, conn)
+            return {"ok": True, "id": session_id, "system_prompt": prompt}
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "system_prompt_failed"},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# V1.1-3.7 文件管理闭环(workspace 内文件树/预览/操作, 全部锁根目录)
+# ══════════════════════════════════════════════════════════════════════════
+
+_SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", "dist", "build", "${WORKSPACE}", "outputs", "logs"}
+
+
+def _workspace_root() -> Path:
+    """工作区根目录(config system.workspace_root, 展开环境变量)。"""
+    from pathlib import Path
+
+    cfg = loader.load_config()
+    ws = os.path.expandvars(cfg.get("system", {}).get("workspace_root", "."))
+    return Path(ws).resolve()
+
+
+def _resolve_workspace_path(rel: str) -> Path:
+    """将相对路径解析为工作区内绝对路径(越界 → 400)。"""
+    from pathlib import Path
+
+    rel = (rel or "").strip().replace("\\", "/").lstrip("/")
+    if not rel:
+        raise HTTPException(status_code=400, detail="empty_path")
+    root = _workspace_root()
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=400, detail="path_outside_workspace")
+    return target
+
+
+@router.get("/files/tree", response_model=None)
+async def list_files_tree(path: str = "", depth: int = 4):
+    """工作区文件树(V1.1-3.7): 返回目录结构, 排除常见噪音目录。
+
+    Returns:
+        200: {"root": str, "tree": {name, path, type: dir|file, size, children?}}
+    """
+    root = _workspace_root()
+    base = _resolve_workspace_path(path) if path else root
+
+    async def _walk(node: Path, remaining: int) -> dict | None:
+        if remaining < 0:
+            return None
+        if node.is_file():
+            try:
+                size = node.stat().st_size
+            except OSError:
+                size = 0
+            return {"name": node.name, "path": str(node.relative_to(root)).replace("\\", "/"), "type": "file", "size": size}
+        if not node.is_dir():
+            return None
+        try:
+            entries = sorted(node.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError:
+            return None
+        children = []
+        for e in entries:
+            if e.name in _SKIP_DIRS and e.is_dir():
+                continue
+            child = await _walk(e, remaining - 1)
+            if child is not None:
+                children.append(child)
+        return {
+            "name": node.name,
+            "path": str(node.relative_to(root)).replace("\\", "/") if node != root else "",
+            "type": "dir",
+            "children": children,
+        }
+
+    tree = await _walk(base, int(depth))
+    return {"root": str(root), "tree": tree}
+
+
+@router.get("/files/content", response_model=None)
+async def get_file_content(path: str):
+    """读取文本文件内容(V1.1-3.7): utf-8 文本直出, 二进制返回提示。
+
+    Returns:
+        200: {"path", "type": "text"|"binary", "content"?, "size"}
+    """
+    target = _resolve_workspace_path(path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="file_not_found")
+    size = target.stat().st_size
+    if size > 2 * 1024 * 1024:
+        return {"path": path, "type": "text", "truncated": True, "size": size,
+                "content": target.read_text(encoding="utf-8", errors="replace")[:200_000]}
+    try:
+        content = target.read_text(encoding="utf-8")
+        return {"path": path, "type": "text", "content": content, "size": size}
+    except UnicodeDecodeError:
+        return {"path": path, "type": "binary", "size": size}
+
+
+@router.get("/files/download", response_model=None)
+async def download_workspace_file(path: str):
+    """下载工作区内文件(V1.1-3.7, 流式 FileResponse)。"""
+    from fastapi.responses import FileResponse
+
+    target = _resolve_workspace_path(path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="file_not_found")
+    return FileResponse(
+        str(target),
+        filename=target.name,
+        media_type="application/octet-stream",
+    )
+
+
+class FilePathRequest(BaseModel):
+    """文件操作请求体(V1.1-3.7): path / from_path+to_path。"""
+
+    path: str
+    to_path: str | None = None
+
+
+@router.post("/files/mkdir", response_model=None)
+async def mkdir_workspace_dir(body: FilePathRequest):
+    """新建目录(可多级, 越界 400)。"""
+    target = _resolve_workspace_path(body.path)
+    if target.exists():
+        return {"ok": True, "path": body.path, "existed": True}
+    try:
+        target.mkdir(parents=True)
+        return {"ok": True, "path": body.path}
+    except OSError:
+        return JSONResponse(status_code=500, content={"error": "mkdir_failed"})
+
+
+@router.put("/files/rename", response_model=None)
+async def rename_workspace_file(body: FilePathRequest):
+    """重命名/移动文件或目录(目标越界 400)。"""
+    if not body.to_path:
+        raise HTTPException(status_code=400, detail="to_path_required")
+    src = _resolve_workspace_path(body.path)
+    dst = _resolve_workspace_path(body.to_path)
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="source_not_found")
+    if dst.exists():
+        raise HTTPException(status_code=400, detail="target_exists")
+    try:
+        src.rename(dst)
+        return {"ok": True, "path": body.to_path}
+    except OSError:
+        return JSONResponse(status_code=500, content={"error": "rename_failed"})
+
+
+@router.delete("/files/delete", response_model=None)
+async def delete_workspace_file(path: str):
+    """删除工作区内文件或空目录(V1.1-3.7)。
+
+    仅允许删除文件或空目录(个人安全边界: 禁止递归删除, 防误删)。
+    """
+    target = _resolve_workspace_path(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        if target.is_dir():
+            if any(target.iterdir()):
+                raise HTTPException(status_code=400, detail="dir_not_empty")
+            target.rmdir()
+        else:
+            target.unlink()
+        return {"ok": True, "path": path, "deleted": True}
+    except HTTPException:
+        raise
+    except OSError:
+        return JSONResponse(status_code=500, content={"error": "delete_failed"})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# V1.3-7.4 高级文件能力: 压缩包解压(防穿越) + 批量打包下载
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class FileExtractRequest(BaseModel):
+    """POST /files/extract 请求体(V1.3-7.4): 解压压缩包。
+
+    archive: 工作区内压缩包相对路径(zip / tar.gz / tgz)。
+    to_dir: 目标目录相对路径(可选, 默认解压到压缩包所在目录)。
+    """
+
+    archive: str
+    to_dir: str | None = None
+
+
+@router.post("/files/extract", response_model=None)
+async def extract_archive(body: FileExtractRequest):
+    """解压 zip/tar.gz 到工作区(V1.3-7.4)。
+
+    安全约束: 每个条目解析后必须位于目标目录内(路径穿越防护);
+    跳过符号链接条目; 单文件大小上限 100MB。
+    """
+    archive = _resolve_workspace_path(body.archive)
+    if not archive.exists() or not archive.is_file():
+        raise HTTPException(status_code=404, detail="archive_not_found")
+    name = archive.name.lower()
+    is_zip = name.endswith(".zip")
+    is_tar = name.endswith(".tar.gz") or name.endswith(".tgz")
+    if not (is_zip or is_tar):
+        raise HTTPException(
+            status_code=400, detail="unsupported_archive: 仅支持 zip / tar.gz / tgz"
+        )
+    # 目标目录: 显式 to_dir 或压缩包所在目录
+    if body.to_dir and body.to_dir.strip():
+        dest = _resolve_workspace_path(body.to_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+    else:
+        dest = archive.parent
+    root = _workspace_root()
+    extracted = 0
+
+    def _safe_target(rel_name: str, base: Path) -> Path | None:
+        """解析条目路径并防穿越(返回 None 表示拒绝)。"""
+        rel = rel_name.replace("\\", "/").lstrip("/")
+        if not rel:
+            return None
+        target = (base / rel).resolve()
+        if target != base and base not in target.parents:
+            return None
+        if root not in target.parents and target != root:
+            return None
+        return target
+
+    try:
+        if is_zip:
+            import zipfile
+
+            with zipfile.ZipFile(archive) as zf:
+                for info in zf.infolist():
+                    if info.filename.endswith("/"):
+                        continue
+                    if info.file_size > 100 * 1024 * 1024:
+                        continue
+                    target = _safe_target(info.filename, dest)
+                    if target is None:
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, open(target, "wb") as out:
+                        out.write(src.read())
+                    extracted += 1
+        else:
+            import tarfile
+
+            with tarfile.open(archive, "r:gz") as tf:
+                for member in tf.getmembers():
+                    if not member.isfile() and not member.islnk():
+                        continue
+                    if member.size > 100 * 1024 * 1024:
+                        continue
+                    target = _safe_target(member.name, dest)
+                    if target is None:
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with tf.extractfile(member) as src, open(target, "wb") as out:
+                        if src is not None:
+                            out.write(src.read())
+                    extracted += 1
+        return {"ok": True, "extracted": extracted, "to_dir": str(dest.relative_to(root))}
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"error": "extract_failed"})
+
+
+@router.get("/files/download_zip", response_model=None)
+async def download_files_zip(paths: str, name: str = "workspace-export"):
+    """批量打包下载(V1.3-7.4): paths 逗号分隔, 逐条校验后 zip 打包。
+
+    Returns:
+        200: ZIP 流(application/zip)
+        400: {"error": "paths_required"} / {"error": "no_valid_files"}
+    """
+    from io import BytesIO
+    import zipfile
+
+    items = [p.strip() for p in (paths or "").split(",") if p.strip()]
+    if not items:
+        raise HTTPException(status_code=400, detail="paths_required")
+    buffer = BytesIO()
+    added = 0
+    root = _workspace_root()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel in items:
+            try:
+                target = _resolve_workspace_path(rel)
+            except HTTPException:
+                continue
+            if not target.exists():
+                continue
+            arcname = str(target.relative_to(root)).replace("\\", "/")
+            if target.is_dir():
+                # 目录: 递归加入(同样防越界, resolve 已保证在工作区内)
+                for p in sorted(target.rglob("*")):
+                    if p.is_file():
+                        zf.write(str(p), str(p.relative_to(root)).replace("\\", "/"))
+                        added += 1
+            else:
+                zf.write(str(target), arcname)
+                added += 1
+    if added == 0:
+        raise HTTPException(status_code=400, detail="no_valid_files")
+    from fastapi.responses import Response
+
+    safe_name = "".join(c for c in name if c.isalnum() or c in "-_") or "workspace-export"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.zip"'},
+    )
+
+
+@router.get("/tasks", response_model=None)
+async def list_session_tasks(session_id: int, limit: int = 20):
+    """会话任务执行状态(V1.1-3.8)。
+
+    复用 react_events 数据面聚合(不引入 async_tasks 空表):
+    每轮(turn)的 thinking/tool_call/tool_result/error 次数 + 最后时间 + 会话状态。
+    Returns:
+        200: {status, turns: [{turn, events: {...}, error?}], total_turns}
+    """
+    try:
+        conn = await db.connect()
+        try:
+            srow = await conn.fetchrow(
+                "SELECT status, updated_at FROM sessions WHERE id = $1", session_id
+            )
+            if srow is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            rows = await conn.fetch(
+                """
+                SELECT turn, event_type, COUNT(*) AS n, MAX(created_at) AS last_ts
+                FROM react_events
+                WHERE session_id = $1 AND turn > 0
+                GROUP BY turn, event_type
+                ORDER BY turn ASC
+                LIMIT $2
+                """,
+                session_id,
+                min(max(int(limit), 1), 200),
+            )
+            turns_map: dict[int, dict] = {}
+            for r in rows:
+                turn = r["turn"]
+                t = turns_map.setdefault(turn, {"turn": turn, "events": {}, "last_ts": None})
+                t["events"][r["event_type"]] = r["n"]
+                t["last_ts"] = (
+                    r["last_ts"].isoformat() if r["last_ts"] else t["last_ts"]
+                )
+            # 每轮错误信息(最近一条 error/tool_error payload)
+            err_rows = await conn.fetch(
+                """
+                SELECT turn, payload FROM react_events
+                WHERE session_id = $1 AND event_type IN ('error', 'tool_error')
+                ORDER BY id DESC LIMIT 10
+                """,
+                session_id,
+            )
+            err_by_turn: dict[int, str] = {}
+            for e in err_rows:
+                if e["turn"] not in err_by_turn:
+                    p = e["payload"]
+                    if isinstance(p, str):
+                        import json as _json
+
+                        try:
+                            p = _json.loads(p)
+                        except Exception:  # noqa: BLE001
+                            p = {}
+                    err_by_turn[e["turn"]] = str(
+                        (p or {}).get("message") or (p or {}).get("error") or "未知错误"
+                    )
+            for turn, err in err_by_turn.items():
+                if turn in turns_map:
+                    turns_map[turn]["error"] = err
+
+            return {
+                "status": srow["status"],
+                "updated_at": srow["updated_at"].isoformat() if srow["updated_at"] else None,
+                "total_turns": len(turns_map),
+                "turns": sorted(turns_map.values(), key=lambda t: t["turn"]),
+            }
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "tasks_list_failed"},
+        )
+
+
+@router.get("/events", response_model=None)
+async def list_session_events(session_id: int, limit: int = 50):
+    """会话工具事件日志(V1.2-6.2): 读 react_events 时间线(倒序)。
+
+    Returns:
+        200: [{id, turn, event_type, ts, summary}]
+        summary: payload 摘要(内容截断, 供前端日志视图)
+    """
+    import json as _json
+
+    try:
+        conn = await db.connect()
+        try:
+            srow = await conn.fetchval(
+                "SELECT id FROM sessions WHERE id = $1", session_id
+            )
+            if srow is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            rows = await conn.fetch(
+                """
+                SELECT id, turn, event_type, payload, created_at
+                FROM react_events
+                WHERE session_id = $1
+                ORDER BY id DESC
+                LIMIT $2
+                """,
+                session_id,
+                min(max(int(limit), 1), 200),
+            )
+            result = []
+            for r in rows:
+                p = r["payload"]
+                if isinstance(p, str):
+                    try:
+                        p = _json.loads(p)
+                    except Exception:  # noqa: BLE001
+                        p = {}
+                p = p or {}
+                # 摘要: 不同事件取关键字段
+                summary = _json.dumps(p, ensure_ascii=False)[:300]
+                result.append({
+                    "id": r["id"],
+                    "turn": r["turn"],
+                    "event_type": r["event_type"],
+                    "ts": r["created_at"].isoformat() if r["created_at"] else None,
+                    "summary": summary,
+                })
+            return result
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "events_list_failed"},
+        )
+
+
+@router.get("/usage", response_model=None)
+async def get_llm_usage(session_id: int | None = None, limit: int = 20):
+    """LLM 用量统计(V1.2-6.3): 聚合 react_events 的 token_usage 事件。
+
+    Args:
+        session_id: 省略 → 全部会话汇总; 提供 → 仅该会话。
+        limit: 返回的会话明细条数。
+    Returns:
+        200: {total_calls, total_tokens, input_tokens, output_tokens,
+              total_cost, currency, by_session: [{session_id, calls, tokens, cost}]}
+    """
+    import json as _json
+
+    try:
+        conn = await db.connect()
+        try:
+            if session_id is not None:
+                srow = await conn.fetchval(
+                    "SELECT id FROM sessions WHERE id = $1", session_id
+                )
+                if srow is None:
+                    raise HTTPException(status_code=404, detail="session_not_found")
+                rows = await conn.fetch(
+                    """
+                    SELECT session_id, payload FROM react_events
+                    WHERE event_type = 'token_usage' AND session_id = $1
+                    """,
+                    session_id,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT session_id, payload FROM react_events WHERE event_type = 'token_usage'"
+                )
+            per_session: dict[int, dict] = {}
+            totals = {"calls": 0, "tokens": 0, "input": 0, "output": 0, "cost": 0.0}
+            currency = "CNY"
+            for r in rows:
+                p = r["payload"]
+                if isinstance(p, str):
+                    try:
+                        p = _json.loads(p)
+                    except Exception:  # noqa: BLE001
+                        p = {}
+                p = p or {}
+                sid = r["session_id"]
+                s = per_session.setdefault(
+                    sid, {"session_id": sid, "calls": 0, "tokens": 0, "cost": 0.0}
+                )
+                s["calls"] += 1
+                s["tokens"] += int(p.get("total_tokens") or 0)
+                s["cost"] += float(p.get("cost") or 0)
+                totals["calls"] += 1
+                totals["tokens"] += int(p.get("total_tokens") or 0)
+                totals["input"] += int(p.get("input_tokens") or 0)
+                totals["output"] += int(p.get("output_tokens") or 0)
+                totals["cost"] += float(p.get("cost") or 0)
+                if p.get("currency"):
+                    currency = p["currency"]
+            by_session = sorted(
+                per_session.values(),
+                key=lambda s: s["tokens"],
+                reverse=True,
+            )[: max(1, min(int(limit), 100))]
+            return {
+                "total_calls": totals["calls"],
+                "total_tokens": totals["tokens"],
+                "input_tokens": totals["input"],
+                "output_tokens": totals["output"],
+                "total_cost": round(totals["cost"], 6),
+                "currency": currency,
+                "by_session": by_session,
+            }
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "usage_query_failed"},
+        )
+
+
+@router.get("/errors/summary", response_model=None)
+async def error_summary(session_id: int | None = None, limit: int = 20):
+    """最近错误摘要(V1.2-6.3): 聚合 error/tool_error 事件, 按消息去重。"""
+    import json as _json
+    from collections import Counter
+
+    try:
+        conn = await db.connect()
+        try:
+            if session_id is not None:
+                rows = await conn.fetch(
+                    """
+                    SELECT event_type, payload, created_at FROM react_events
+                    WHERE event_type IN ('error', 'tool_error') AND session_id = $1
+                    ORDER BY id DESC LIMIT $2
+                    """,
+                    session_id,
+                    min(max(int(limit), 1), 100),
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT event_type, payload, created_at FROM react_events
+                    WHERE event_type IN ('error', 'tool_error')
+                    ORDER BY id DESC LIMIT $1
+                    """,
+                    min(max(int(limit), 1), 100),
+                )
+            counter: Counter = Counter()
+            samples: list[dict] = []
+            for r in rows:
+                p = r["payload"]
+                if isinstance(p, str):
+                    try:
+                        p = _json.loads(p)
+                    except Exception:  # noqa: BLE001
+                        p = {}
+                p = p or {}
+                msg = str(
+                    (p.get("message") or p.get("error") or p.get("reason")
+                     or f"{r['event_type']}({r['payload']})")[:120]
+                )
+                counter[msg] += 1
+                if len(samples) < 10:
+                    samples.append({
+                        "event_type": r["event_type"],
+                        "message": msg,
+                        "ts": r["created_at"].isoformat() if r["created_at"] else None,
+                    })
+            return {
+                "total_errors": sum(counter.values()),
+                "distinct_errors": len(counter),
+                "top": [
+                    {"message": msg, "count": n}
+                    for msg, n in counter.most_common(10)
+                ],
+                "samples": samples,
+            }
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "error_summary_failed"},
+        )
+
+
+@router.get("/logs", response_model=None)
+async def tail_logs(lines: int = 200):
+    """读后端日志尾部(V1.2-6.3): 找 logs/ 下最新 .log 文件, 返回末尾 N 行。"""
+    from pathlib import Path
+
+    logs_dir = Path(os.environ.get("WORKSPACE", "")) / "logs"
+    if not logs_dir.exists():
+        logs_dir = Path(_get_outputs_dir()).parent / "logs"
+    try:
+        candidates = sorted(
+            (p for p in logs_dir.glob("*.log") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        candidates = []
+    if not candidates:
+        return {"path": None, "lines": [], "truncated": False}
+    target = candidates[0]
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"path": str(target), "lines": [], "truncated": False}
+    arr = text.splitlines()
+    n = min(max(int(lines), 1), 1000)
+    return {
+        "path": str(target),
+        "lines": arr[-n:],
+        "truncated": len(arr) > n,
+    }
 
 
 class SessionModelRequest(BaseModel):
@@ -1971,6 +4583,8 @@ class McpServerRequest(BaseModel):
     timeout_sec: float = 30.0
     auth_token: str | None = None  # Bearer 认证 token(提供才更新, AES 加密存库)
     protocol_version: str = "auto"  # auto(自动协商) | 2026-07-28 | 2025-11-25
+    # V1.2-6.2: 额外环境变量(stdio 模式注入子进程, 如 API Key)
+    env: dict[str, str] | None = None
 
 
 @router.post("/settings/mcp", response_model=None)
@@ -1991,6 +4605,7 @@ async def upsert_mcp_server(body: McpServerRequest):
         enabled=body.enabled,
         timeout_sec=body.timeout_sec,
         protocol_version=body.protocol_version,
+        env=body.env,
     )
     conn = await db.connect()
     try:

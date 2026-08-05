@@ -133,6 +133,8 @@ class MCPToolManager:
                 timeout_sec=float(svc.get("timeout_sec", 12.0)),  # 30→12s 快速失败
                 protocol_version=svc.get("protocol_version", "auto"),
                 auth_token=auth_token,
+                # V1.2-6.2: server 级环境变量(stdio 子进程注入)
+                env=dict(svc.get("env") or {}),
             )
         )
         try:

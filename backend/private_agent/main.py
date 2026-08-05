@@ -492,19 +492,52 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     continue
                 # V2 P1(B2 修复): create_task 异步执行 —— run_turn 阻塞期间
                 # 主循环仍可接收 tool_confirmation 等消息(权限确认链路前置条件)
-                task = asyncio.create_task(_handle_user_message(ws, session_id, content))
-                # T-3: task 集合管理 —— 同会话并发 user_message 并存,
-                # 各自可被 cancel 命中; done 后从集合移除
-                _session_tasks.setdefault(session_id, set()).add(task)
-
-                def _on_task_done(t: asyncio.Task, sid: int = session_id) -> None:
-                    tasks = _session_tasks.get(sid)
-                    if tasks is not None:
-                        tasks.discard(t)
-                        if not tasks:
-                            _session_tasks.pop(sid, None)
-
-                task.add_done_callback(_on_task_done)
+                # V1.3-7.2: 透传可选 auto_execute/max_rounds(会话级覆盖)
+                _auto = msg.get("auto_execute")
+                _rounds = msg.get("max_rounds")
+                _spawn_user_message_task(
+                    ws,
+                    session_id,
+                    content,
+                    bool(_auto) if _auto is not None else None,
+                    int(_rounds) if _rounds is not None else None,
+                )
+            elif msg_type == "regenerate":
+                # V1.1-3.3 消息重生成: 按 turn 重放该轮 user 消息
+                # (前端事件按 turn 组织, 无 msg_id; 重放产生新 turn)
+                try:
+                    session_id = int(msg["session_id"])
+                    turn = int(msg["turn"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid regenerate: session_id (int) and turn (int) required",
+                    })
+                    continue
+                try:
+                    conn = await db.connect()
+                    try:
+                        content = await conn.fetchval(
+                            """
+                            SELECT content FROM messages
+                            WHERE session_id = $1 AND turn = $2
+                              AND role = 'user' AND compressed = FALSE
+                            ORDER BY id ASC LIMIT 1
+                            """,
+                            session_id,
+                            turn,
+                        )
+                    finally:
+                        await conn.close()
+                except Exception:
+                    content = None
+                if not content or not str(content).strip():
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "regenerate_failed: 未找到该轮可重放的 user 消息(可能已被删除/压缩)",
+                    })
+                    continue
+                _spawn_user_message_task(ws, session_id, str(content))
             elif msg_type == "cancel":
                 # 打断/停止: 取消当前会话所有运行中的 turn(生成中用户点"停止")
                 try:
@@ -587,7 +620,42 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 )
 
 
-async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> None:
+def _spawn_user_message_task(
+    ws: WebSocket,
+    session_id: int,
+    content: str,
+    auto_execute: bool | None = None,
+    max_rounds: int | None = None,
+) -> asyncio.Task:
+    """V1.1-3.3: 用户消息/重生成共用的任务注册(create_task + task 集合管理)。
+
+    run_turn 阻塞期间 WS 主循环仍可接收 tool_confirmation 等消息(V2 P1 B2 修复);
+    同会话并发任务并存, 各自可被 cancel 命中; done 后从集合移除(T-3)。
+    V1.3-7.2: 透传 auto_execute/max_rounds(会话级自动连续执行覆盖)。
+    """
+    task = asyncio.create_task(
+        _handle_user_message(ws, session_id, content, auto_execute, max_rounds)
+    )
+    _session_tasks.setdefault(session_id, set()).add(task)
+
+    def _on_task_done(t: asyncio.Task, sid: int = session_id) -> None:
+        tasks = _session_tasks.get(sid)
+        if tasks is not None:
+            tasks.discard(t)
+            if not tasks:
+                _session_tasks.pop(sid, None)
+
+    task.add_done_callback(_on_task_done)
+    return task
+
+
+async def _handle_user_message(
+    ws: WebSocket,
+    session_id: int,
+    content: str,
+    auto_execute: bool | None = None,
+    max_rounds: int | None = None,
+) -> None:
     """AC-1: 用户消息触发 ReAct 循环(蓝图 §2.4/§2.6)。
 
     V2 P1(B2 修复): 由 ws_endpoint create_task 异步调用 —— run_turn 期间
@@ -597,6 +665,7 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
     - set_sandbox_config 注入(B1 修复): code_execution 工具依赖模块级全局,
       此前从未在生产路径调用 → 现网必报 "Sandbox not configured"
     - permission_manager 传入 ReactLoop: 权限确认运行时链路(蓝图 §5.12)
+    - V1.3-7.2: auto_execute/max_rounds 自动连续执行(WS 显式传参覆盖会话配置)
     """
     lock = _session_locks.setdefault(session_id, asyncio.Lock())
     conn = None
@@ -627,30 +696,36 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
             # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
             frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
             tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
-            # 构造 MemoryManager(蓝图 §4.2-§4.5)
-            # V2 补齐(§4.4 [MVP]): 注入 react_events_insert, 使记忆提取/
-            # 淘汰事件在生产路径真正入库(memory_extracted/memory_evicted)
-            from private_agent.storage.react_events import insert_react_event
-
-            memories_repo = MemoriesRepo(conn)
-            memory_mgr = MemoryManager(
-                memories_repo=memories_repo,
-                compress_adapter=_build_compress_adapter(cfg),
-                react_events_insert=insert_react_event,
-                extract_interval_turns=cfg.get("memory", {}).get(
-                    "extract_interval_turns", 8
-                ),
-                inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
-                eviction_max_active=cfg.get("memory", {}).get(
-                    "eviction", {}
-                ).get("max_active_count", 200),
-                eviction_min_importance=cfg.get("memory", {}).get(
-                    "eviction", {}
-                ).get("min_importance_threshold", 0.3),
-                eviction_expire_days=cfg.get("memory", {}).get(
-                    "eviction", {}
-                ).get("expire_days", 30),
+            # V1.1-3.5: 会话级记忆开关(关闭 → 不注入/不提取记忆, 传 None)
+            memory_enabled = await conn.fetchval(
+                "SELECT memory_enabled FROM sessions WHERE id = $1", session_id
             )
+            memory_mgr = None
+            if memory_enabled is not False:
+                # 构造 MemoryManager(蓝图 §4.2-§4.5)
+                # V2 补齐(§4.4 [MVP]): 注入 react_events_insert, 使记忆提取/
+                # 淘汰事件在生产路径真正入库(memory_extracted/memory_evicted)
+                from private_agent.storage.react_events import insert_react_event
+
+                memories_repo = MemoriesRepo(conn)
+                memory_mgr = MemoryManager(
+                    memories_repo=memories_repo,
+                    compress_adapter=_build_compress_adapter(cfg),
+                    react_events_insert=insert_react_event,
+                    extract_interval_turns=cfg.get("memory", {}).get(
+                        "extract_interval_turns", 8
+                    ),
+                    inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
+                    eviction_max_active=cfg.get("memory", {}).get(
+                        "eviction", {}
+                    ).get("max_active_count", 200),
+                    eviction_min_importance=cfg.get("memory", {}).get(
+                        "eviction", {}
+                    ).get("min_importance_threshold", 0.3),
+                    eviction_expire_days=cfg.get("memory", {}).get(
+                        "eviction", {}
+                    ).get("expire_days", 30),
+                )
             cm = ContextManager(
                 session_id=session_id,
                 system_prompt=await _get_system_prompt(
@@ -692,6 +767,25 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
             )
             provider_name = model_id or (chain[0] if chain else None)
             provider_limits = resolve_provider_limits(cfg, provider_name)
+            # V1.1-3.6: skill model_params.max_tokens 覆盖(智能体级参数,
+            # 参数跟随模型: 仅注入 provider 已支持的 max_tokens 维度)
+            try:
+                locked_skill = await conn.fetchval(
+                    "SELECT locked_skill_name FROM sessions WHERE id = $1", session_id
+                )
+                if locked_skill:
+                    from private_agent.skills.loader import SkillLoader
+
+                    skill_loader = SkillLoader.from_cfg(cfg)
+                    skill = await skill_loader.load(locked_skill, conn)
+                    mp_max = (skill.manifest.model_params or {}).get("max_tokens")
+                    if isinstance(mp_max, (int, float)) and int(mp_max) > 0:
+                        provider_limits = {
+                            **provider_limits,
+                            "max_output_tokens": int(mp_max),
+                        }
+            except Exception:  # noqa: BLE001
+                pass  # skill 参数注入失败不影响主流程
             # 会话工作区(画地为牢): 用户选定目录 > 默认 workspace_root
             session_workspace = await conn.fetchval(
                 "SELECT workspace FROM sessions WHERE id = $1", session_id
@@ -721,17 +815,44 @@ async def _handle_user_message(ws: WebSocket, session_id: int, content: str) -> 
             await _sync_permission_manager(
                 _get_permission_manager(session_id), conn, session_id, cfg
             )
-            await loop.run_turn(content)
-            # 事件已通过 event_sink 实时推送, 无需再排空 event_queue
-            await ws.send_json({
-                "type": "turn_end",
-                "session_id": session_id,
-                "turn": loop._turn,
-            })
-            # 每轮结束后触发记忆提取(蓝图 §4.2)
-            await memory_mgr.maybe_extract(
-                session_id=session_id, current_turn=loop._turn,
-            )
+            # V1.3-7.2 工作流自动化: 自动连续执行。
+            # 优先级: WS user_message 显式传参 > 会话级配置(auto_execute/max_rounds)。
+            # 每轮独立 run_turn + turn_end(前端按 turn 分组), 后续轮用
+            # "[auto-execute]" 前缀输入提示模型继续完成剩余任务。
+            rounds = 0
+            run_content = content
+            if auto_execute is None:
+                auto_execute = await conn.fetchval(
+                    "SELECT auto_execute FROM sessions WHERE id = $1",
+                    session_id,
+                )
+            if max_rounds is None:
+                max_rounds = await conn.fetchval(
+                    "SELECT max_rounds FROM sessions WHERE id = $1",
+                    session_id,
+                )
+            max_rounds = int(max_rounds or 0)
+            while True:
+                rounds += 1
+                await loop.run_turn(run_content)
+                # 事件已通过 event_sink 实时推送, 无需再排空 event_queue
+                await ws.send_json({
+                    "type": "turn_end",
+                    "session_id": session_id,
+                    "turn": loop._turn,
+                })
+                # 每轮结束后触发记忆提取(蓝图 §4.2; V1.1-3.5: 记忆关闭时跳过)
+                if memory_mgr is not None:
+                    await memory_mgr.maybe_extract(
+                        session_id=session_id, current_turn=loop._turn,
+                    )
+                # 自动执行: 已到上限或未开启则停止
+                if not auto_execute or rounds >= max_rounds:
+                    break
+                run_content = (
+                    "[auto-execute] 前一轮已完成, 请继续完成该任务"
+                    "的剩余部分(若已全部完成, 简要说明即可)。"
+                )
         except asyncio.CancelledError:
             # 打断/停止: 用户点"停止" → cancel → 标记会话中断, 不报错
             try:

@@ -85,6 +85,10 @@ class SkillManifest(BaseModel):
     author: str = ""
     created_at: str = ""
     enabled: bool = True
+    # V1.1-3.6 智能体基础配置: 可视化元数据(头像/标签/对话参数覆盖)
+    avatar: str = ""
+    tags: list[str] = Field(default_factory=list)
+    model_params: dict = Field(default_factory=dict)  # {temperature, top_p, max_tokens}
     dependencies: SkillDependencies = Field(default_factory=SkillDependencies)
     permissions: SkillPermissions = Field(default_factory=SkillPermissions)
     prompt_vars: list[str] = Field(default_factory=list)

@@ -118,6 +118,14 @@ export default function HomeView({
     };
   }, []);
 
+  // V1.4.1: 视频 object-position 在 Chromium 无效(长期 bug) → 用
+  // left/top + translate(-%) 等效定位(img/video 统一)。位置仅在背景
+  // 有溢出时(scale>100%)有意义; scale<=100 强制居中, 防止旧数据露底。
+  const s = (wpStyle.scale ?? 100) / 100;
+  const hasOverflow = s > 1.001;
+  const px = hasOverflow ? wpStyle.position_x : 50;
+  const py = hasOverflow ? wpStyle.position_y : 50;
+
   return (
     <div
       style={{
@@ -226,12 +234,15 @@ export default function HomeView({
             aria-label="动态背景"
             style={{
               position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
+              left: `${px}%`,
+              top: `${py}%`,
+              // V1.4.1 修复: 缩放落到元素尺寸上(width/height=scale%),
+              // 使 left%(按容器)与 translate(-%)(按元素)基数不同才有净偏移;
+              // 原 transform:scale() 不改变布局尺寸 → left/translate 完全抵消 → 恒见中心
+              width: `${wpStyle.scale ?? 100}%`,
+              height: `${wpStyle.scale ?? 100}%`,
               objectFit: wpStyle.fit === "contain" ? "contain" : "cover",
-              objectPosition: `${wpStyle.position_x}% ${wpStyle.position_y}%`,
-              transform: `scale(${(wpStyle.scale ?? 100) / 100}) rotate(${wpStyle.rotate ?? 0}deg)`,
+              transform: `translate(-${px}%, -${py}%) rotate(${wpStyle.rotate ?? 0}deg)`,
             }}
           />
         )}
@@ -241,12 +252,12 @@ export default function HomeView({
             alt="壁纸"
             style={{
               position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
+              left: `${px}%`,
+              top: `${py}%`,
+              width: `${wpStyle.scale ?? 100}%`,
+              height: `${wpStyle.scale ?? 100}%`,
               objectFit: wpStyle.fit === "contain" ? "contain" : "cover",
-              objectPosition: `${wpStyle.position_x}% ${wpStyle.position_y}%`,
-              transform: `scale(${(wpStyle.scale ?? 100) / 100}) rotate(${wpStyle.rotate ?? 0}deg)`,
+              transform: `translate(-${px}%, -${py}%) rotate(${wpStyle.rotate ?? 0}deg)`,
             }}
           />
         )}

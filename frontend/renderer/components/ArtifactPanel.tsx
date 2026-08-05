@@ -1,5 +1,10 @@
-// Phase 1.5 - ArtifactPanel 右侧产物预览栏
-// 展示当前会话工具调用产生的图片/文件产物, 可展开收起
+// Phase 1.5 - ArtifactPanel 右侧产物预览栏(V1.1 改造: 双 Tab)
+// Tab1 "产物": 当前会话工具调用产生的图片/文件
+// Tab2 "文件": 工作区文件浏览(FilePanel embedded, 不占用对话界面)
+import { useState } from "react";
+
+import FilePanel from "./FilePanel";
+
 export interface Artifact {
   type: "image" | "file";
   url: string;
@@ -10,16 +15,21 @@ export default function ArtifactPanel({
   open,
   artifacts,
   onToggle,
+  width = 300,
 }: {
   open: boolean;
   artifacts: Artifact[];
   onToggle: () => void;
+  /** V1.1 布局优化: 展开时的宽度(外部拖拽控制), 折叠仍为 44px */
+  width?: number;
 }): JSX.Element {
+  const [tab, setTab] = useState<"artifacts" | "files">("artifacts");
+
   return (
     <aside
       className="glass-sidebar"
       style={{
-        width: open ? 260 : 44,
+        width: open ? width : 44,
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
@@ -57,19 +67,40 @@ export default function ArtifactPanel({
             justifyContent: "center",
             flexShrink: 0,
           }}
-          title={open ? "收起产物栏" : "展开产物栏"}
+          title={open ? "收起侧栏" : "展开侧栏"}
         >
           {open ? "»" : "«"}
         </button>
         {open && (
-          <span style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.02em" }}>
-            产物
-            {artifacts.length > 0 && (
-              <span style={{ marginLeft: 6, fontSize: 11, color: "var(--text-tertiary)", fontWeight: 400 }}>
-                {artifacts.length} 项
-              </span>
-            )}
-          </span>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            {(
+              [
+                { key: "artifacts", label: "产物" },
+                { key: "files", label: "文件" },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                style={{
+                  fontSize: 12,
+                  padding: "3px 12px",
+                  borderRadius: 20,
+                  border: "1px solid",
+                  borderColor: tab === t.key ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.3)",
+                  background: tab === t.key ? "rgba(139,92,246,0.1)" : "transparent",
+                  color: tab === t.key ? "#6d28d9" : "var(--text-tertiary)",
+                  fontWeight: tab === t.key ? 600 : 400,
+                  cursor: "pointer",
+                }}
+              >
+                {t.label}
+                {t.key === "artifacts" && artifacts.length > 0 && (
+                  <span style={{ marginLeft: 4, fontSize: 10 }}>{artifacts.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
         )}
       </div>
 
@@ -83,8 +114,11 @@ export default function ArtifactPanel({
             letterSpacing: "0.1em",
           }}
         >
-          产物预览
+          产物 / 文件
         </div>
+      ) : tab === "files" ? (
+        /* V1.1 反馈①: 工作区文件并入产物栏, 不占用对话界面 */
+        <FilePanel embedded />
       ) : (
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
           {artifacts.length === 0 && (

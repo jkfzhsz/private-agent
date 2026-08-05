@@ -13,6 +13,10 @@ interface ProviderInfo {
   model_name: string | null;
   base_url: string | null;
   api_key_configured: boolean;
+  // V1.4-8.2: 分组元数据
+  group?: string | null;
+  sort_order?: number;
+  kind?: string; // cloud | local
   limits?: { max_input_tokens?: number; max_output_tokens?: number; max_turns?: number };
 }
 
@@ -26,6 +30,8 @@ interface McpServer {
   enabled?: boolean;
   // V2 P2: 装配到对话开关(默认 true; false 时工具不进对话)
   assemble?: boolean;
+  // V1.2-6.2: 环境变量(stdio 子进程注入)
+  env?: Record<string, string>;
 }
 
 export default function SettingsView({ sessionId = 1 }: { sessionId?: number }): JSX.Element {
@@ -80,9 +86,34 @@ export default function SettingsView({ sessionId = 1 }: { sessionId?: number }):
           可新增/编辑/删除模型(任意 OpenAI 兼容服务) · 编辑可配置参数上限(输入/输出/轮次) · 降级链: {fallbackChain.join(" → ") || "—"}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {providers.map((p) => (
-            <ProviderRow key={p.name} provider={p} onSaved={load} onDelete={handleDeleteProvider} />
-          ))}
+          {/* V1.4-8.2: 按 group 分组 + sort_order 排序渲染 */}
+          {(() => {
+            const groups = new Map<string, ProviderInfo[]>();
+            for (const p of [...providers].sort(
+              (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)
+            )) {
+              const g = (p.group || "").trim() || "未分组";
+              if (!groups.has(g)) groups.set(g, []);
+              groups.get(g)!.push(p);
+            }
+            return Array.from(groups.entries()).map(([gname, list]) => (
+              <div key={gname}>
+                <div
+                  style={{
+                    fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)",
+                    margin: "8px 0 6px", letterSpacing: "0.02em",
+                  }}
+                >
+                  {gname} ({list.length})
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {list.map((p) => (
+                    <ProviderRow key={p.name} provider={p} onSaved={load} onDelete={handleDeleteProvider} />
+                  ))}
+                </div>
+              </div>
+            ));
+          })()}
           {providers.length === 0 && (
             <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
               ⚠️ 尚未配置任何模型。<b>在下方向"添加模型"填入你的模型服务即可开始对话</b>
@@ -129,6 +160,15 @@ export default function SettingsView({ sessionId = 1 }: { sessionId?: number }):
 
       {/* 技能管理: 列表 + 上传新技能 */}
       <SkillsSection />
+
+      {/* V1.3-7.2 工作流自动化: Hooks 配置 */}
+      <HooksSection />
+
+      {/* V1.4-8.1 数据管理: 备份/还原/批量导出 */}
+      <DataSection />
+
+      {/* V1.4-8.3 系统设置: 日志/代理/缓存/master key */}
+      <SystemSection />
 
       {/* 关于与更新 */}
       <UpdateSection />
@@ -316,6 +356,55 @@ function SkillsSection(): JSX.Element {
   const [zipBusy, setZipBusy] = useState(false);
   const [zipMsg, setZipMsg] = useState<string | null>(null);
   const zipRef = useRef<HTMLInputElement | null>(null);
+  // V1.2-6.1: 提示词编辑器
+  const [promptEditor, setPromptEditor] = useState<{
+    name: string;
+    text: string;
+    tokens: number | null;
+    version: string;
+  } | null>(null);
+  const [savingPrompt, setSavingPrompt] = useState(false);
+  const [promptMsg, setPromptMsg] = useState<string | null>(null);
+
+  // V1.2-6.1: 打开提示词编辑器(加载当前内容 + token 估算)
+  const openPromptEditor = async (name: string): Promise<void> => {
+    setPromptMsg(null);
+    try {
+      const resp = await adminFetch(`http://127.0.0.1:8765/admin/skills/${name}/prompt`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setPromptEditor({
+        name: data.name,
+        text: data.system_prompt ?? "",
+        tokens: data.token_count,
+        version: data.version,
+      });
+    } catch (e) {
+      setPromptMsg(`加载失败: ${String(e)}`);
+    }
+  };
+
+  // V1.2-6.1: 保存提示词(落盘 + 自动快照 + 同步 PG)
+  const savePrompt = async (): Promise<void> => {
+    if (!promptEditor) return;
+    setSavingPrompt(true);
+    setPromptMsg(null);
+    try {
+      const resp = await adminFetch(`http://127.0.0.1:8765/admin/skills/${promptEditor.name}/prompt`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system_prompt: promptEditor.text }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setPromptEditor((prev) => (prev ? { ...prev, tokens: data.token_count } : prev));
+      setPromptMsg("已保存(自动生成快照, 旧会话将自动重建 Frozen Zone)");
+    } catch (e) {
+      setPromptMsg(`保存失败: ${String(e)}`);
+    } finally {
+      setSavingPrompt(false);
+    }
+  };
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -421,13 +510,27 @@ function SkillsSection(): JSX.Element {
           <span
             key={s.name}
             style={{
-              fontSize: 12, padding: "4px 12px", borderRadius: 12,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 12, padding: "4px 8px 4px 12px", borderRadius: 12,
               border: s.enabled ? "1px solid #4caf50" : "1px solid #ccc",
               color: s.enabled ? "#2e7d32" : "var(--text-tertiary)",
               background: s.enabled ? "rgba(76,175,80,0.08)" : "transparent",
             }}
           >
             {s.name} v{s.version} {s.enabled ? "· 已启用" : "· 未启用"}
+            {/* V1.2-6.1: 提示词编辑器入口 */}
+            <button
+              onClick={() => void openPromptEditor(s.name)}
+              title={`编辑 ${s.name} 的系统提示词`}
+              style={{
+                border: "none", background: "transparent", cursor: "pointer",
+                fontSize: 12, padding: "2px 4px", color: "#8b5cf6",
+              }}
+            >
+              ✏️
+            </button>
           </span>
         ))}
         {skills.length === 0 && (
@@ -503,6 +606,77 @@ function SkillsSection(): JSX.Element {
           {msg && <span style={{ fontSize: 12, color: msg.startsWith("技能") ? "#4caf50" : "#d32f2f" }}>{msg}</span>}
         </div>
       </div>
+
+      {/* V1.2-6.1: 提示词编辑器弹窗 */}
+      {promptEditor && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 200,
+            background: "rgba(15,23,42,0.4)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+          onClick={() => setPromptEditor(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 680, maxWidth: "92vw", maxHeight: "85vh",
+              display: "flex", flexDirection: "column",
+              background: "#fff", borderRadius: 14,
+              padding: "20px 24px",
+              boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <span style={{ fontSize: 16, fontWeight: 700 }}>
+                ✏️ 编辑系统提示词 · {promptEditor.name}
+                <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-tertiary)", fontWeight: 400 }}>
+                  v{promptEditor.version}
+                </span>
+              </span>
+              <button
+                onClick={() => setPromptEditor(null)}
+                style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+              >
+                ×
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8 }}>
+              保存后自动生成快照(scope=prompt)；提示词变更会使旧会话续聊时自动重建上下文。
+            </div>
+            <textarea
+              value={promptEditor.text}
+              onChange={(e) => setPromptEditor({ ...promptEditor, text: e.target.value })}
+              style={{
+                flex: 1, minHeight: 320, resize: "vertical",
+                fontFamily: "Consolas, monospace", fontSize: 13,
+                border: "1px solid #e2e8f0", borderRadius: 8, padding: 12,
+                color: "#334155", background: "#f8fafc",
+                whiteSpace: "pre", lineHeight: 1.6,
+              }}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12 }}>
+              <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+                token 估算: {promptEditor.tokens ?? "—"}（保存后刷新）
+              </span>
+              <span style={{ flex: 1 }} />
+              {promptMsg && (
+                <span style={{ fontSize: 12, color: promptMsg.startsWith("保存失败") ? "#d32f2f" : "#059669" }}>
+                  {promptMsg}
+                </span>
+              )}
+              <button
+                className="btn-primary"
+                style={{ padding: "8px 20px", fontSize: 13 }}
+                onClick={() => void savePrompt()}
+                disabled={savingPrompt}
+              >
+                {savingPrompt ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -591,6 +765,9 @@ function ProviderRow({
   const [maxInput, setMaxInput] = useState(provider.limits?.max_input_tokens ?? 8192);
   const [maxOutput, setMaxOutput] = useState(provider.limits?.max_output_tokens ?? 2048);
   const [maxTurns, setMaxTurns] = useState(provider.limits?.max_turns ?? 20);
+  // V1.4-8.2: 分组元数据
+  const [group, setGroup] = useState(provider.group ?? "");
+  const [kind, setKind] = useState(provider.kind ?? "cloud");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -602,6 +779,8 @@ function ProviderRow({
     setMaxInput(provider.limits?.max_input_tokens ?? 8192);
     setMaxOutput(provider.limits?.max_output_tokens ?? 2048);
     setMaxTurns(provider.limits?.max_turns ?? 20);
+    setGroup(provider.group ?? "");
+    setKind(provider.kind ?? "cloud");
     setMsg(null);
     setEditing(true);
   };
@@ -618,6 +797,8 @@ function ProviderRow({
       body.max_input_tokens = maxInput;
       body.max_output_tokens = maxOutput;
       body.max_turns = maxTurns;
+      body.group = group.trim() || "";
+      body.kind = kind;
       const resp = await adminFetch(`${API_BASE}/settings/providers/${provider.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -673,6 +854,11 @@ function ProviderRow({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 14, fontWeight: 600 }}>{provider.name}</span>
+            {provider.kind === "local" && (
+              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "#ede9fe", color: "#6d28d9" }}>
+                本地
+              </span>
+            )}
             <span
               style={{
                 fontSize: 11, padding: "1px 8px", borderRadius: 10,
@@ -792,6 +978,21 @@ function ProviderRow({
             <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>输入/输出/轮次</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {/* V1.4-8.2: 分组 + 类型 */}
+            <input
+              value={group}
+              onChange={(e) => setGroup(e.target.value)}
+              placeholder="分组(如: 主力模型)"
+              style={{ width: 140, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            />
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+              style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            >
+              <option value="cloud">云端模型</option>
+              <option value="local">本地模型</option>
+            </select>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
               启用
@@ -1033,6 +1234,19 @@ function McpRow({
       <span style={{ fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
         {server.url || [server.command, ...(server.args ?? [])].join(" ")}
       </span>
+      {/* V1.2-6.2: 环境变量标识(仅展示键名, 值不展示) */}
+      {server.env && Object.keys(server.env).length > 0 && (
+        <span
+          title={`环境变量: ${Object.keys(server.env).join(", ")}`}
+          style={{
+            fontSize: 10, padding: "1px 8px", borderRadius: 10,
+            background: "rgba(129,140,248,0.12)", color: "#4f46e5",
+            flexShrink: 0, cursor: "help",
+          }}
+        >
+          env {Object.keys(server.env).length}
+        </span>
+      )}
       {/* 2026-08-04 补齐: 启用/禁用开关 */}
       <label
         style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--text-secondary)", flexShrink: 0, cursor: "pointer" }}
@@ -1082,6 +1296,8 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
   const [authToken, setAuthToken] = useState("");
+  // V1.2-6.2: 环境变量配置(每行 KEY=VALUE, stdio 模式注入子进程)
+  const [envText, setEnvText] = useState("");
   const [jsonText, setJsonText] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -1143,6 +1359,18 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
       if (authToken.trim()) {
         body.auth_token = authToken.trim();
       }
+      // V1.2-6.2: 解析 env(每行 KEY=VALUE, # 开头为注释)
+      const env: Record<string, string> = {};
+      for (const line of envText.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t || t.startsWith("#")) continue;
+        const eq = t.indexOf("=");
+        if (eq <= 0) continue;
+        env[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+      }
+      if (Object.keys(env).length > 0) {
+        body.env = env;
+      }
       const resp = await adminFetch(`${API_BASE}/settings/mcp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1155,6 +1383,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
       setCommand("");
       setArgs("");
       setAuthToken("");
+      setEnvText("");
       setMsg("已添加(重启后端后生效)");
       onAdded();
     } catch (err) {
@@ -1283,6 +1512,18 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           onChange={(e) => setAuthToken(e.target.value)}
           placeholder="可选, 服务器要求 Bearer 认证时填写(AES 加密存储)"
           style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+        />
+      </div>
+      {/* V1.2-6.2: 环境变量配置(stdio 子进程注入) */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>环境变量</span>
+        <textarea
+          value={envText}
+          onChange={(e) => setEnvText(e.target.value)}
+          placeholder={'每行 KEY=VALUE, 如:\nMY_API_KEY=sk-xxx\nBASE_URL=http://127.0.0.1:3000'}
+          rows={3}
+          spellCheck={false}
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)", resize: "vertical", fontFamily: "monospace" }}
         />
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -1519,8 +1760,642 @@ const btnStyle: React.CSSProperties = {
 // 主题壁纸板块(Phase 1.5)
 // ──────────────────────────────────────────────────────────────────────────────
 
-function WallpaperSection(): JSX.Element {
-  const [wallpaper, setWallpaper] = useState<string | null>(null);
+// ──────────────────────────────────────────────────────────────────────────────
+// V1.3-7.2 工作流自动化: Hooks 配置(事件订阅, CRUD 端点后端已有)
+// ──────────────────────────────────────────────────────────────────────────────
+const HOOK_EVENT_LABELS: Record<string, string> = {
+  user_prompt_submit: "用户提交时",
+  pre_tool_use: "工具调用前",
+  post_tool_use: "工具调用后",
+  stop: "停止/结束时",
+  pre_compact: "压缩前",
+  permission_request: "权限请求时",
+};
+
+const HOOK_TYPES = ["command", "http", "mcp_tool"];
+
+interface HookItem {
+  name: string;
+  event: string;
+  type: string;
+  command?: string | null;
+  url?: string | null;
+  mcp_server?: string | null;
+  mcp_tool?: string | null;
+  timeout: number;
+  enabled: boolean;
+}
+
+function HooksSection(): JSX.Element {
+  const [hooks, setHooks] = useState<HookItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  // 编辑态: null=新增
+  const [editing, setEditing] = useState<string | null>(null);
+  const [form, setForm] = useState({
+    name: "",
+    event: "user_prompt_submit",
+    type: "command",
+    command: "",
+    url: "",
+    mcp_server: "",
+    mcp_tool: "",
+    timeout: 5,
+    enabled: true,
+  });
+
+  const load = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    try {
+      const resp = await adminFetch(`${API_BASE}/hooks`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setHooks(Array.isArray(data.hooks) ? data.hooks : []);
+    } catch (e) {
+      setMsg(`加载失败: ${String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const startEdit = (h: HookItem): void => {
+    setEditing(h.name);
+    setForm({
+      name: h.name,
+      event: h.event,
+      type: h.type,
+      command: h.command ?? "",
+      url: h.url ?? "",
+      mcp_server: h.mcp_server ?? "",
+      mcp_tool: h.mcp_tool ?? "",
+      timeout: Number(h.timeout) || 5,
+      enabled: h.enabled !== false,
+    });
+    setMsg(null);
+  };
+
+  const save = async (): Promise<void> => {
+    if (!form.name.trim()) {
+      setMsg("name 不能为空");
+      return;
+    }
+    const body: Record<string, unknown> = {
+      name: form.name.trim(),
+      event: form.event,
+      type: form.type,
+      timeout: Number(form.timeout) || 5,
+      enabled: form.enabled,
+    };
+    if (form.type === "command") body.command = form.command.trim() || null;
+    if (form.type === "http") body.url = form.url.trim() || null;
+    if (form.type === "mcp_tool") {
+      body.mcp_server = form.mcp_server.trim() || null;
+      body.mcp_tool = form.mcp_tool.trim() || null;
+    }
+    try {
+      const url = editing
+        ? `${API_BASE}/hooks/${encodeURIComponent(editing)}`
+        : `${API_BASE}/hooks`;
+      const resp = await adminFetch(url, {
+        method: editing ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setMsg(editing ? `已更新 ${form.name}` : `已新增 ${form.name}(重启后端后生效)`);
+      setEditing(null);
+      void load();
+    } catch (e) {
+      setMsg(`保存失败: ${String(e)}`);
+    }
+  };
+
+  const remove = async (name: string): Promise<void> => {
+    if (!window.confirm(`删除 hook "${name}"?`)) return;
+    try {
+      const resp = await adminFetch(`${API_BASE}/hooks/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setMsg(`已删除 ${name}`);
+      void load();
+    } catch (e) {
+      setMsg(`删除失败: ${String(e)}`);
+    }
+  };
+
+  const inputStyle = {
+    padding: "6px 10px", borderRadius: 6, fontSize: 12,
+    border: "1px solid rgba(148,163,184,0.3)",
+    background: "rgba(255,255,255,0.6)",
+  } as const;
+
+  return (
+    <div
+      className="glass-panel animate-in delay-2"
+      style={{ padding: "18px 22px", display: "flex", flexDirection: "column", gap: 12 }}
+    >
+      <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>
+        工作流钩子 (Hooks)
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+        在关键事件点执行外部命令/HTTP 请求/MCP 工具(可改写输入、追加上下文、阻断执行)
+      </div>
+
+      {msg && <div style={{ fontSize: 12, color: msg.startsWith("失败") ? "#dc2626" : "#059669" }}>{msg}</div>}
+
+      {/* 列表 */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {loading && <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>加载中…</div>}
+        {!loading && hooks.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>暂无 hooks</div>
+        )}
+        {hooks.map((h) => (
+          <div
+            key={h.name}
+            style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "8px 12px", borderRadius: 8,
+              background: "rgba(255,255,255,0.5)",
+              fontSize: 12,
+            }}
+          >
+            <span
+              style={{
+                flexShrink: 0, fontSize: 11, fontWeight: 600,
+                padding: "2px 8px", borderRadius: 10,
+                background: h.enabled ? "rgba(76,175,80,0.12)" : "rgba(148,163,184,0.15)",
+                color: h.enabled ? "#2e7d32" : "#64748b",
+              }}
+            >
+              {h.enabled ? "启用" : "停用"}
+            </span>
+            <span style={{ fontWeight: 600, color: "var(--text-primary)", flexShrink: 0 }}>
+              {h.name}
+            </span>
+            <span style={{ color: "var(--text-secondary)", flexShrink: 0 }}>
+              {HOOK_EVENT_LABELS[h.event] ?? h.event}
+            </span>
+            <span
+              style={{
+                flex: 1, minWidth: 0, overflow: "hidden",
+                textOverflow: "ellipsis", whiteSpace: "nowrap",
+                color: "var(--text-tertiary)",
+              }}
+            >
+              {h.type === "command" && h.command}
+              {h.type === "http" && h.url}
+              {h.type === "mcp_tool" && `${h.mcp_server}::${h.mcp_tool}`}
+            </span>
+            <button
+              onClick={() => startEdit(h)}
+              style={{ border: "none", background: "transparent", cursor: "pointer", color: "#6d28d9", fontSize: 12 }}
+            >
+              ✏️
+            </button>
+            <button
+              onClick={() => void remove(h.name)}
+              style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--danger-text)", fontSize: 13 }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* 新增/编辑表单 */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", borderRadius: 8, background: "rgba(109,40,217,0.05)", border: "1px solid rgba(109,40,217,0.15)" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "#5b21b6" }}>
+          {editing ? `编辑 hook: ${editing}` : "新增 hook"}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <input
+            placeholder="name(唯一)"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            disabled={editing !== null}
+            style={{ ...inputStyle, width: 140 }}
+          />
+          <select
+            value={form.event}
+            onChange={(e) => setForm({ ...form, event: e.target.value })}
+            style={inputStyle}
+          >
+            {Object.entries(HOOK_EVENT_LABELS).map(([k, v]) => (
+              <option key={k} value={k}>{v} ({k})</option>
+            ))}
+          </select>
+          <select
+            value={form.type}
+            onChange={(e) => setForm({ ...form, type: e.target.value })}
+            style={inputStyle}
+          >
+            {HOOK_TYPES.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+          {form.type === "command" && (
+            <input
+              placeholder="命令, 如: node hooks/xxx.mjs"
+              value={form.command}
+              onChange={(e) => setForm({ ...form, command: e.target.value })}
+              style={{ ...inputStyle, flex: 1, minWidth: 200 }}
+            />
+          )}
+          {form.type === "http" && (
+            <input
+              placeholder="URL, 如: http://127.0.0.1:9000/hook"
+              value={form.url}
+              onChange={(e) => setForm({ ...form, url: e.target.value })}
+              style={{ ...inputStyle, flex: 1, minWidth: 200 }}
+            />
+          )}
+          {form.type === "mcp_tool" && (
+            <>
+              <input
+                placeholder="mcp_server"
+                value={form.mcp_server}
+                onChange={(e) => setForm({ ...form, mcp_server: e.target.value })}
+                style={{ ...inputStyle, width: 140 }}
+              />
+              <input
+                placeholder="mcp_tool"
+                value={form.mcp_tool}
+                onChange={(e) => setForm({ ...form, mcp_tool: e.target.value })}
+                style={{ ...inputStyle, width: 140 }}
+              />
+            </>
+          )}
+          <input
+            type="number"
+            min={1}
+            value={String(form.timeout)}
+            onChange={(e) => setForm({ ...form, timeout: Number(e.target.value) })}
+            title="超时(秒)"
+            style={{ ...inputStyle, width: 60 }}
+          />
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+            <input
+              type="checkbox"
+              checked={form.enabled}
+              onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
+            />
+            启用
+          </label>
+          <button className="btn-primary" style={{ padding: "6px 16px", fontSize: 12 }} onClick={() => void save()}>
+            {editing ? "保存修改" : "添加"}
+          </button>
+          {editing && (
+            <button
+              onClick={() => { setEditing(null); setMsg(null); }}
+              style={{ padding: "6px 12px", fontSize: 12, borderRadius: 6, border: "1px solid #ddd", background: "#fff", cursor: "pointer" }}
+            >
+              取消
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// V1.4-8.1 数据管理: 全局备份下载 / 上传还原 / 会话批量导出
+// ──────────────────────────────────────────────────────────────────────────────
+function DataSection(): JSX.Element {
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const restoreRef = useRef<HTMLInputElement | null>(null);
+  // 批量导出
+  const [batchIds, setBatchIds] = useState("");
+  const [batchContent, setBatchContent] = useState<string | null>(null);
+
+  const doBackup = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const resp = await adminFetch(`${API_BASE}/backup`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const disposition = resp.headers.get("content-disposition") ?? "";
+      const m = /filename="([^"]+)"/.exec(disposition);
+      const name = m?.[1] ?? `pa-backup-${Date.now()}.zip`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      setMsg({ ok: true, text: `备份已下载: ${name} (含配置/会话/记忆/知识库, 请妥善保管)` });
+    } catch (e) {
+      setMsg({ ok: false, text: `备份失败: ${String(e)}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doRestore = async (file: File | undefined | null): Promise<void> => {
+    if (!file) return;
+    if (!window.confirm("还原将覆盖当前全部会话/记忆/配置(先备份再操作)。确定继续?")) {
+      if (restoreRef.current) restoreRef.current.value = "";
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const resp = await adminFetch(`${API_BASE}/backup/restore`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error ?? data.detail ?? `HTTP ${resp.status}`);
+      const counts = Object.entries(data.restored ?? {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ");
+      setMsg({
+        ok: true,
+        text: `还原成功(${counts})。${data.chunks_rebuild_pending ? "知识库片段需重索引: 请到知识库页执行 🔄 重索引。" : ""}`,
+      });
+      if (restoreRef.current) restoreRef.current.value = "";
+    } catch (e) {
+      setMsg({ ok: false, text: `还原失败: ${String(e)}` });
+      if (restoreRef.current) restoreRef.current.value = "";
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doBatchExport = async (): Promise<void> => {
+    const ids = batchIds
+      .split(/[,，\s]+/)
+      .map((s) => Number(s))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    if (ids.length === 0) {
+      setMsg({ ok: false, text: "请输入至少一个会话 ID" });
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      const resp = await adminFetch(`${API_BASE}/sessions/export_batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_ids: ids, format: "md" }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+      setBatchContent(data.content ?? "");
+      setMsg({ ok: true, text: `已导出 ${ids.length} 个会话` });
+    } catch (e) {
+      setMsg({ ok: false, text: `批量导出失败: ${String(e)}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const downloadBatch = (): void => {
+    if (!batchContent) return;
+    const blob = new Blob([batchContent], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sessions-batch-${Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="glass-panel animate-in delay-2" style={{ padding: "18px 22px", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>数据管理</div>
+
+      {msg && (
+        <div style={{ fontSize: 12, color: msg.ok ? "#059669" : "#dc2626", wordBreak: "break-word" }}>{msg.text}</div>
+      )}
+
+      {/* 备份/还原 */}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <button className="btn-primary" onClick={() => void doBackup()} disabled={busy} style={{ padding: "7px 16px", fontSize: 12 }}>
+          {busy ? "…" : "⬇ 一键备份"}
+        </button>
+        <label style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #d97706", background: "#fffbeb", color: "#92400e", cursor: "pointer" }}>
+          ⬆ 上传还原
+          <input
+            ref={restoreRef}
+            type="file"
+            accept=".zip"
+            style={{ display: "none" }}
+            onChange={(e) => void doRestore(e.target.files?.[0])}
+          />
+        </label>
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+          备份含: 运行时配置(含 API Key 密文)/技能/会话/消息/记忆/知识库文档
+        </span>
+      </div>
+
+      {/* 会话批量导出 */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>会话批量导出:</span>
+        <input
+          className="flow-input"
+          style={{ width: 220 }}
+          placeholder="会话 ID, 逗号分隔, 如 1,2,3"
+          value={batchIds}
+          onChange={(e) => setBatchIds(e.target.value)}
+        />
+        <button onClick={() => void doBatchExport()} disabled={busy} style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #6d28d9", background: "#f5f3ff", color: "#5b21b6", cursor: "pointer" }}>
+          导出 MD
+        </button>
+        {batchContent && (
+          <button onClick={downloadBatch} style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #059669", background: "#ecfdf5", color: "#065f46", cursor: "pointer" }}>
+            ⬇ 下载合并文件
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// V1.4-8.3 系统设置: 存储路径/日志/代理/缓存清理/master key 状态
+// ──────────────────────────────────────────────────────────────────────────────
+interface SystemSettings {
+  app_name: string;
+  version: string;
+  workspace_root: string;
+  log_level: string;
+  log_retention_days: number;
+  proxy_http: string | null;
+  proxy_https: string | null;
+  master_key_configured: boolean;
+  database: string;
+}
+
+function SystemSection(): JSX.Element {
+  const [cfg, setCfg] = useState<SystemSettings | null>(null);
+  const [logLevel, setLogLevel] = useState("INFO");
+  const [retention, setRetention] = useState(7);
+  const [proxyHttp, setProxyHttp] = useState("");
+  const [proxyHttps, setProxyHttps] = useState("");
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async (): Promise<void> => {
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/system`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setCfg(data);
+      setLogLevel(data.log_level ?? "INFO");
+      setRetention(data.log_retention_days ?? 7);
+      setProxyHttp(data.proxy_http ?? "");
+      setProxyHttps(data.proxy_https ?? "");
+    } catch {
+      /* 静默 */
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/system`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          log_level: logLevel,
+          log_retention_days: Number(retention) || 7,
+          proxy_http: proxyHttp.trim(),
+          proxy_https: proxyHttps.trim(),
+        }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setMsg({ ok: true, text: "已保存(log_level 即时生效, 代理与存储路径重启后端后完整生效)" });
+      void load();
+    } catch (e) {
+      setMsg({ ok: false, text: `保存失败: ${String(e)}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doClearCache = async (): Promise<void> => {
+    if (!window.confirm("清理 outputs 产物目录中超过保留期的临时文件? 不影响对话与配置。")) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const resp = await adminFetch(`${API_BASE}/cache/clear`, { method: "POST" });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setMsg({
+        ok: true,
+        text: `已清理 ${data.cleaned_files} 个文件(${data.freed_bytes > 0 ? `${(data.freed_bytes / 1024).toFixed(1)}KB` : "0KB"})`,
+      });
+    } catch (e) {
+      setMsg({ ok: false, text: `清理失败: ${String(e)}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputStyle = {
+    padding: "6px 10px", borderRadius: 6, fontSize: 12,
+    border: "1px solid rgba(148,163,184,0.3)",
+    background: "rgba(255,255,255,0.6)",
+  } as const;
+
+  return (
+    <div className="glass-panel animate-in delay-2" style={{ padding: "18px 22px", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>系统设置</div>
+
+      {msg && (
+        <div style={{ fontSize: 12, color: msg.ok ? "#059669" : "#dc2626", wordBreak: "break-word" }}>{msg.text}</div>
+      )}
+
+      {/* 状态行 */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 12, color: "var(--text-secondary)" }}>
+        <span>{cfg?.app_name ?? "Private Agent"} v{cfg?.version ?? "—"}</span>
+        <span>数据库: {cfg?.database ?? "—"}</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          Master Key:
+          <span
+            style={{
+              fontSize: 11, padding: "1px 8px", borderRadius: 10,
+              background: cfg?.master_key_configured ? "rgba(76,175,80,0.12)" : "#fef3c7",
+              color: cfg?.master_key_configured ? "#2e7d32" : "#d97706",
+            }}
+          >
+            {cfg?.master_key_configured ? "已配置(AES 加密)" : "未配置"}
+          </span>
+        </span>
+        <span title="工作区根目录">存储路径: {cfg?.workspace_root ?? "—"}</span>
+      </div>
+
+      {/* 配置行 */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          日志级别
+          <select value={logLevel} onChange={(e) => setLogLevel(e.target.value)} style={inputStyle}>
+            {["DEBUG", "INFO", "WARNING", "ERROR"].map((l) => (
+              <option key={l} value={l}>{l}</option>
+            ))}
+          </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          日志保留(天)
+          <input
+            type="number"
+            min={1}
+            max={3650}
+            value={String(retention)}
+            onChange={(e) => setRetention(Number(e.target.value))}
+            style={{ ...inputStyle, width: 64 }}
+          />
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          HTTP 代理
+          <input
+            value={proxyHttp}
+            onChange={(e) => setProxyHttp(e.target.value)}
+            placeholder="http://127.0.0.1:7890"
+            style={{ ...inputStyle, width: 170 }}
+          />
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          HTTPS 代理
+          <input
+            value={proxyHttps}
+            onChange={(e) => setProxyHttps(e.target.value)}
+            placeholder="https://127.0.0.1:7890"
+            style={{ ...inputStyle, width: 170 }}
+          />
+        </label>
+        <button className="btn-primary" style={{ padding: "6px 16px", fontSize: 12 }} onClick={() => void save()} disabled={busy}>
+          保存
+        </button>
+        <button
+          onClick={() => void doClearCache()}
+          disabled={busy}
+          style={{ fontSize: 12, padding: "6px 14px", borderRadius: 8, border: "1px solid #d97706", background: "#fffbeb", color: "#92400e", cursor: "pointer" }}
+        >
+          🧹 清理产物缓存
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = useState<string | null>(null);
   const [wpType, setWpType] = useState<"image" | "video">("image");
   const [fit, setFit] = useState<"cover" | "contain">("cover");
   const [posX, setPosX] = useState(50);
@@ -1683,11 +2558,15 @@ function WallpaperSection(): JSX.Element {
               }
               onLoadedData={() => setLoadError(null)}
               style={{
-                width: "100%",
-                height: "100%",
+                // V1.4.1: 缩放落元素尺寸(width/height=scale%), left%(容器)与
+                // translate(-%)(元素)基数不同才有净偏移; transform 不再 scale
+                position: "absolute",
+                left: `${scale > 100 ? posX : 50}%`,
+                top: `${scale > 100 ? posY : 50}%`,
+                width: `${scale}%`,
+                height: `${scale}%`,
                 objectFit: fit,
-                objectPosition: `${posX}% ${posY}%`,
-                transform: `scale(${scale / 100}) rotate(${rotate}deg)`,
+                transform: `translate(-${scale > 100 ? posX : 50}%, -${scale > 100 ? posY : 50}%) rotate(${rotate}deg)`,
                 display: "block",
               }}
             />
@@ -1701,11 +2580,13 @@ function WallpaperSection(): JSX.Element {
               }
               onLoad={() => setLoadError(null)}
               style={{
-                width: "100%",
-                height: "100%",
+                position: "absolute",
+                left: `${scale > 100 ? posX : 50}%`,
+                top: `${scale > 100 ? posY : 50}%`,
+                width: `${scale}%`,
+                height: `${scale}%`,
                 objectFit: fit,
-                objectPosition: `${posX}% ${posY}%`,
-                transform: `scale(${scale / 100}) rotate(${rotate}deg)`,
+                transform: `translate(-${scale > 100 ? posX : 50}%, -${scale > 100 ? posY : 50}%) rotate(${rotate}deg)`,
                 display: "block",
               }}
             />
@@ -1796,7 +2677,12 @@ function WallpaperSection(): JSX.Element {
               min={0}
               max={100}
               value={posX}
-              onChange={(e) => setPosX(Number(e.target.value))}
+              onChange={(e) => {
+                setPosX(Number(e.target.value));
+                // V1.4.1: cover 铺满 + scale<=100 时无裁剪溢出, 移动位置不可见
+                // → 拖动位置时自动放大到 110%, 保证有可移动空间
+                if (scale <= 100) setScale(110);
+              }}
               style={{ flex: 1 }}
             />
             <span style={{ fontSize: 12, color: "var(--text-tertiary)", width: 34, textAlign: "right" }}>{posX}%</span>
@@ -1808,10 +2694,17 @@ function WallpaperSection(): JSX.Element {
               min={0}
               max={100}
               value={posY}
-              onChange={(e) => setPosY(Number(e.target.value))}
+              onChange={(e) => {
+                setPosY(Number(e.target.value));
+                // 同上: 自动放大保证移动可见
+                if (scale <= 100) setScale(110);
+              }}
               style={{ flex: 1 }}
             />
             <span style={{ fontSize: 12, color: "var(--text-tertiary)", width: 34, textAlign: "right" }}>{posY}%</span>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: -4 }}>
+            💡 铺满模式下背景须大于画面才有移动空间: 拖动位置会自动放大到 110%, 也可手动调"缩放"后移动
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>缩放</span>

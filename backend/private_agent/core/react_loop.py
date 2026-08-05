@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import platform
+import time
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -735,6 +736,8 @@ class ReactLoop:
 
                 async def _exec_plan(plan: dict) -> ToolResult:
                     async with sem:
+                        # V1.2-6.3: 记录工具执行耗时(前端 tool_result 展示)
+                        _t0 = time.monotonic()
                         try:
                             # T-1(架构修订 A.1.4): 路径校验由服务端强制 ——
                             # 覆盖 LLM 提供的 data_dir/workspace 为会话工作区,
@@ -761,7 +764,7 @@ class ReactLoop:
                             timeout_sec = float(
                                 cats.get(plan["tool_name"], default_t)
                             )
-                            return await asyncio.wait_for(
+                            result = await asyncio.wait_for(
                                 plan["tool_def"].handler(args),
                                 timeout=timeout_sec,
                             )
@@ -770,7 +773,7 @@ class ReactLoop:
                                 "tool timeout after %ss: tool=%s",
                                 timeout_sec, plan["tool_name"],
                             )
-                            return ToolResult(
+                            result = ToolResult(
                                 output="",
                                 error=(
                                     f"tool timeout after {timeout_sec}s: "
@@ -781,12 +784,16 @@ class ReactLoop:
                             self._logger.exception(
                                 "Tool handler failed: tool=%s", plan["tool_name"]
                             )
-                            return ToolResult(
+                            result = ToolResult(
                                 output="",
                                 error=(
                                     f"tool handler error: {type(e).__name__}: {e}"
                                 ),
                             )
+                        result.metadata["duration_ms"] = int(
+                            (time.monotonic() - _t0) * 1000
+                        )
+                        return result
 
                 serial_plans = [
                     p for p in plans if p["tool_name"] == "code_execution"
@@ -837,6 +844,10 @@ class ReactLoop:
                                 "tool_name": tool_name,
                                 "output": tool_result.output,
                                 "error": tool_result.error,
+                                # V1.2-6.3: 工具耗时(前端展示)
+                                "duration_ms": (
+                                    tool_result.metadata or {}
+                                ).get("duration_ms"),
                             },
                         )
 

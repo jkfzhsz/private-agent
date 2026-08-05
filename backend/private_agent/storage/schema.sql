@@ -29,7 +29,15 @@ CREATE TABLE sessions (
     -- 阶段三批次1(T1.2): 会话级权限模式(default/plan/acceptEdits/cautious/deny_all)
     permission_mode         VARCHAR(20) NOT NULL DEFAULT 'default'
                             CHECK (permission_mode IN
-                            ('default','plan','acceptEdits','cautious','deny_all'))
+                            ('default','plan','acceptEdits','cautious','deny_all')),
+    -- V1.1-3.1 会话管理闭环: 文件夹分组(NULL=未分组)
+    folder                  VARCHAR(100),
+    -- V1.1-3.5 上下文可控: 会话级记忆开关(默认开)
+    memory_enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+    -- V1.3-7.2 工作流自动化: 自动连续执行(用户发一条消息后自动多轮, 默认关)
+    auto_execute            BOOLEAN NOT NULL DEFAULT FALSE,
+    -- V1.3-7.2 工作流自动化: 自动执行最大轮数(默认 3)
+    max_rounds              INT NOT NULL DEFAULT 3
 );
 
 CREATE INDEX idx_sessions_status ON sessions(status) WHERE archived_at IS NULL;
@@ -54,6 +62,8 @@ CREATE TABLE messages (
     zone            VARCHAR(20) CHECK (zone IN ('frozen', 'stable', 'active')),
     compressed      BOOLEAN NOT NULL DEFAULT FALSE,
     compressed_from JSONB,
+    -- V1.1-3.3 消息精细化操作: 收藏标记
+    starred         BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
