@@ -924,6 +924,7 @@ interface UpdateInfo {
   releaseUrl?: string;
   notes?: string;
   failed?: boolean;
+  noRelease?: boolean;
   asset?: { name: string; url: string; sha256?: string };
 }
 
@@ -955,6 +956,9 @@ function UpdateSection(): JSX.Element {
         setResult("无法检查更新(请在打包版中使用)");
       } else if (r.failed) {
         setResult(`检查失败: ${r.notes || "未知错误"}`);
+      } else if (r.noRelease) {
+        // 2026-08-06: 仓库尚无任何 Release(未发布过) → 友好提示
+        setResult("暂无发布版本(更新源尚未发布; 施工侧需先执行发布脚本)");
       } else if (r.hasUpdate) {
         setResult(
           `发现新版本 ${r.latestVersion}(当前 ${r.currentVersion})${r.asset ? "\n安装包就绪, 点击下方「下载更新」一键升级" : ""}`

@@ -42,6 +42,8 @@ export interface UpdateCheckResult {
   releaseUrl: string;
   notes?: string;
   failed?: boolean;
+  /** 仓库尚无任何 Release(从未发布) */
+  noRelease?: boolean;
   /** 最新 release 的安装器资产(下载/安装用) */
   asset?: { name: string; url: string; size: number; sha256?: string };
 }
@@ -68,6 +70,11 @@ async function fetchLatestRelease(): Promise<{
     headers: { Accept: "application/vnd.github+json", "User-Agent": "private-agent" },
     signal: AbortSignal.timeout(15000),
   });
+  if (resp.status === 404) {
+    // 2026-08-06: 仓库尚无任何 Release(从未发布) → 视为"暂无发布版本",
+    // 不是错误(否则每次检查都报 HTTP 404)
+    return { tag_name: "", html_url: "", body: "", assets: [] };
+  }
   if (!resp.ok) throw new Error(`GitHub API HTTP ${resp.status}`);
   return (await resp.json()) as ReturnType<typeof fetchLatestRelease> extends Promise<
     infer T
@@ -100,6 +107,7 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
       latestVersion: latestVersion || "未知",
       releaseUrl: rel.html_url ?? "",
       notes: rel.body?.slice(0, 500) ?? "",
+      noRelease: latestVersion === "",  // 仓库无任何 Release
       asset: hasUpdate ? asset : undefined,
     };
   } catch (e) {
