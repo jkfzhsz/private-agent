@@ -1,18 +1,34 @@
-// V1.5 项-1(ADR-012 §3.4 M3) - 子任务卡片面板
+// V1.5 项-1(ADR-012 §3.4 M3 + 2026-08-06 对话流渲染) - 子任务卡片面板
 //
 // 展示父会话本轮委派的子代理状态: 状态徽标(running/succeeded/failed/
-// cancelled/停滞)、"最后心跳 Ns 前"计时、展开显示工具调用序列与最终结果。
+// cancelled/停滞)、"最后心跳 Ns 前"计时、展开显示子代理完整对话流。
 // 数据来源:
 // - WS 事件即时刷新(App.tsx handleMessage 维护 subagents state)
 // - GET /admin/subagents DB 轮询兜底(WS 断线丢事件时由 App 重建, R7)
+// - GET /admin/subagents/{id}/events **DB 读取完整对话流**(2026-08-06):
+//   子代理 ReactLoop 事件(思考链 thinking / tool_call / tool_result /
+//   final)已全量入子 session 的 react_events —— 与主对话流 replay 同源,
+//   展开卡片时按"读 LLM 对话"的原理从 DB 拉取渲染(不依赖 WS 实时事件)。
 // 心跳计时为本地估算(收到 heartbeat 事件的时间戳 + 每秒渲染刷新), 判定
 // 停滞以 DB/后端 watchdog 为准(后端推 subagent_stalled)。
 import { useEffect, useMemo, useState } from "react";
+import { adminFetch } from "../utils/apiClient";
+
+const API_BASE = "http://localhost:8765/admin";
 
 export interface SubagentEventItem {
   eventType: string;
   payload: Record<string, unknown>;
   ts: number;
+}
+
+/** 子代理完整对话流事件(DB react_events, 与主对话流同源) */
+export interface SubagentFlowEvent {
+  id: number;
+  turn: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  ts: string | null;
 }
 
 export type SubagentStatus =
@@ -34,8 +50,10 @@ export interface SubagentState {
   lastHeartbeatTs?: number;
   /** 后端判定心跳停滞(stalled_at 置位后推 subagent_stalled) */
   stalled?: boolean;
-  /** 工具调用序列(tool_call/tool_result, 精简记录) */
+  /** 工具调用序列(tool_call/tool_result, 精简记录; 完整流见 subSessionId) */
   events: SubagentEventItem[];
+  /** 子代理独立会话 id(DB react_events 完整对话流读取入口) */
+  subSessionId?: number;
   createdAt: number;
 }
 
@@ -85,13 +103,43 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
     return () => window.clearInterval(t);
   }, [list.length]);
 
+  // 2026-08-06: 完整对话流(DB react_events, 展开时拉取一次)
+  const [flow, setFlow] = useState<Record<number, SubagentFlowEvent[]>>({});
+  const [flowLoading, setFlowLoading] = useState<Set<number>>(new Set());
+
+  const loadFlow = (id: number): void => {
+    if (flow[id] || flowLoading.has(id)) return;
+    const sa = subagents[id];
+    if (!sa?.subSessionId) return; // 子 session 未创建(未开始执行)
+    setFlowLoading((prev) => new Set(prev).add(id));
+    adminFetch(`${API_BASE}/subagents/${id}/events`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: SubagentFlowEvent[]) => {
+        setFlow((prev) => ({ ...prev, [id]: rows }));
+      })
+      .catch(() => {
+        /* 拉取失败静默(保留 WS 精简事件) */
+      })
+      .finally(() => {
+        setFlowLoading((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      });
+  };
+
   if (list.length === 0) return null;
 
   const toggle = (id: number) => {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        loadFlow(id); // 展开时从 DB 读取完整对话流
+      }
       return next;
     });
   };
@@ -214,7 +262,16 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
                   <span style={{ color: "#94a3b8" }}>指令: </span>
                   {s.prompt.length > 180 ? `${s.prompt.slice(0, 180)}…` : s.prompt}
                 </div>
-                {s.events.length > 0 && (
+                {/* 2026-08-06: 完整对话流(DB 读取, 与主对话流 replay 同源) */}
+                {flowLoading.has(s.id) && (
+                  <div style={{ fontSize: 11, color: "#94a3b8", padding: "4px 0" }}>
+                    加载对话流…
+                  </div>
+                )}
+                {!flowLoading.has(s.id) && flow[s.id] && flow[s.id].length > 0 && (
+                  <SubagentFlowView events={flow[s.id]} />
+                )}
+                {!flowLoading.has(s.id) && !flow[s.id] && s.events.length > 0 && (
                   <div
                     style={{
                       maxHeight: 160,
@@ -289,6 +346,198 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
       })}
     </div>
   );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 子代理完整对话流视图(DB react_events, 2026-08-06)
+// 按 turn 分组渲染: 思考链(thinking 增量合并, 可折叠) → 工具调用/结果 →
+// 最终回复; 与主对话流的渲染逻辑同构。
+// ──────────────────────────────────────────────────────────────────────────────
+
+function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Element {
+  const [openThinking, setOpenThinking] = useState<Set<number>>(new Set());
+  // 按 turn 分组(保持时间顺序)
+  const groups = useMemo(() => {
+    const m = new Map<number, SubagentFlowEvent[]>();
+    for (const ev of events) {
+      const t = ev.turn ?? 0;
+      if (!m.has(t)) m.set(t, []);
+      m.get(t)!.push(ev);
+    }
+    return Array.from(m.entries());
+  }, [events]);
+
+  const toggleThinking = (turn: number) => {
+    setOpenThinking((prev) => {
+      const next = new Set(prev);
+      if (next.has(turn)) next.delete(turn);
+      else next.add(turn);
+      return next;
+    });
+  };
+
+  return (
+    <div
+      style={{
+        maxHeight: 320,
+        overflowY: "auto",
+        border: "1px solid #e2e8f0",
+        borderRadius: 8,
+        padding: 6,
+        background: "#fff",
+        marginBottom: 6,
+      }}
+    >
+      {groups.map(([turn, evs]) => {
+        // thinking 增量合并(reasoning 逐段)
+        const thinkingText = evs
+          .filter((e) => e.event_type === "thinking")
+          .map((e) =>
+            String(e.payload?.reasoning ?? e.payload?.content ?? "")
+          )
+          .join("");
+        const toolEvents = evs.filter(
+          (e) => e.event_type === "tool_call" || e.event_type === "tool_result"
+        );
+        const deltaText = evs
+          .filter((e) => e.event_type === "delta")
+          .map((e) => String(e.payload?.content ?? ""))
+          .join("");
+        const finalEv = evs.find((e) => e.event_type === "final");
+        const errorEv = evs.find((e) => e.event_type === "error");
+        const finalText = finalEv
+          ? String(finalEv.payload?.content ?? "")
+          : deltaText;
+        const isOpenT = openThinking.has(turn);
+        return (
+          <div key={turn} style={{ marginBottom: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+              <span
+                style={{
+                  fontSize: 10, padding: "1px 6px", borderRadius: 6,
+                  background: "#eef2ff", color: "#4f46e5", fontWeight: 600,
+                }}
+              >
+                第 {turn} 轮
+              </span>
+              {thinkingText && (
+                <span
+                  onClick={() => toggleThinking(turn)}
+                  style={{
+                    fontSize: 11, color: "#64748b", cursor: "pointer",
+                    padding: "1px 6px", borderRadius: 6, background: "#f8fafc",
+                    border: "1px solid #e2e8f0",
+                  }}
+                >
+                  💭 思考链 {isOpenT ? "▾" : "▸"}
+                </span>
+              )}
+              {toolEvents.length > 0 && (
+                <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                  🔧 ×{toolEvents.filter((e) => e.event_type === "tool_call").length}
+                </span>
+              )}
+            </div>
+            {isOpenT && thinkingText && (
+              <div
+                style={{
+                  fontSize: 11, color: "#64748b", background: "#f8fafc",
+                  border: "1px solid #e2e8f0", borderRadius: 6, padding: 6,
+                  marginBottom: 4, whiteSpace: "pre-wrap", maxHeight: 160,
+                  overflowY: "auto",
+                }}
+              >
+                {thinkingText}
+              </div>
+            )}
+            {toolEvents.map((ev, i) => (
+              <ToolFlowRow key={`${turn}-${i}`} ev={ev} />
+            ))}
+            {finalText && (
+              <div
+                style={{
+                  fontSize: 12, color: "#334155", whiteSpace: "pre-wrap",
+                  padding: "4px 6px", borderLeft: "3px solid #6366f1",
+                  background: "#f5f3ff", borderRadius: 4, marginTop: 2,
+                }}
+              >
+                {finalText}
+              </div>
+            )}
+            {errorEv && (
+              <div
+                style={{
+                  fontSize: 11, color: "#b91c1c", background: "#fef2f2",
+                  border: "1px solid #fecaca", borderRadius: 6, padding: 6,
+                  marginTop: 2,
+                }}
+              >
+                ❌ {String(errorEv.payload?.message ?? "")}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ToolFlowRow({ ev }: { ev: SubagentFlowEvent }): JSX.Element | null {
+  const p = ev.payload ?? {};
+  const [open, setOpen] = useState(false);
+  if (ev.event_type === "tool_call") {
+    let argsText = "";
+    try {
+      argsText = JSON.stringify(p.arguments ?? {}, null, 1);
+    } catch {
+      argsText = String(p.arguments ?? "");
+    }
+    return (
+      <div
+        onClick={() => setOpen(!open)}
+        style={{
+          fontSize: 11, padding: "3px 6px", cursor: "pointer",
+          borderLeft: "3px solid #3b82f6", background: "#eff6ff",
+          borderRadius: 4, marginBottom: 2,
+        }}
+      >
+        <span style={{ color: "#1d4ed8", fontWeight: 600 }}>🔧 {String(p.tool_name ?? "")}</span>
+        {open && argsText && (
+          <pre
+            style={{
+              margin: "4px 0 0", fontSize: 10, color: "#475569",
+              background: "#fff", padding: 4, borderRadius: 4,
+              whiteSpace: "pre-wrap", overflowX: "auto",
+            }}
+          >
+            {argsText}
+          </pre>
+        )}
+      </div>
+    );
+  }
+  if (ev.event_type === "tool_result") {
+    const out = String(p.output ?? "");
+    const err = String(p.error ?? "");
+    return (
+      <div
+        style={{
+          fontSize: 11, padding: "3px 6px",
+          borderLeft: "3px solid #10b981", background: "#f0fdf4",
+          borderRadius: 4, marginBottom: 2, whiteSpace: "pre-wrap",
+        }}
+      >
+        {err ? (
+          <span style={{ color: "#b91c1c" }}>❌ {err.slice(0, 400)}</span>
+        ) : (
+          <span style={{ color: "#047857" }}>
+            ✅ {out.length > 500 ? `${out.slice(0, 500)}…` : out}
+          </span>
+        )}
+      </div>
+    );
+  }
+  return null;
 }
 
 function formatEventBrief(ev: SubagentEventItem): string {

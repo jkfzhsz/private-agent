@@ -124,6 +124,9 @@ export default function SettingsView({ sessionId = 1 }: { sessionId?: number }):
         </div>
       </div>
 
+      {/* 2026-08-06: 数据库连接配置(打包版首次使用必配; 密码仅存本地 .env) */}
+      <DatabaseSection />
+
       <div className="glass-panel animate-in delay-2" style={{ padding: "20px 24px" }}>
         <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
           MCP 服务
@@ -172,6 +175,232 @@ export default function SettingsView({ sessionId = 1 }: { sessionId?: number }):
 
       {/* 关于与更新 */}
       <UpdateSection />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 数据库连接配置(2026-08-06 打包版首启能力)
+// 打包版 backend 只读(resourcesPath), .env 被排除; 数据库密码与密钥
+// (PA_DB_PASSWORD / PA_MASTER_KEY / PA_ADMIN_TOKEN)统一写入 Electron 用户配置
+// %APPDATA%\Private Agent\backend.env —— 保存后需重启应用生效(连接池启动时创建)。
+// ──────────────────────────────────────────────────────────────────────────────
+
+function DatabaseSection(): JSX.Element {
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("5432");
+  const [name, setName] = useState("");
+  const [user, setUser] = useState("");
+  const [password, setPassword] = useState("");
+  const [masterKey, setMasterKey] = useState("");
+  // 2026-08-06: 当前生效主密钥(只读展示, 供备份/迁移 —— 升级/重装不丢,
+  // 无需人工记忆)
+  const [currentMasterKey, setCurrentMasterKey] = useState("");
+  const [envFile, setEnvFile] = useState("");
+  const [passwordConfigured, setPasswordConfigured] = useState(false);
+  const [dbReachable, setDbReachable] = useState<boolean | null>(null);
+  const [status, setStatus] = useState("加载中…");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void adminFetch(`${API_BASE}/settings/database`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) {
+          setStatus("加载失败(后端未连接?)");
+          return;
+        }
+        setHost(d.host ?? "");
+        setPort(String(d.port ?? 5432));
+        setName(d.name ?? "");
+        setUser(d.user ?? "");
+        setEnvFile(d.env_file ?? "");
+        setCurrentMasterKey(d.master_key ?? "");
+        setPasswordConfigured(Boolean(d.password_configured));
+        setDbReachable(Boolean(d.db_reachable));
+        setStatus(
+          (d.password_configured ? "数据库密码已配置 ✓" : "数据库密码未配置 ⚠️") +
+            (d.master_key_configured ? " · 密钥稳定 ✓" : " · 密钥未配置 ⚠️")
+        );
+      })
+      .catch(() => setStatus("加载失败(后端未连接?)"));
+  }, []);
+
+  const save = async (): Promise<void> => {
+    // 2026-08-06: 密码已配置时可留空(不修改); 未配置且为空 → 阻止
+    if (!password.trim() && !passwordConfigured) {
+      window.alert("请输入数据库密码(首次配置必填; 已配置后可留空不修改)");
+      return;
+    }
+    setBusy(true);
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/database`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          host: host.trim(),
+          port: Number.parseInt(port, 10) || 5432,
+          name: name.trim(),
+          user: user.trim(),
+          password: password.trim() || undefined,
+          master_key: masterKey.trim() || undefined,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+      setEnvFile(data.env_file ?? envFile);
+      setPassword("");
+      setStatus(`✅ ${data.message ?? "已保存"} → ${data.env_file ?? ""}`);
+    } catch (e) {
+      setStatus(`保存失败: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
+      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+        🗄️ 数据库
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
+        PostgreSQL 连接配置(打包版首次使用必配; 密码仅写入本地用户配置, 不回显)
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+        {[
+          { label: "主机", value: host, set: setHost, ph: "127.0.0.1" },
+          { label: "端口", value: port, set: setPort, ph: "5432" },
+          { label: "库名", value: name, set: setName, ph: "private_agent" },
+          { label: "用户", value: user, set: setUser, ph: "postgres" },
+        ].map((f) => (
+          <label key={f.label} style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4 }}>
+            {f.label}
+            <input
+              value={f.value}
+              placeholder={f.ph}
+              onChange={(e) => f.set(e.target.value)}
+              style={{
+                fontSize: 13, padding: "6px 10px", borderRadius: 8,
+                border: "1px solid rgba(148,163,184,0.4)", background: "#fff",
+                color: "var(--text-primary)", outline: "none",
+              }}
+            />
+          </label>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+        <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            密码
+            {/* 2026-08-06: 密码配置状态徽标(空框不再误导) */}
+            <span
+              style={{
+                fontSize: 10, padding: "1px 8px", borderRadius: 8,
+                background: passwordConfigured ? "#d1fae5" : "#fef3c7",
+                color: passwordConfigured ? "#047857" : "#b45309",
+                fontWeight: 600,
+              }}
+            >
+              {passwordConfigured ? "✓ 已配置" : "未配置"}
+            </span>
+          </span>
+          <input
+            type="password"
+            value={password}
+            placeholder={
+              passwordConfigured
+                ? "已配置(留空保存 = 不修改密码)"
+                : "PostgreSQL 密码(首次配置必填)"
+            }
+            onChange={(e) => setPassword(e.target.value)}
+            style={{
+              fontSize: 13, padding: "6px 10px", borderRadius: 8,
+              border: "1px solid rgba(148,163,184,0.4)", background: "#fff",
+              color: "var(--text-primary)", outline: "none",
+            }}
+          />
+        </label>
+        <button
+          onClick={() => void save()}
+          disabled={busy}
+          style={{
+            marginTop: 20, fontSize: 13, padding: "6px 18px", borderRadius: 8,
+            border: "1px solid #6366f1", background: "#6366f1", color: "#fff",
+            cursor: busy ? "not-allowed" : "pointer", fontWeight: 600, opacity: busy ? 0.6 : 1,
+          }}
+        >
+          {busy ? "保存中…" : "保存"}
+        </button>
+      </div>
+      <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4, marginBottom: 4 }}>
+        AES 主密钥(可选)
+        <input
+          type="password"
+          value={masterKey}
+          placeholder="PA_MASTER_KEY(64位hex, 留空自动生成; 保留旧环境密钥以解密已存 API Key)"
+          onChange={(e) => setMasterKey(e.target.value)}
+          style={{
+            fontSize: 13, padding: "6px 10px", borderRadius: 8,
+            border: "1px solid rgba(148,163,184,0.4)", background: "#fff",
+            color: "var(--text-primary)", outline: "none", fontFamily: "var(--font-mono)",
+          }}
+        />
+      </label>
+      {currentMasterKey && (
+        <div
+          style={{
+            fontSize: 12, color: "var(--text-secondary)", display: "flex",
+            alignItems: "center", gap: 8, marginBottom: 4,
+          }}
+        >
+          <span style={{ flexShrink: 0 }}>🔑 当前主密钥(本机已持久化, 升级/重装不丢):</span>
+          <code
+            style={{
+              flex: 1, fontSize: 11, fontFamily: "var(--font-mono)",
+              background: "#f8fafc", border: "1px solid #e2e8f0",
+              borderRadius: 6, padding: "4px 8px", overflow: "hidden",
+              textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}
+            title={currentMasterKey}
+          >
+            {currentMasterKey}
+          </code>
+          <button
+            onClick={() => {
+              void navigator.clipboard.writeText(currentMasterKey);
+              setStatus("主密钥已复制(迁移/备份用)");
+            }}
+            style={{
+              fontSize: 11, padding: "4px 10px", borderRadius: 6,
+              border: "1px solid #cbd5e1", background: "#fff", cursor: "pointer",
+              color: "#475569", flexShrink: 0,
+            }}
+          >
+            复制
+          </button>
+        </div>
+      )}
+      <div style={{ fontSize: 12, marginTop: 4, color: status.startsWith("保存失败") ? "var(--danger-text)" : "var(--text-tertiary)" }}>
+        {status}
+      </div>
+      {/* 2026-08-06: 数据库连接状态(加载时探测; 未配置/未重启时不可达属正常) */}
+      {dbReachable !== null && (
+        <div
+          style={{
+            fontSize: 11, marginTop: 4,
+            color: dbReachable ? "#047857" : "#b45309",
+            fontWeight: 500,
+          }}
+        >
+          {dbReachable
+            ? "🟢 数据库连接正常(后端已连上 PostgreSQL)"
+            : "🟠 数据库未连接(首次配置后需重启应用生效; 或密码/主机有误)"}
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 6 }}>
+        ⚠️ 保存后需重启应用生效(后端数据库连接池在启动时创建)
+        {envFile ? ` · 配置位置: ${envFile}` : ""}
+      </div>
     </div>
   );
 }
@@ -682,32 +911,53 @@ function SkillsSection(): JSX.Element {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 关于与更新: 版本信息 + 检查更新
+// 关于与更新: 版本信息 + 检查更新 + 应用内一键升级(2026-08-06)
+// 流程: 检查 → 发现新版本(施工文件夹发布) → 下载(进度) → 静默安装重启;
+// 升级不触碰 %APPDATA%\Private Agent 用户配置与数据库(数据/记忆/密钥/技能/
+// MCP/LLM 配置全部保留)。
 // ──────────────────────────────────────────────────────────────────────────────
+
+interface UpdateInfo {
+  hasUpdate?: boolean;
+  currentVersion?: string;
+  latestVersion?: string;
+  releaseUrl?: string;
+  notes?: string;
+  failed?: boolean;
+  asset?: { name: string; url: string; sha256?: string };
+}
 
 function UpdateSection(): JSX.Element {
   const [checking, setChecking] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [installerPath, setInstallerPath] = useState("");
+
+  // 订阅下载进度(主进程推送)
+  useEffect(() => {
+    const off = window.pa?.onUpdateProgress?.((p) => {
+      setProgress(p.percent ?? 0);
+    });
+    return () => off?.();
+  }, []);
 
   const runCheck = async (): Promise<void> => {
     setChecking(true);
     setResult(null);
+    setInstallerPath("");
+    setProgress(null);
     try {
-      const r = (await window.pa?.checkForUpdates?.()) as {
-        hasUpdate?: boolean;
-        currentVersion?: string;
-        latestVersion?: string;
-        releaseUrl?: string;
-        notes?: string;
-        failed?: boolean;
-      };
+      const r = (await window.pa?.checkForUpdates?.()) as UpdateInfo;
+      setUpdateInfo(r ?? null);
       if (!r) {
         setResult("无法检查更新(请在打包版中使用)");
       } else if (r.failed) {
         setResult(`检查失败: ${r.notes || "未知错误"}`);
       } else if (r.hasUpdate) {
         setResult(
-          `发现新版本 ${r.latestVersion}(当前 ${r.currentVersion})${r.releaseUrl ? `\n下载: ${r.releaseUrl}` : ""}`
+          `发现新版本 ${r.latestVersion}(当前 ${r.currentVersion})${r.asset ? "\n安装包就绪, 点击下方「下载更新」一键升级" : ""}`
         );
       } else {
         setResult(`当前已是最新版本 v${r.currentVersion}${r.latestVersion ? `(远端 ${r.latestVersion})` : ""}`);
@@ -719,6 +969,46 @@ function UpdateSection(): JSX.Element {
     }
   };
 
+  const runDownload = async (): Promise<void> => {
+    if (!updateInfo?.asset) {
+      setResult("未找到安装包资产(发布者未上传?)");
+      return;
+    }
+    setDownloading(true);
+    setProgress(0);
+    setResult("正在下载更新…");
+    try {
+      const r = (await window.pa?.downloadUpdate?.(updateInfo.asset)) as {
+        path: string;
+        size: number;
+        sha256: string;
+        error?: string;
+      };
+      if (!r || r.error) {
+        setResult(`下载失败: ${r?.error || "未知错误"}`);
+      } else {
+        setInstallerPath(r.path);
+        setResult(`下载完成(${(r.size / 1024 / 1024).toFixed(1)} MB), sha256 校验通过 ✓`);
+      }
+    } catch (e) {
+      setResult(`下载出错: ${String(e)}`);
+    } finally {
+      setDownloading(false);
+      setProgress(null);
+    }
+  };
+
+  const runInstall = async (): Promise<void> => {
+    if (!installerPath) return;
+    setResult("正在静默安装, 完成后将自动重启新版本…");
+    const r = (await window.pa?.installUpdate?.(installerPath)) as
+      | { ok: boolean; error?: string }
+      | undefined;
+    if (!r?.ok) {
+      setResult(`安装启动失败: ${r?.error || "未知错误"}`);
+    }
+  };
+
   return (
     <div className="glass-panel" style={{ padding: 16 }}>
       <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>关于与更新</div>
@@ -727,7 +1017,7 @@ function UpdateSection(): JSX.Element {
           className="btn-primary"
           style={{ padding: "8px 18px", fontSize: 13 }}
           onClick={() => void runCheck()}
-          disabled={checking}
+          disabled={checking || downloading}
         >
           {checking ? "检查中..." : "检查更新"}
         </button>
@@ -735,10 +1025,52 @@ function UpdateSection(): JSX.Element {
           当前版本 v{window.pa?.versions?.app || "0.1.0"}
         </span>
       </div>
+      {updateInfo?.hasUpdate && !installerPath && (
+        <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            className="btn-primary"
+            style={{ padding: "8px 18px", fontSize: 13 }}
+            onClick={() => void runDownload()}
+            disabled={downloading}
+          >
+            {downloading ? `下载中 ${progress ?? 0}%` : "下载更新"}
+          </button>
+          {downloading && (
+            <div
+              style={{
+                width: 200, height: 8, borderRadius: 4, background: "#e2e8f0",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  height: "100%", width: `${progress ?? 0}%`,
+                  background: "linear-gradient(90deg,#818cf8,#6366f1)",
+                  transition: "width 0.3s",
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+      {installerPath && (
+        <button
+          className="btn-primary"
+          style={{ padding: "8px 18px", fontSize: 13, marginTop: 10 }}
+          onClick={() => void runInstall()}
+        >
+          ⬆ 安装并重启(升级完成)
+        </button>
+      )}
       {result && (
         <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", marginTop: 10, color: "var(--text-secondary)" }}>
           {result}
         </pre>
+      )}
+      {updateInfo?.notes && (
+        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 6, whiteSpace: "pre-wrap" }}>
+          更新说明: {updateInfo.notes}
+        </div>
       )}
     </div>
   );

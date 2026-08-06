@@ -451,3 +451,83 @@ def test_watchdog_emits_react_events():
             await conn.close()
 
     asyncio.run(_run())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2026-08-06: 子代理完整对话流端点(DB 读取, 与主对话流 replay 同源)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_subagent_events_endpoint():
+    """GET /admin/subagents/{id}/events: 返回子 session 完整事件(含 payload);
+    未创建子 session → []; 不存在 → 404。"""
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            parent = await _new_parent_session(conn)
+            # 子 session + 子代理(回填 session_id)
+            sub_sess = await conn.fetchval(
+                "INSERT INTO sessions (kind, title) VALUES ('sub', 'sub-x') RETURNING id"
+            )
+            sid = await conn.fetchval(
+                "INSERT INTO subagents (session_id, parent_turn, parent_task, "
+                "prompt, status, result) VALUES ($1, 1, 't1', 'do it', "
+                "'succeeded', 'done') RETURNING id",
+                sub_sess,
+            )
+            # 子 session 的完整事件流(思考链/工具调用/结果/final)
+            await conn.execute(
+                "INSERT INTO react_events (session_id, turn, event_type, payload) VALUES "
+                "($1, 1, 'thinking', '{\"reasoning\": \"plan...\"}'), "
+                "($1, 1, 'tool_call', '{\"tool_name\": \"web_search\", \"arguments\": {\"q\": \"x\"}}'), "
+                "($1, 1, 'tool_result', '{\"output\": \"result x\"}'), "
+                "($1, 1, 'final', '{\"content\": \"answer\"}')",
+                sub_sess,
+            )
+            return parent, sid
+        finally:
+            await conn.close()
+
+    parent, sid = asyncio.run(_run())
+    from private_agent.main import app
+
+    client = TestClient(app)
+    headers = {"X-Admin-Token": "test-admin-token"}
+    # 完整事件流: 升序 + 完整 payload
+    ev = client.get(f"/admin/subagents/{sid}/events", headers=headers)
+    assert ev.status_code == 200
+    evs = ev.json()
+    types = [e["event_type"] for e in evs]
+    assert types == ["thinking", "tool_call", "tool_result", "final"], types
+    # payload 完整(非摘要): tool_call 含 arguments
+    tc = next(e for e in evs if e["event_type"] == "tool_call")
+    assert tc["payload"]["tool_name"] == "web_search"
+    assert tc["payload"]["arguments"]["q"] == "x"
+    # 不存在的子代理 → 404
+    no_sess = client.get("/admin/subagents/999999/events", headers=headers)
+    assert no_sess.status_code == 404
+    # 未回填(指向父会话, kind='main')→ [] (防误读父会话事件)
+    async def _seed_pending() -> None:
+        c = await asyncpg.connect(TEST_DSN)
+        try:
+            await c.execute(
+                "INSERT INTO subagents (session_id, parent_turn, parent_task, "
+                "prompt, status) VALUES ($1, 1, 't-pending', 'p', 'pending')",
+                parent,
+            )
+        finally:
+            await c.close()
+
+    asyncio.run(_seed_pending())
+    pend = client.get("/admin/subagents", headers=headers)
+    assert pend.status_code == 422  # 缺 session_id 参数 → FastAPI 422
+    resp_p = client.get(
+        f"/admin/subagents?session_id={parent}&parent_turn=1", headers=headers
+    )
+    pending_id = next(
+        r["id"] for r in resp_p.json() if r["parent_task"] == "t-pending"
+    )
+    ev_p = client.get(f"/admin/subagents/{pending_id}/events", headers=headers)
+    assert ev_p.status_code == 200
+    assert ev_p.json() == []

@@ -840,6 +840,8 @@ export default function App(): JSX.Element {
               result: r.result ?? undefined,
               error: r.error ?? undefined,
               toolCalls: Number(r.tool_calls ?? 0),
+              // 2026-08-06: 子代理独立会话 id(展开时读取完整对话流)
+              subSessionId: r.sub_session_id ?? undefined,
               // WS 实时状态优先(心跳/stalled 以最近一次为准)
               lastHeartbeatTs: existing?.lastHeartbeatTs,
               stalled: existing?.stalled ?? !!r.stalled_at,
