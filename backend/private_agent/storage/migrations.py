@@ -41,9 +41,11 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
             and "tool_confirmation_required" in def_text
             and "memory_evicted" in def_text
             and "tool_loop_detected" in def_text
+            # V1.5 项-1(ADR-012 M4): subagent 事件类型(新部署 schema.sql 已含)
+            and "subagent" in def_text
         ):
             continue
-        # 旧 CHECK, DROP 后 ADD 新 CHECK(18 种, 含权限确认/淘汰/循环检测)
+        # 旧 CHECK, DROP 后 ADD 新 CHECK(19 种, 含子代理可观测事件)
         conname = r["conname"]
         await conn.execute(f'ALTER TABLE react_events DROP CONSTRAINT "{conname}"')
         await conn.execute(
@@ -56,7 +58,8 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
                 'injection_alert', 'injection_blocked',
                 'tool_error', 'delta',
                 'tool_confirmation_required', 'tool_confirmation_result',
-                'tool_loop_detected'
+                'tool_loop_detected',
+                'subagent'
             ))
             """
         )
@@ -167,6 +170,59 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     )
     await conn.execute(
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_rounds INT NOT NULL DEFAULT 3"
+    )
+    # V1.5 项-5 流程级暂停: sessions.paused 生成中挂起标记(与 status 正交)
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS paused BOOLEAN NOT NULL DEFAULT FALSE"
+    )
+    # V1.5 项-1 子代理(ADR-012 §3.1): sessions.kind 会话类型(main/sub),
+    # 老部署补列; 新部署 schema.sql 已含
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS kind "
+        "VARCHAR(10) NOT NULL DEFAULT 'main' "
+        "CHECK (kind IN ('main', 'sub'))"
+    )
+    # V1.5 项-1 子代理: subagents 表(ADR-012 §3.1 完整 DDL, 幂等)
+    await _migrate_subagents_table(conn)
+
+
+async def _migrate_subagents_table(conn: asyncpg.Connection) -> None:
+    """V1.5 项-1(ADR-012 §3.1): 创建 subagents 表(幂等, 老部署补建)。
+
+    与 schema.sql 中第 14 张表完全同构; 已有库(老部署)直接补建,
+    新部署 schema.sql 已含 → IF NOT EXISTS 跳过。索引同步补建。
+    """
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subagents (
+            id            BIGSERIAL PRIMARY KEY,
+            session_id    BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            parent_turn   INT NOT NULL,
+            parent_task   TEXT,
+            prompt        TEXT NOT NULL,
+            model_id      VARCHAR(50),
+            status        VARCHAR(20) NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending','running','succeeded','failed','cancelled')),
+            result        TEXT,
+            tool_calls    INT NOT NULL DEFAULT 0,
+            error         TEXT,
+            last_heartbeat_at TIMESTAMPTZ,
+            started_at        TIMESTAMPTZ,
+            stalled_at        TIMESTAMPTZ,
+            finished_at       TIMESTAMPTZ,
+            restart_attempts  INT NOT NULL DEFAULT 0,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_subagents_session "
+        "ON subagents(session_id, parent_turn)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_subagents_heartbeat "
+        "ON subagents(status, last_heartbeat_at) WHERE status = 'running'"
     )
 
 

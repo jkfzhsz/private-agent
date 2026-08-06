@@ -93,6 +93,46 @@ _session_locks: dict[int, "asyncio.Lock"] = {}
 _session_tasks: dict[int, "set[asyncio.Task]"] = {}
 # V2 P1: per-session 权限确认管理器(蓝图 §5.12, tool_confirmation 消息 resolve)
 _permission_managers: dict[int, "PermissionManager"] = {}
+# V1.5 项-5: per-session 流程级暂停控制器(生成中挂起, 区别于 cancel 终止)
+_pause_controls: dict[int, "_PauseController"] = {}
+
+
+class _PauseController:
+    """会话级流程暂停控制器(项-5)。
+
+    暂停语义: 生成中用户点"暂停" → is_paused()=True + event 清空,
+    ReactLoop 迭代开始检查时产出 turn_paused 并 await wait() 挂起;
+    "继续" → is_paused()=False + event 置位, 挂起的循环继续。
+    初始状态为"未暂停"(event 置位, wait() 立即返回)。
+    """
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self._event.set()  # 默认未暂停
+        self._paused = False
+
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def pause(self) -> None:
+        self._paused = True
+        self._event.clear()
+
+    def resume(self) -> None:
+        self._paused = False
+        self._event.set()
+
+    async def wait(self) -> None:
+        await self._event.wait()
+
+
+def _get_pause_controller(session_id: int) -> _PauseController:
+    """惰性创建会话级暂停控制器。"""
+    ctrl = _pause_controls.get(session_id)
+    if ctrl is None:
+        ctrl = _PauseController()
+        _pause_controls[session_id] = ctrl
+    return ctrl
 
 
 def _get_permission_manager(session_id: int):
@@ -556,6 +596,84 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "session_id": session_id,
                         "message": "已停止生成",
                     })
+            elif msg_type == "resume":
+                # V1.5 项-5/项-4: resume 双语义, 按会话状态区分 ——
+                # 1) 会话运行中 paused=True → 流程级"继续"(解除挂起)
+                # 2) 会话 interrupted → 断点恢复(从最新 checkpoint 原地续跑)
+                try:
+                    session_id = int(msg["session_id"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid resume: session_id (int) required",
+                    })
+                    continue
+                if session_id <= 0:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid resume: session_id>0 required",
+                    })
+                    continue
+                ctrl = _pause_controls.get(session_id)
+                if ctrl is not None and ctrl.is_paused():
+                    # 流程级继续: 解除挂起, ReactLoop 挂起点 wait() 返回
+                    ctrl.resume()
+                    try:
+                        conn2 = await db.connect()
+                        try:
+                            await conn2.execute(
+                                "UPDATE sessions SET paused=FALSE, "
+                                "updated_at=now() WHERE id=$1",
+                                session_id,
+                            )
+                        finally:
+                            await conn2.close()
+                    except Exception:
+                        pass  # DB 更新失败不阻塞继续
+                    await ws.send_json({
+                        "type": "turn_resumed",
+                        "session_id": session_id,
+                        "message": "已继续生成",
+                    })
+                    continue
+                _spawn_user_message_task(ws, session_id, "", resume=True)
+            elif msg_type == "pause":
+                # V1.5 项-5: 流程级暂停(生成中挂起, 区别于 cancel 终止)。
+                # 生效时机: 当前迭代完成后、下一次迭代开始前(ReactLoop
+                # 迭代开始检查 is_paused)。
+                try:
+                    session_id = int(msg["session_id"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid pause: session_id (int) required",
+                    })
+                    continue
+                if session_id <= 0:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "invalid pause: session_id>0 required",
+                    })
+                    continue
+                ctrl = _get_pause_controller(session_id)
+                ctrl.pause()
+                try:
+                    conn2 = await db.connect()
+                    try:
+                        await conn2.execute(
+                            "UPDATE sessions SET paused=TRUE, "
+                            "updated_at=now() WHERE id=$1",
+                            session_id,
+                        )
+                    finally:
+                        await conn2.close()
+                except Exception:
+                    pass
+                await ws.send_json({
+                    "type": "turn_paused",
+                    "session_id": session_id,
+                    "message": "已暂停(当前迭代完成后生效), 点击继续恢复",
+                })
             elif msg_type == "tool_confirmation":
                 # V2 P1: 权限确认响应(蓝图 §5.12, 用户点击同意/拒绝)
                 try:
@@ -626,15 +744,20 @@ def _spawn_user_message_task(
     content: str,
     auto_execute: bool | None = None,
     max_rounds: int | None = None,
+    resume: bool = False,
 ) -> asyncio.Task:
     """V1.1-3.3: 用户消息/重生成共用的任务注册(create_task + task 集合管理)。
 
     run_turn 阻塞期间 WS 主循环仍可接收 tool_confirmation 等消息(V2 P1 B2 修复);
     同会话并发任务并存, 各自可被 cancel 命中; done 后从集合移除(T-3)。
     V1.3-7.2: 透传 auto_execute/max_rounds(会话级自动连续执行覆盖)。
+    V1.5 项-4: resume=True 时以断点恢复模式执行(查 checkpoint → 回滚残留 →
+    原地续跑中断轮)。
     """
     task = asyncio.create_task(
-        _handle_user_message(ws, session_id, content, auto_execute, max_rounds)
+        _handle_user_message(
+            ws, session_id, content, auto_execute, max_rounds, resume
+        )
     )
     _session_tasks.setdefault(session_id, set()).add(task)
 
@@ -655,11 +778,17 @@ async def _handle_user_message(
     content: str,
     auto_execute: bool | None = None,
     max_rounds: int | None = None,
+    resume: bool = False,
 ) -> None:
     """AC-1: 用户消息触发 ReAct 循环(蓝图 §2.4/§2.6)。
 
     V2 P1(B2 修复): 由 ws_endpoint create_task 异步调用 —— run_turn 期间
     WS 主循环可继续接收 tool_confirmation 等消息。
+
+    V1.5 项-4: resume=True 时执行断点恢复 —— 读最新 checkpoint → 清理中断
+    轮残留(assistant/tool 消息 + react_events) → 会话置 active → 构造
+    ReactLoop(resume_from_turn=checkpoint.turn+1) → run_turn(resume=True)
+    原地续跑该轮。中断轮 user 消息保留(续跑沿用同一 turn 号)。
 
     - per-session 运行锁: 同会话并发 user_message 串行(防 turn 冲突)
     - set_sandbox_config 注入(B1 修复): code_execution 工具依赖模块级全局,
@@ -692,10 +821,94 @@ async def _handle_user_message(
                     "INSERT INTO sessions (id) VALUES ($1)",
                     session_id,
                 )
+            # V1.5 项-4: 断点恢复前置处理(必须在 reload_from_db 之前清理
+            # 中断轮残留, 否则内存上下文会加载半轮消息)
+            # 流程: 读最新 checkpoint → 回滚中断轮(清 assistant/tool 残留 +
+            # react_events 半轮事件, 保留 user 消息) → 会话置 active →
+            # ReactLoop 以 resume_from_turn=checkpoint.turn+1 原地续跑。
+            resume_from_turn = None
+            if resume:
+                ckpt = await CheckpointManager.load_latest_checkpoint(
+                    conn, session_id
+                )
+                if ckpt is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "resume_failed: 该会话无 checkpoint, 无法断点恢复",
+                    })
+                    return
+                ckpt_turn = int(ckpt["turn"])
+                resume_from_turn = ckpt_turn + 1
+                # 1) 回滚中断轮残留消息(保留 user, 清 assistant/tool ——
+                #    工具执行中断可能留下无 assistant 配对的 tool 消息,
+                #    不清理会导致下次模型调用 400 pairing 错误)
+                await conn.execute(
+                    """DELETE FROM messages
+                       WHERE session_id = $1 AND turn > $2
+                         AND role IN ('assistant', 'tool')""",
+                    session_id, ckpt_turn,
+                )
+                # 2) 回滚中断轮 react_events(前端 replay 不拉到半轮事件)
+                await conn.execute(
+                    "DELETE FROM react_events WHERE session_id = $1 AND turn > $2",
+                    session_id, ckpt_turn,
+                )
+                # 3) 中断轮 user 消息缺失(任务创建后立即被取消)时补恢复提示
+                has_user = await conn.fetchval(
+                    """SELECT 1 FROM messages
+                       WHERE session_id=$1 AND turn=$2 AND role='user'
+                       LIMIT 1""",
+                    session_id, resume_from_turn,
+                )
+                if not has_user:
+                    await conn.execute(
+                        """INSERT INTO messages (session_id, turn, role, content)
+                           VALUES ($1, $2, 'user', $3)""",
+                        session_id, resume_from_turn,
+                        "[resume] 请继续完成之前中断的任务(若已完成请简要说明)。",
+                    )
+                # 4) 会话状态回 active(解除 interrupted 标记)
+                await conn.execute(
+                    "UPDATE sessions SET status='active', paused=FALSE, "
+                    "updated_at=now() WHERE id=$1",
+                    session_id,
+                )
+                _logger.info(
+                    "resume session=%s from checkpoint turn=%s (resume turn=%s)",
+                    session_id, ckpt_turn, resume_from_turn,
+                )
             # frozen_tools: 内置白名单(与 activate 同源, hash 锁定)
             # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
             frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
             tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
+            # V1.5 项-1(ADR-012 §3.5): 附加 delegate_subtask 工具。
+            # - 闭包注入当轮上下文(conn/cfg/session_id/event_sink/tools),
+            #   多会话并发无模块级全局串扰;
+            # - 不进 frozen_tools → 不参与 frozen hash(工具演进不触发重建);
+            # - 嵌套深度: 传入闭包的 tools=tools 在求值时仍是"附加前"的旧
+            #   列表(不含 delegate) → 子代理继承的工具列表天然不含本工具,
+            #   嵌套深度恒 1(< max_nesting_depth=2)。
+            from private_agent.tools.builtins.delegate_subtask import (
+                build_delegate_subtask_tool,
+            )
+
+            tools = [
+                *tools,
+                build_delegate_subtask_tool(
+                    conn=conn,
+                    cfg=cfg,
+                    session_id=session_id,
+                    event_sink=lambda ev: ws.send_json(ev),
+                    tools=tools,
+                    system_prompt_factory=(
+                        lambda c, sid: _get_system_prompt(cfg, sid, c)
+                    ),
+                    adapter_factory=(
+                        lambda m: _build_session_adapter(cfg, m)
+                    ),
+                    compress_adapter=_build_compress_adapter(cfg),
+                ),
+            ]
             # V1.1-3.5: 会话级记忆开关(关闭 → 不注入/不提取记忆, 传 None)
             memory_enabled = await conn.fetchval(
                 "SELECT memory_enabled FROM sessions WHERE id = $1", session_id
@@ -810,6 +1023,10 @@ async def _handle_user_message(
                 compress_adapter=_build_compress_adapter(cfg),
                 # 阶段三批次2(B-1): Hooks 调度器(config hooks 为空 → None 零回归)
                 hook_runner=_build_hook_runner(cfg),
+                # V1.5 项-4: 断点恢复起始轮(checkpoint.turn+1, resume 模式用)
+                resume_from_turn=resume_from_turn,
+                # V1.5 项-5: 流程级暂停控制器(迭代开始检查, 挂起等待)
+                pause_controller=_get_pause_controller(session_id),
             )
             # 阶段三批次1(T1.2/T3.1): 同步会话级权限模式 + Skill 权限规则
             await _sync_permission_manager(
@@ -834,7 +1051,12 @@ async def _handle_user_message(
             max_rounds = int(max_rounds or 0)
             while True:
                 rounds += 1
-                await loop.run_turn(run_content)
+                if resume:
+                    # V1.5 项-4: 断点恢复模式 —— 不追加 user 消息,
+                    # 从 resume_from_turn 原地续跑中断轮; 仅跑一轮
+                    await loop.run_turn(resume=True)
+                else:
+                    await loop.run_turn(run_content)
                 # 事件已通过 event_sink 实时推送, 无需再排空 event_queue
                 await ws.send_json({
                     "type": "turn_end",
@@ -846,6 +1068,9 @@ async def _handle_user_message(
                     await memory_mgr.maybe_extract(
                         session_id=session_id, current_turn=loop._turn,
                     )
+                # 断点恢复只续跑中断轮, 不触发 auto_execute 多轮
+                if resume:
+                    break
                 # 自动执行: 已到上限或未开启则停止
                 if not auto_execute or rounds >= max_rounds:
                     break
@@ -919,6 +1144,20 @@ async def _on_startup() -> None:
             _logger.info("DB schema migrated (idempotent)")
             # 从 config_runtime 恢复 AES 加密的 API key → 环境变量(设置页录入后重启仍生效)
             await _restore_keys_from_runtime()
+            # V1.5 项-1(ADR-012 §3.3e): 进程重启后清理 running 且心跳过期的
+            # 僵尸子代理(统一置 failed(heartbeat_timeout_after_restart), 幂等)
+            try:
+                from private_agent.core.subagent import cleanup_zombies_on_startup
+
+                async with db._pool.acquire() as conn:
+                    n = await cleanup_zombies_on_startup(conn, cfg)
+                if n:
+                    _logger.warning(
+                        "startup: cleaned %d zombie subagent(s) "
+                        "(heartbeat_timeout_after_restart)", n,
+                    )
+            except Exception:
+                _logger.exception("subagent zombie cleanup failed at startup")
         except Exception as e:
             _logger.warning(f"DB schema migration failed at startup: {e}")
     from apscheduler.schedulers.asyncio import AsyncIOScheduler

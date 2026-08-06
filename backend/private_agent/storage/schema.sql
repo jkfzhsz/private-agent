@@ -37,7 +37,15 @@ CREATE TABLE sessions (
     -- V1.3-7.2 工作流自动化: 自动连续执行(用户发一条消息后自动多轮, 默认关)
     auto_execute            BOOLEAN NOT NULL DEFAULT FALSE,
     -- V1.3-7.2 工作流自动化: 自动执行最大轮数(默认 3)
-    max_rounds              INT NOT NULL DEFAULT 3
+    max_rounds              INT NOT NULL DEFAULT 3,
+    -- V1.5 项-5 流程级暂停: 生成中用户"暂停"挂起轮次(区别于 cancel 终止;
+    -- 与 status 正交 —— paused=True 时 status 仍为 active, resume 后继续)
+    paused                  BOOLEAN NOT NULL DEFAULT FALSE,
+    -- V1.5 项-1 子代理(ADR-012 §3.1 决策 A): 会话类型。
+    -- main=普通对话会话; sub=子代理独立会话(委派产生, 复用 ReactLoop 全部
+    -- 上下文/压缩/checkpoint 机制, list_sessions 过滤 sub 防污染历史列表 R9)
+    kind                    VARCHAR(10) NOT NULL DEFAULT 'main'
+                            CHECK (kind IN ('main', 'sub'))
 );
 
 CREATE INDEX idx_sessions_status ON sessions(status) WHERE archived_at IS NULL;
@@ -103,7 +111,9 @@ CREATE TABLE react_events (
         'injection_alert', 'injection_blocked',
         'tool_error', 'delta',
         'tool_confirmation_required', 'tool_confirmation_result',
-        'tool_loop_detected'
+        'tool_loop_detected',
+        -- V1.5 项-1(ADR-012 M4): 子代理可观测事件(stalled/kill/zombie/心跳故障)
+        'subagent'
     )),
     payload     JSONB NOT NULL,
     created_at  TIMESTAMPTZ DEFAULT now()
@@ -277,3 +287,33 @@ CREATE TABLE skills (
 );
 
 CREATE INDEX idx_skills_enabled ON skills(is_enabled) WHERE is_enabled = TRUE;
+
+-- ==============================================================================
+-- 14. subagents - 子代理/任务委派(ADR-012 §3.1 完整 DDL, V1.5 项-1)
+-- ==============================================================================
+CREATE TABLE subagents (
+    id            BIGSERIAL PRIMARY KEY,
+    session_id    BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    parent_turn   INT NOT NULL,              -- 主会话触发委派的轮次
+    parent_task   TEXT,                      -- 主代理分配的任务 id(同轮可多个)
+    prompt        TEXT NOT NULL,             -- 委派指令(模型生成)
+    model_id      VARCHAR(50),               -- 子代理模型(默认继承主会话)
+    status        VARCHAR(20) NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','running','succeeded','failed','cancelled')),
+    result        TEXT,                      -- 最终结果(final content / error)
+    tool_calls    INT NOT NULL DEFAULT 0,    -- 子代理工具调用次数(统计)
+    error         TEXT,                      -- 失败原因枚举(§3.6): heartbeat_timeout /
+                  --   heartbeat_timeout_after_restart / max_lifetime_exceeded / 异常栈摘要
+    -- 监听/心跳(统一 UTC, 禁止本地时区 —— 多实例时钟偏移会误判超时 R3):
+    last_heartbeat_at TIMESTAMPTZ,           -- 心跳上报; 初始 NULL; 首次心跳后刷新
+    started_at        TIMESTAMPTZ,           -- running 置位时写入(硬总时长计时起点)
+    stalled_at        TIMESTAMPTZ,           -- watchdog 判 stale 时写入(grace 宽限起点)
+    finished_at       TIMESTAMPTZ,           -- 终态时刻(统一记录)
+    restart_attempts  INT NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_subagents_session ON subagents(session_id, parent_turn);
+CREATE INDEX idx_subagents_heartbeat ON subagents(status, last_heartbeat_at)
+    WHERE status = 'running';   -- watchdog 扫描"运行中但心跳过期"的子代理

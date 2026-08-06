@@ -2229,6 +2229,9 @@ async def list_sessions(
                        SELECT 1 FROM messages m
                        WHERE m.session_id = s.id AND m.role = 'assistant'
                    ))
+                  -- V1.5 项-1(ADR-012 R9): 过滤子代理会话(委派产生的
+                  -- kind='sub' 会话不出现在历史任务树, 防污染)
+                  AND (s.kind IS NULL OR s.kind <> 'sub')
                   AND ($3::text IS NULL
                        OR ($3 = 'unfiled' AND s.folder IS NULL)
                        OR s.folder = $3::text)
@@ -2273,6 +2276,86 @@ async def list_sessions(
         return JSONResponse(
             status_code=503,
             content={"error": "sessions_list_failed"},
+        )
+
+
+@router.get("/subagents", response_model=None)
+async def list_subagents(session_id: int, parent_turn: int | None = None):
+    """V1.5 项-1(ADR-012 §3.4 R7): 子代理列表 DB 轮询兜底。
+
+    WS 事件(heartbeat/stalled)断线会丢, 前端子任务卡片以此端点全量重建;
+    watchdog 判定依赖 DB 不依赖 WS(可靠性在 DB 侧)。
+
+    Args:
+        session_id: 父会话 id(必选)。
+        parent_turn: 触发委派的轮次; None=该会话全部轮次。
+
+    Returns:
+        200: [{
+            id, parent_task, prompt, model_id, status, result, error,
+            tool_calls, restart_attempts, last_heartbeat_at, started_at,
+            stalled_at, finished_at, created_at, sub_session_id,
+        }] 按 id 升序
+        400: session_id 缺失/非法
+        503: {"error": "subagents_list_failed"}
+    """
+    if session_id <= 0:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid session_id"},
+        )
+    try:
+        conn = await db.connect()
+        try:
+            if parent_turn is None:
+                rows = await conn.fetch(
+                    "SELECT * FROM subagents WHERE session_id=$1 ORDER BY id",
+                    session_id,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM subagents "
+                    "WHERE session_id=$1 AND parent_turn=$2 ORDER BY id",
+                    session_id,
+                    int(parent_turn),
+                )
+            result = []
+            for r in rows:
+                result.append({
+                    "id": r["id"],
+                    "parent_task": r["parent_task"],
+                    "prompt": r["prompt"],
+                    "model_id": r["model_id"],
+                    "status": r["status"],
+                    "result": r["result"],
+                    "error": r["error"],
+                    "tool_calls": r["tool_calls"],
+                    "restart_attempts": r["restart_attempts"],
+                    "sub_session_id": r["session_id"],  # 子代理独立会话 id
+                    "last_heartbeat_at": (
+                        r["last_heartbeat_at"].isoformat()
+                        if r["last_heartbeat_at"] else None
+                    ),
+                    "started_at": (
+                        r["started_at"].isoformat() if r["started_at"] else None
+                    ),
+                    "stalled_at": (
+                        r["stalled_at"].isoformat() if r["stalled_at"] else None
+                    ),
+                    "finished_at": (
+                        r["finished_at"].isoformat() if r["finished_at"] else None
+                    ),
+                    "created_at": (
+                        r["created_at"].isoformat() if r["created_at"] else None
+                    ),
+                })
+            return result
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "subagents_list_failed"},
         )
 
 
@@ -3197,6 +3280,72 @@ async def get_session_detail(session_id: int):
         return JSONResponse(
             status_code=503,
             content={"error": "session_detail_failed"},
+        )
+
+
+@router.get("/sessions/{session_id}/resume", response_model=None)
+async def session_resume_info(session_id: int):
+    """断点恢复信息查询(V1.5 项-4)。
+
+    前端"断点继续"按钮可用性依据: status='interrupted' 且存在 checkpoint
+    (或至少有 final 事件)。返回最新 checkpoint turn(已完整完成的轮次),
+    可恢复的续跑轮 = checkpoint_turn + 1。
+
+    Returns:
+        200: {
+            "session_id", "status",
+            "resumable": bool,          # 是否可断点恢复
+            "checkpoint_turn": int|None, # 最新 checkpoint 轮(无则为 None)
+            "last_final_turn": int|None, # 最后 final 事件轮
+        }
+        404: session_not_found
+    """
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                "SELECT id, status FROM sessions WHERE id = $1",
+                session_id,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            # asyncpg JSONB 返回 str → 手动解析(项目既有约定)
+            import json as _json
+
+            ckpt = await conn.fetchrow(
+                """SELECT turn, payload FROM react_events
+                   WHERE session_id = $1 AND event_type = 'checkpoint'
+                   ORDER BY turn DESC LIMIT 1""",
+                session_id,
+            )
+            final_turn = await conn.fetchval(
+                """SELECT MAX(turn) FROM react_events
+                   WHERE session_id = $1 AND event_type = 'final'""",
+                session_id,
+            )
+            ckpt_turn = None
+            if ckpt is not None:
+                ckpt_turn = int(ckpt["turn"])
+            last_final = int(final_turn) if final_turn is not None else None
+            return {
+                "session_id": session_id,
+                "status": row["status"],
+                # interrupted 且有断点/完成轮 → 可恢复
+                "resumable": (
+                    row["status"] == "interrupted"
+                    and (ckpt_turn is not None or last_final is not None)
+                ),
+                "checkpoint_turn": ckpt_turn,
+                "last_final_turn": last_final,
+            }
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "session_resume_failed"},
         )
 
 
@@ -4569,6 +4718,142 @@ async def list_mcp_servers():
         "servers": servers,
         "protocol_version": mcp_cfg.get("protocol_version", ""),
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V1.5 项-2 连接器"开箱即用": MCP 预置模板
+# 模板为纯配置(不含凭证), 前端"从模板添加"选中即填充表单, 用户只补
+# 凭证/URL/目录等个性化字段后走 POST /settings/mcp 正常保存。
+# 维护: 增删模板需同步 docs/mcp-templates.md。
+# ──────────────────────────────────────────────────────────────────────────────
+
+# fmt: off
+_MCP_TEMPLATES: list[dict] = [
+    {
+        "id": "fetch",
+        "name": "Fetch · 网页抓取",
+        "description": "官方参考服务器: 抓取网页/转 Markdown 入库(配合知识库网页入库)或喂给模型",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": [],
+    },
+    {
+        "id": "time",
+        "name": "Time · 时间/时区",
+        "description": "官方参考服务器: 当前时间与多时区查询(离线, 零配置)",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-time"],
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": [],
+    },
+    {
+        "id": "filesystem",
+        "name": "Filesystem · 文件系统",
+        "description": "官方参考服务器: 读写本地文件(需指定允许访问的目录)",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": ["将 args 中的 /path/to/dir 改为实际允许访问的目录"],
+    },
+    {
+        "id": "memory",
+        "name": "Memory · 持久记忆",
+        "description": "官方参考服务器: 知识图谱式持久记忆(JSON 文件存储)",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": [],
+    },
+    {
+        "id": "sequential-thinking",
+        "name": "Sequential Thinking",
+        "description": "官方参考服务器: 引导模型分步结构化思考(复杂推理场景)",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": [],
+    },
+    {
+        "id": "github",
+        "name": "GitHub · 仓库/Issue/PR",
+        "description": "官方参考服务器: 仓库浏览/Issue/PR 查询(需 GITHUB_TOKEN)",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {"GITHUB_TOKEN": ""},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": ["在环境变量 GITHUB_TOKEN 填入 GitHub Personal Access Token"],
+    },
+    {
+        "id": "postgres",
+        "name": "PostgreSQL · 数据库查询",
+        "description": "官方参考服务器: 只读查询 PostgreSQL(需连接串, 谨慎评估数据暴露范围)",
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@host:5432/db"],
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": ["将 args 中的连接串改为实际 PostgreSQL 连接串"],
+    },
+    {
+        "id": "mempalace",
+        "name": "Mempalace · 本地语义记忆",
+        "description": "本地优先记忆系统(逐字存储+语义检索, 本项目已接入)。复用模板需先按 docs 安装 venv 并修改 command 为实际路径",
+        "type": "stdio",
+        "command": "D:\\skills\\mempalace-develop\\mempalace-develop\\.venv\\Scripts\\mempalace-mcp.exe",
+        "args": [],
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": ["修改 command 为本机 mempalace-mcp 可执行文件路径(参考 docs/mcp-templates.md)"],
+    },
+    {
+        "id": "ifind",
+        "name": "iFind · 金融数据(Bearer 认证示例)",
+        "description": "同花顺 iFinD 金融数据(A股/基金/宏观/新闻)。模板示例: 补 URL 与 Bearer token 即可接入同类 Bearer 认证的 HTTP MCP",
+        "type": "http",
+        "command": None,
+        "args": [],
+        "url": "https://your-ifind-mcp-endpoint/mcp",
+        "env": {},
+        "timeout_sec": 30,
+        "protocol_version": "auto",
+        "requires": ["将 url 改为实际 MCP 端点", "在认证 token 填入 Bearer token"],
+    },
+]
+# fmt: on
+
+
+@router.get("/mcp/templates", response_model=None)
+async def list_mcp_templates():
+    """MCP 预置模板列表(V1.5 项-2 连接器开箱即用)。
+
+    Returns:
+        200: {"templates": [
+            {id, name, description, type, command, args, url, env,
+             timeout_sec, protocol_version, requires: [需补充字段提示]}
+        ]}
+        模板为纯配置, 不含任何凭证; 前端选中后填充表单, 用户补凭证保存。
+    """
+    return {"templates": _MCP_TEMPLATES}
 
 
 class McpServerRequest(BaseModel):

@@ -34,6 +34,9 @@ _VALID_EVENT_TYPES = frozenset(
         "tool_confirmation_result",
         # 项目优化(opencode Doom Loop 借鉴): 工具调用死循环检测告警
         "tool_loop_detected",
+        # V1.5 项-1(ADR-012 M4): 子代理可观测事件(stalled/kill/zombie/心跳
+        # 故障, 具体类型见 payload.kind)
+        "subagent",
     }
 )
 

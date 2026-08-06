@@ -9,12 +9,12 @@
 |---|---|---|---|---|
 | 3 | 理清 skill 与智能体区别 | ★☆☆☆☆ | ✅ 已完成 | 概念文档 `docs/agent-vs-skill.md`；代码已正确区分（UI 已叫技能库） |
 | 8 | 记忆来源跳转 | ★★☆☆☆ | ✅ 已完成 | MemoryView 加来源按钮 + App 回调，切换会话（有 skill 直达对话视图） |
-| 5 | 流程级暂停 | ★★☆☆☆ | ⏳ 待实施 | 前端暂停/继续按钮 + 后端 turn 级等待；复用现有 WS 通道 |
-| 4 | 任务级断点恢复 | ★★★☆☆ | ⏳ 待实施 | checkpoint 存储已就绪（core/checkpoint.py），补恢复端点+WS+前端按钮 |
-| 7 | 网页入库落地 | ★★★☆☆ | ⏳ 待实施 | 三选一：粘贴文本引导 / 轻量抓取(httpx+readability) / MCP 抓取对接 |
-| 6 | 打包架构收敛 | ★★★☆☆ | ⏳ 待实施 | 打包版内置后端(extraResources) 或单目录收敛，消除双目录同步 |
-| 2 | 连接器"开箱即用" | ★★★★☆ | ⏳ 待实施 | 预置 MCP 配置模板 + 引导 UI，降低 90% 配置门槛 |
-| 1 | 子代理/任务委派 | ★★★★★ | ⏳ 待实施 | 新架构：子任务编排/并发/结果聚合/上下文隔离，独立设计 |
+| 4 | 任务级断点恢复 | ★★★☆☆ | ✅ 已完成 | checkpoint 恢复闭环：WS resume + ReactLoop resume 模式 + admin 查询 + 前端"断点继续" |
+| 5 | 流程级暂停 | ★★★☆☆ | ✅ 已完成 | WS pause/resume + _PauseController + ReactLoop 迭代间挂起 + 前端暂停/继续按钮 |
+| 7 | 网页入库落地 | ★★★☆☆ | ✅ 已完成 | 路径 a(粘贴引导, 纯前端) + 路径 b(MCP 对接文档 `docs/web-import-guide.md`) |
+| 6 | 打包架构收敛 | ★★★☆☆ | ✅ 已完成 | 方案 A：extraResources 内置 backend + 探测收敛(去 PA1.0) + userData 配置引导 |
+| 2 | 连接器"开箱即用" | ★★★★☆ | ✅ 已完成 | GET /admin/mcp/templates 9 模板 + 前端"从模板添加" + `docs/mcp-templates.md` |
+| 1 | 子代理/任务委派 | ★★★★★ | ✅ 已完成 | ADR-012 四里程碑全落地（M2 心跳闭环 + M3 协议+前端卡片 + M4 埋点/max_restarts），`tests/test_subagent*.py` 18 项验收 |
 
 ---
 

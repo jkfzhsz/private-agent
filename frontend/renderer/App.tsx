@@ -21,6 +21,11 @@ import { deAIfy } from "./utils/deAIfy";
 import "./styles/design-tokens.css";
 
 import { adminFetch } from "./utils/apiClient";
+// V1.5 项-1(ADR-012 §3.4 M3): 子任务卡片面板(WS 即时刷新 + DB 轮询兜底)
+import SubagentPanel, {
+  createSubagent,
+  type SubagentState,
+} from "./components/SubagentPanel";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 类型定义
@@ -39,7 +44,10 @@ type EventType =
   // V2 P1: 沙箱流式输出 + 权限确认(蓝图 §6.10 / §5.12)
   | "sandbox_output"
   | "tool_confirmation_required"
-  | "tool_confirmation_result";
+  | "tool_confirmation_result"
+  // V1.5 项-5: 流程级暂停/继续(仅 WS 推送, 不入事件列表)
+  | "turn_paused"
+  | "turn_resumed";
 
 interface ReactEvent {
   id: number;
@@ -60,6 +68,14 @@ interface WSMessage {
   count?: number;
   effective_offset?: number;
   message?: string;
+  // V1.5 项-1(M3): 子代理事件(后端 delegate_subtask / runner 推送)
+  subagent_id?: number;
+  task_id?: string;
+  prompt?: string;
+  status?: string;
+  result?: string;
+  error?: string;
+  phase?: string;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -81,6 +97,9 @@ const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string 
   sandbox_output: { bg: "#f1f5f9", label: "Sandbox", icon: "🖥️" },
   tool_confirmation_required: { bg: "#fef3c7", label: "Permission", icon: "⚠️" },
   tool_confirmation_result: { bg: "#f3e8ff", label: "Permission Result", icon: "🔐" },
+  // V1.5 项-5: 流程级暂停/继续(不入事件列表, 仅类型完整)
+  turn_paused: { bg: "#fff3e0", label: "Paused", icon: "⏸" },
+  turn_resumed: { bg: "#e8f5e9", label: "Resumed", icon: "▶" },
 };
 
 // M3 AC-9: tool_result 中 outputs/*.png 等图片路径解析(蓝图 §7.12)
@@ -380,14 +399,29 @@ export default function App(): JSX.Element {
       ws.close();
       wsRef.current = null;
     }
+    setIsPaused(false); // V1.5 项-5: 切换会话清除暂停态
     setEvents([]);
     setActiveSkill(skillName ?? null);
     lastTurnRef.current = 0;
+    // V1.5 项-1(M3 R7): 切换会话清空子代理卡片, 由重连后 DB 轮询重建
+    setSubagents({});
     // 切换历史会话: 全量加载(忽略服务端 ws_offset, 否则 offset=1 会跳过第 1 轮)
     fullReloadRef.current = true;
     setSessionModel(modelId ?? "auto");
     setRealSessionId(id);
     setSessionId(id);
+    // V1.5 项-4: 查询断点恢复信息(interrupted 会话显示"断点继续"横幅)
+    setResumeInfo(null);
+    void adminFetch(`http://127.0.0.1:8765/admin/sessions/${id}/resume`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && typeof data.resumable === "boolean") {
+          setResumeInfo(data);
+        }
+      })
+      .catch(() => {
+        /* 查询失败静默 */
+      });
     // 进入对话视图(恢复该会话的 skill, 若无 skill 则回首页选模式)
     setView(skillName ? "chat" : "home");
   };
@@ -412,6 +446,17 @@ export default function App(): JSX.Element {
   const stopGeneration = useCallback((): void => {
     sendWs({ type: "cancel", session_id: sessionId });
   }, [sendWs, sessionId]);
+
+  // V1.5 项-5: 流程级暂停 —— 生成中挂起(区别于停止=终止), 可继续
+  const [isPaused, setIsPaused] = useState(false);
+  // V1.5 项-1(ADR-012 M3): 子代理状态(WS 即时刷新, 重连/切会话从 DB 重建)
+  const [subagents, setSubagents] = useState<Record<number, SubagentState>>({});
+  const pauseGeneration = useCallback((): void => {
+    sendWs({ type: "pause", session_id: realSessionId ?? sessionId });
+  }, [sendWs, realSessionId, sessionId]);
+  const resumeGeneration = useCallback((): void => {
+    sendWs({ type: "resume", session_id: realSessionId ?? sessionId });
+  }, [sendWs, realSessionId, sessionId]);
 
   // V1.1-3.3 消息精细化操作: 重生成/收藏/删除/复制
   const [starredTurns, setStarredTurns] = useState<Set<number>>(new Set());
@@ -438,6 +483,24 @@ export default function App(): JSX.Element {
     },
     [sendWs, realSessionId, sessionId]
   );
+
+  // V1.5 项-4: 断点恢复 —— 对 interrupted 会话发送 resume WS 消息(后端从
+  // 最新 checkpoint 原地续跑中断轮); 无参数时对当前会话生效
+  const resumeSession = useCallback(
+    (sid?: number): void => {
+      sendWs({ type: "resume", session_id: sid ?? realSessionId ?? sessionId });
+      setResumeInfo(null); // 隐藏横幅, 等事件流回来
+    },
+    [sendWs, realSessionId, sessionId]
+  );
+
+  // V1.5 项-4: 当前会话的断点恢复信息(GET /admin/sessions/{id}/resume)
+  // 对话视图横幅依据: interrupted 且存在 checkpoint
+  const [resumeInfo, setResumeInfo] = useState<{
+    resumable: boolean;
+    checkpoint_turn: number | null;
+    status?: string;
+  } | null>(null);
 
   const toggleStar = useCallback(
     async (turn: number): Promise<void> => {
@@ -754,6 +817,44 @@ export default function App(): JSX.Element {
     }
   }, [realSessionId, sessionId]);
 
+  // V1.5 项-1(ADR-012 §3.4 R7): 子代理卡片 DB 轮询兜底(WS 断线丢事件时
+  // 全量重建; 后端 watchdog 判定依赖 DB 不依赖 WS)。仅重建"仍在该会话"
+  // 的子代理, 保留 WS 实时收到的最新状态。
+  const fetchSubagents = useCallback((): void => {
+    void adminFetch(
+      `http://127.0.0.1:8765/admin/subagents?session_id=${realSessionId ?? sessionId}`
+    )
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: any[]) => {
+        if (!Array.isArray(rows) || rows.length === 0) return;
+        setSubagents((prev) => {
+          const next: Record<number, SubagentState> = {};
+          for (const r of rows) {
+            const id = Number(r.id);
+            const existing = prev[id];
+            next[id] = {
+              id,
+              taskId: r.parent_task ?? `#${id}`,
+              prompt: r.prompt ?? "",
+              status: r.status ?? "running",
+              result: r.result ?? undefined,
+              error: r.error ?? undefined,
+              toolCalls: Number(r.tool_calls ?? 0),
+              // WS 实时状态优先(心跳/stalled 以最近一次为准)
+              lastHeartbeatTs: existing?.lastHeartbeatTs,
+              stalled: existing?.stalled ?? !!r.stalled_at,
+              events: existing?.events ?? [],
+              createdAt: existing?.createdAt ?? Date.now(),
+            };
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        /* 轮询失败静默(WS 事件仍可即时刷新) */
+      });
+  }, [realSessionId, sessionId]);
+
   // V1.2-6.3: 用量统计 + 错误摘要(任务抽屉内)
   const [usageData, setUsageData] = useState<{
     total_calls: number;
@@ -819,6 +920,15 @@ export default function App(): JSX.Element {
           // 从后端回传更新真实 session_id(B2 P1-9:activate 需要真实 session)
           if (msg.session_id && msg.session_id !== sessionId) {
             setRealSessionId(msg.session_id);
+          }
+          // V1.5 项-5: 流程级暂停状态(不进入事件列表, 仅切换按钮态)
+          if (msg.event_type === "turn_paused") {
+            setIsPaused(true);
+            return;
+          }
+          if (msg.event_type === "turn_resumed") {
+            setIsPaused(false);
+            return;
           }
           // 流式增量: 追加到该 turn 的最后一条 delta 事件(累积显示, 不刷爆列表)
           if (msg.event_type === "delta") {
@@ -937,13 +1047,129 @@ export default function App(): JSX.Element {
       case "turn_end":
         // 一轮结束,可在此做 UI 收尾
         setIsGenerating(false);
+        setIsPaused(false); // V1.5 项-5: 轮次结束清除暂停态
         // V1.4-8.4: 应用在后台时系统通知(任务完成)
         void notifyUser("任务完成", "本轮对话已结束");
         break;
 
+      // ── V1.5 项-1(ADR-012 §3.4 M3): 子代理事件(仅即时刷新 state;
+      // 可靠性兜底 = fetchSubagents DB 轮询, 见 ws.onopen) ──
+      case "subagent_start": {
+        if (msg.subagent_id) {
+          setSubagents((prev) => ({
+            ...prev,
+            [msg.subagent_id as number]: createSubagent(
+              msg.subagent_id as number,
+              msg.task_id ?? `#${msg.subagent_id}`,
+              String(msg.payload?.prompt ?? msg.prompt ?? "")
+            ),
+          }));
+        }
+        break;
+      }
+      case "subagent_heartbeat": {
+        if (msg.subagent_id) {
+          const id = msg.subagent_id as number;
+          setSubagents((prev) =>
+            prev[id]
+              ? { ...prev, [id]: { ...prev[id], lastHeartbeatTs: Date.now() } }
+              : prev
+          );
+        }
+        break;
+      }
+      case "subagent_event": {
+        if (msg.subagent_id && msg.event_type) {
+          const id = msg.subagent_id as number;
+          const et = String(msg.event_type);
+          // 仅记录精简事件(tool_call/tool_result/final/error), 防事件风暴
+          if (
+            et === "tool_call" ||
+            et === "tool_result" ||
+            et === "final" ||
+            et === "error"
+          ) {
+            setSubagents((prev) =>
+              prev[id]
+                ? {
+                    ...prev,
+                    [id]: {
+                      ...prev[id],
+                      toolCalls:
+                        et === "tool_call"
+                          ? prev[id].toolCalls + 1
+                          : prev[id].toolCalls,
+                      events: [
+                        ...prev[id].events,
+                        {
+                          eventType: et,
+                          payload: msg.payload ?? {},
+                          ts: Date.now(),
+                        },
+                      ],
+                    },
+                  }
+                : prev
+            );
+          }
+        }
+        break;
+      }
+      case "subagent_stalled": {
+        if (msg.subagent_id) {
+          const id = msg.subagent_id as number;
+          setSubagents((prev) =>
+            prev[id]
+              ? { ...prev, [id]: { ...prev[id], stalled: true } }
+              : prev
+          );
+        }
+        break;
+      }
+      case "subagent_result": {
+        if (msg.subagent_id) {
+          const id = msg.subagent_id as number;
+          setSubagents((prev) =>
+            prev[id]
+              ? {
+                  ...prev,
+                  [id]: {
+                    ...prev[id],
+                    status: "succeeded",
+                    result: msg.result ?? "",
+                    stalled: false,
+                  },
+                }
+              : prev
+          );
+        }
+        break;
+      }
+      case "subagent_error": {
+        if (msg.subagent_id) {
+          const id = msg.subagent_id as number;
+          setSubagents((prev) =>
+            prev[id]
+              ? {
+                  ...prev,
+                  [id]: {
+                    ...prev[id],
+                    status:
+                      msg.status === "cancelled" ? "cancelled" : "failed",
+                    error: msg.error ?? msg.status ?? "failed",
+                    stalled: false,
+                  },
+                }
+              : prev
+          );
+        }
+        break;
+      }
+
       case "turn_cancelled":
         // 打断/停止: 后端已取消当前 turn
         setIsGenerating(false);
+        setIsPaused(false); // V1.5 项-5: 终止时清除暂停态
         void notifyUser("任务已停止", "你手动停止了本轮对话");
         break;
 
@@ -991,6 +1217,8 @@ export default function App(): JSX.Element {
           last_turn: lastTurnRef.current,
           full: fullReloadRef.current,
         });
+        // V1.5 项-1(M3 R7): 重连后从 DB 重建子代理卡片(WS 丢事件兜底)
+        fetchSubagents();
       };
 
       ws.onmessage = (ev: MessageEvent) => {
@@ -1079,6 +1307,7 @@ export default function App(): JSX.Element {
   const sendMessage = useCallback((): void => {
     let content = input.trim();
     if (!content) return;
+    setIsPaused(false); // V1.5 项-5: 发送新消息前清除暂停态
     // 阶段三批次3(T3.4): 编辑重发 → 先异步沉淀纠正记忆(不阻塞发送)
     if (editingOriginal && editingOriginal.trim() !== content) {
       try {
@@ -1273,6 +1502,7 @@ export default function App(): JSX.Element {
           onSwitchSession={handleSwitchSession}
           status={status}
           width={sidebarW}
+          onResumeSession={(sid) => resumeSession(sid)}
         />
         <ResizeHandle
           onDrag={(delta) => setSidebarW((w) => clampSidebar(w + delta))}
@@ -1393,6 +1623,38 @@ export default function App(): JSX.Element {
                     📋 任务
                   </button>
                 </div>
+                {/* V1.5 项-4: 断点恢复横幅(interrupted 会话 + 存在 checkpoint) */}
+                {resumeInfo?.resumable && !isGenerating && (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      margin: "0 4px 8px",
+                      padding: "8px 12px",
+                      borderRadius: 8,
+                      background: "#fff8e1",
+                      border: "1px solid #ffcc80",
+                      fontSize: 12,
+                      color: "#7a4f01",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span>⚠️ 该会话曾被中断
+                      {resumeInfo.checkpoint_turn ? `(已完成至第 ${resumeInfo.checkpoint_turn} 轮)` : ""}，可断点继续</span>
+                    <span style={{ flex: 1 }} />
+                    <button
+                      onClick={() => resumeSession()}
+                      style={{
+                        fontSize: 12, padding: "4px 14px", borderRadius: 6,
+                        border: "1px solid #e6a23c", background: "#f7a83b",
+                        color: "#fff", cursor: "pointer", fontWeight: 600,
+                      }}
+                    >
+                      ▶ 断点继续
+                    </button>
+                  </div>
+                )}
                 <div
                   style={{
                     flex: 1,
@@ -1873,6 +2135,27 @@ export default function App(): JSX.Element {
             </div>
           );
         })}
+
+        {/* V1.5 项-1(ADR-012 §3.4 M3): 子任务卡片面板(委派状态可视化) */}
+        <SubagentPanel
+          subagents={subagents}
+          onClearFinished={() => {
+            setSubagents((prev) => {
+              const next: Record<number, SubagentState> = {};
+              for (const [k, v] of Object.entries(prev)) {
+                if (
+                  v.status === "succeeded" ||
+                  v.status === "failed" ||
+                  v.status === "cancelled"
+                ) {
+                  continue;
+                }
+                next[Number(k)] = v;
+              }
+              return next;
+            });
+          }}
+        />
       </div>
 
       {/* 工作区条(画地为牢): 显示/修改会话工作目录, agent 操作范围告知层 */}
@@ -2065,16 +2348,42 @@ export default function App(): JSX.Element {
           发送
         </button>
         {isGenerating && (
-          <button
-            onClick={stopGeneration}
-            title="停止生成"
-            style={{
-              padding: "10px 20px", borderRadius: 6, border: "none",
-              backgroundColor: "#d32f2f", color: "#fff", fontSize: 14, cursor: "pointer",
-            }}
-          >
-            ⏹ 停止
-          </button>
+          <>
+            {/* V1.5 项-5: 流程级暂停/继续(生成中暂停挂起, 可继续) */}
+            {!isPaused ? (
+              <button
+                onClick={pauseGeneration}
+                title="暂停生成(区别于停止: 可稍后继续)"
+                style={{
+                  padding: "10px 20px", borderRadius: 6, border: "none",
+                  backgroundColor: "#f57c00", color: "#fff", fontSize: 14, cursor: "pointer",
+                }}
+              >
+                ⏸ 暂停
+              </button>
+            ) : (
+              <button
+                onClick={resumeGeneration}
+                title="继续生成"
+                style={{
+                  padding: "10px 20px", borderRadius: 6, border: "none",
+                  backgroundColor: "#2e7d32", color: "#fff", fontSize: 14, cursor: "pointer",
+                }}
+              >
+                ▶ 继续
+              </button>
+            )}
+            <button
+              onClick={stopGeneration}
+              title="停止生成"
+              style={{
+                padding: "10px 20px", borderRadius: 6, border: "none",
+                backgroundColor: "#d32f2f", color: "#fff", fontSize: 14, cursor: "pointer",
+              }}
+            >
+              ⏹ 停止
+            </button>
+          </>
         )}
           </div>
           </div>
