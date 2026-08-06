@@ -128,9 +128,26 @@ async function releaseExists(repo, tag) {
 }
 
 async function publishWithApi() {
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  // token 来源: 环境变量 GITHUB_TOKEN/GH_TOKEN > 本地文件 scripts/.gh-token
+  // (2026-08-06: 本地文件免每次输入, 已 gitignore 绝不上传)
+  const token =
+    process.env.GITHUB_TOKEN ||
+    process.env.GH_TOKEN ||
+    (() => {
+      try {
+        const p = join(__dirname, ".gh-token");
+        if (existsSync(p)) return readFileSync(p, "utf-8").trim();
+      } catch {
+        /* ignore */
+      }
+      return "";
+    })();
   if (!token) {
-    console.error("[publish] 未配置 GITHUB_TOKEN 且无 gh CLI, 无法上传");
+    console.error(
+      "[publish] 未配置 GITHUB_TOKEN 且无 gh CLI, 无法上传\n" +
+        "  方式: 1) 设环境变量 GITHUB_TOKEN=xxx\n" +
+        "       2) 或把 token 写入 scripts/.gh-token(已 gitignore)"
+    );
     process.exit(1);
   }
   const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "private-agent-publish" };

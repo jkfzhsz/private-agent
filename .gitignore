@@ -48,3 +48,6 @@ frontend/release3/
 # 测试产物
 backend/.pytest_results.xml
 backend/tests/.pytest_results.xml
+
+# 发布凭据(本地 token, 绝不上传)
+scripts/.gh-token
