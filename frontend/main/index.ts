@@ -19,6 +19,9 @@ import { checkForUpdates, downloadUpdate, installUpdate } from "./updater";
 if (!process.env.PA_USER_DATA_PATH_OVERRIDE) {
   app.setPath("userData", join(app.getPath("appData"), "Private Agent"));
 }
+// 2026-08-06: 注入真实应用版本(preload versions.app 用; 此前从未设置,
+// 前端"关于与更新"一直 fallback 显示 0.1.0)
+process.env.PA_APP_VERSION = app.getVersion();
 
 let sidecarManager: SidecarManager | null = null;
 // 保存主窗口引用: Electron BrowserWindow 若无强引用会被 V8 GC 回收,
