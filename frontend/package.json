@@ -1,6 +1,6 @@
 {
   "name": "private-agent-frontend",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Private Agent Electron + React frontend (蓝图 §2.15)",
   "main": "dist-main/index.js",
@@ -63,7 +63,6 @@
           "!**/__pycache__/**",
           "!**/*.pyc",
           "!**/private_agent.egg-info/**",
-          "!**/${WORKSPACE}/**",
           "!**/config_runtime.yaml"
         ]
       }

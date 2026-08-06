@@ -4,46 +4,69 @@ REM ============================================================
 REM Private Agent - Windows package script (goto structure)
 REM Safer than if/else blocks: no parens, no ^-continuation,
 REM which are the usual cause of double-click flash-close.
-REM Fixes included:
-REM   1. Remove leftover build lock (win-unpacked.tmp.lock)
-REM   2. Local rcedit for icon injection (no GitHub download)
-REM   3. V1.5 项-6 打包收敛(方案 A): backend 由 electron-builder
-REM      extraResources 内置进 resourcesPath/backend(自包含, 排除
-REM      .venv/.env/outputs/logs/tests); 不再同步 D:\PA1.0\backend
-REM      (双目录同步是历史 "HTTP 405" 旧后端事故根源, 已删除)
+REM
+REM This file is pure ASCII on purpose: cmd.exe parses .bat with
+REM the ANSI code page (GBK on zh-CN); UTF-8 Chinese comments
+REM garble into garbage commands (e.g. "not recognized...").
+REM Keep ALL non-ASCII text OUT of this file.
+REM
+REM V1.5 package convergence (plan A): backend is bundled into
+REM   resourcesPath/backend via electron-builder extraResources
+REM   (source only; .venv/.env/outputs/logs/tests/egg-info excluded).
+REM 2026-08-06 changes:
+REM   [5/6] copy backend/.venv into the package for this machine
+REM         (self-contained backend deps, ~76MB; venv is NOT portable,
+REM         remove this step for distribution builds);
+REM   version bumped to 0.3.0 in frontend/package.json.
 REM Usage: double-click or run "build-electron.bat" in CMD
 REM ============================================================
 
 set "FRONTEND_DIR=%~dp0frontend"
 set "RCEDIT_DIR=%FRONTEND_DIR%\build\rcedit"
 set "OUTPUT_DIR=%FRONTEND_DIR%\release2"
+set "BACKEND_VENV=%~dp0backend\.venv"
+set "PKG_BACKEND=%OUTPUT_DIR%\win-unpacked\resources\backend"
 
 echo.
-echo [1/5] Cleaning leftover build lock files...
+echo [1/6] Cleaning leftover build lock files...
 if exist "%OUTPUT_DIR%\win-unpacked.tmp.lock" del /q "%OUTPUT_DIR%\win-unpacked.tmp.lock"
 if exist "%OUTPUT_DIR%\win-unpacked.tmp"    rmdir /s /q "%OUTPUT_DIR%\win-unpacked.tmp" 2>nul
 
-echo [2/5] Checking local rcedit (icon injection tool)...
+echo [2/6] Checking local rcedit (icon injection tool)...
 if not exist "%RCEDIT_DIR%\rcedit-x64.exe" goto :missing_rcedit
 set "ELECTRON_BUILDER_RCEDIT_PATH=%RCEDIT_DIR%"
 echo   - using local rcedit: %RCEDIT_DIR%
 
-echo [3/5] Building frontend (tsc main + vite)...
+echo [3/6] Building frontend (tsc main + vite)...
 cd /d "%FRONTEND_DIR%"
 call npm run build
 if errorlevel 1 goto :build_fail
 
-echo [4/5] Running electron-builder (win + nsis, backend via extraResources)...
+echo [4/6] Running electron-builder (win + nsis, backend via extraResources)...
 if exist "%OUTPUT_DIR%\win-unpacked" rmdir /s /q "%OUTPUT_DIR%\win-unpacked"
 call npx electron-builder --win
 if errorlevel 1 goto :package_fail
 
-echo [5/5] Done!
-echo   Installer:   %OUTPUT_DIR%\Private Agent Setup *.exe
+REM verify backend was bundled
+if not exist "%PKG_BACKEND%\private_agent" (
+  echo   WARNING: resources\backend\private_agent missing; extraResources may have failed
+)
+
+echo [5/6] Bundling backend venv (this machine only, self-contained deps)...
+if exist "%BACKEND_VENV%\Scripts\python.exe" (
+  xcopy /E /I /Q /Y "%BACKEND_VENV%" "%PKG_BACKEND%\.venv\" >nul
+  if errorlevel 1 goto :venv_fail
+  echo   - venv bundled: %PKG_BACKEND%\.venv
+) else (
+  echo   - SKIP: backend\.venv not found (packaged app will probe system python)
+)
+
+echo [6/6] Done!
+echo   Installer:   %OUTPUT_DIR%\Private Agent Setup 0.3.0.exe
 echo   Portable:    %OUTPUT_DIR%\win-unpacked\Private Agent.exe
-echo   Verify: desktop shortcut / taskbar / Alt+Tab all show new PA icon
-echo   Note: backend bundled in resources\backend (self-contained, no external dir)
-echo   Config: first run needs %APPDATA%\Private Agent\backend.env or bundled backend\.env
+echo   Backend:     %PKG_BACKEND% (self-contained)
+echo   Config:      first run needs %%APPDATA%%\Private Agent\backend.env
+echo                or bundled backend\.env (backend.env takes priority)
 goto :end
 
 :missing_rcedit
@@ -57,6 +80,10 @@ goto :fail
 
 :package_fail
 echo   ERROR: packaging failed, see messages above
+goto :fail
+
+:venv_fail
+echo   ERROR: copying backend\.venv failed (disk space left?)
 goto :fail
 
 :fail
