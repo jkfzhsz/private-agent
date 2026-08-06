@@ -1144,6 +1144,16 @@ async def _on_startup() -> None:
             _logger.info("DB schema migrated (idempotent)")
             # 从 config_runtime 恢复 AES 加密的 API key → 环境变量(设置页录入后重启仍生效)
             await _restore_keys_from_runtime()
+            # 2026-08-06: 启动即确保 AES 主密钥持久化到用户配置
+            # (%APPDATA%/Private Agent/backend.env, 打包版与 dev 统一)——
+            # 不依赖任何用户操作; 升级/重装(Electron userData 不随安装覆盖)
+            # 后密钥不漂移 → provider API key 始终可解密(不再"每版重配")。
+            try:
+                from private_agent.api import admin as _admin
+
+                _admin._ensure_master_key()
+            except Exception:  # noqa: BLE001
+                _logger.warning("master key ensure failed at startup")
             # V1.5 项-1(ADR-012 §3.3e): 进程重启后清理 running 且心跳过期的
             # 僵尸子代理(统一置 failed(heartbeat_timeout_after_restart), 幂等)
             try:

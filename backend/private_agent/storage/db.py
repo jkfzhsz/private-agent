@@ -16,6 +16,11 @@ from private_agent.config import loader
 def build_dsn(cfg: dict[str, Any] | None = None) -> str:
     """从 config 构造 Postgres DSN(蓝图 §9.13 database 段)。
 
+    2026-08-06: env 优先覆盖连接参数 —— PA_DB_HOST/PA_DB_PORT/
+    PA_DB_NAME/PA_DB_USER/PA_DB_PASSWORD > config.yaml。打包版首次
+    配置(DB 密码未设时)由保存端点写入 user_env(PA_DB_*), 重启即生效,
+    无需 DB 可用(解决"首次配置鸡生蛋": 保存端点不再依赖 DB)。
+
     Args:
         cfg: 配置 dict(默认从 config.yaml 加载)。
 
@@ -28,14 +33,20 @@ def build_dsn(cfg: dict[str, Any] | None = None) -> str:
     if cfg is None:
         cfg = loader.load_config()
     db_cfg = cfg["database"]
-    password = os.environ.get(db_cfg["password_env"])
+    host = os.environ.get("PA_DB_HOST") or str(db_cfg.get("host", "127.0.0.1"))
+    port = os.environ.get("PA_DB_PORT") or str(db_cfg.get("port", 5432))
+    name = os.environ.get("PA_DB_NAME") or str(db_cfg.get("name", "private_agent"))
+    user = os.environ.get("PA_DB_USER") or str(db_cfg.get("user", "postgres"))
+    password = os.environ.get("PA_DB_PASSWORD") or os.environ.get(
+        str(db_cfg.get("password_env", "PA_DB_PASSWORD"))
+    )
     if not password:
         raise ValueError(
             f"环境变量 {db_cfg['password_env']} 未设置(蓝图 §9.13 database.password_env)"
         )
     return (
-        f"postgresql://{db_cfg['user']}:{password}"
-        f"@{db_cfg['host']}:{db_cfg['port']}/{db_cfg['name']}"
+        f"postgresql://{user}:{password}"
+        f"@{host}:{port}/{name}"
     )
 
 

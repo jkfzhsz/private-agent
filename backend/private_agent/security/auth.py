@@ -25,6 +25,63 @@ _HEADER = "X-Admin-Token"
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]  # .../backend/private_agent → backend
 
 
+def _user_env_path() -> Path:
+    """Electron 用户可写配置(打包版与 dev 统一持久化位置):
+    Windows: %APPDATA%\\Private Agent\\backend.env; 其他平台: XDG 配置目录。
+
+    2026-08-06: 打包版 backend/.env 只读(resourcesPath), token 生成后写
+    这里才能持久化 —— 否则每次启动新 token, 前端已注入 token 失效 → 401。
+    """
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "Private Agent" / "backend.env"
+
+
+def _read_token_from(path: Path | None, key: str) -> str:
+    """从 .env 文件读取指定 KEY 的值(不存在/异常 → "")。"""
+    if path is None or not path.is_file():
+        return ""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def _upsert_env_key(path: Path | None, key: str, value: str) -> bool:
+    """在 .env 文件更新/新增 KEY=VALUE(保留注释与其他行)。成功返回 True。"""
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        seen = False
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+                stripped = line.strip()
+                if (
+                    stripped
+                    and not stripped.startswith("#")
+                    and "=" in stripped
+                    and stripped.split("=", 1)[0].strip() == key
+                ):
+                    lines.append(f"{key}={value}\n")
+                    seen = True
+                    continue
+                lines.append(line)
+        if not seen:
+            lines.append(f"{key}={value}\n")
+        path.write_text("".join(lines), encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 def _env_path() -> Path | None:
     """定位 backend/.env(可能不存在)。"""
     for candidate in (Path.cwd() / ".env", _PACKAGE_ROOT / ".env"):
@@ -34,51 +91,42 @@ def _env_path() -> Path | None:
 
 
 def _read_env_token() -> str:
-    """从 backend/.env 读取 PA_ADMIN_TOKEN(env 未注入时的兜底)。"""
-    p = _env_path()
-    if p is None:
-        return ""
-    try:
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("PA_ADMIN_TOKEN="):
-                return line.split("=", 1)[1].strip()
-    except OSError:
-        return ""
-    return ""
+    """从 backend/.env 读取 PA_ADMIN_TOKEN(env 未注入时的 dev 兜底)。"""
+    return _read_token_from(_env_path(), "PA_ADMIN_TOKEN")
 
 
 def get_admin_token() -> str:
-    """当前生效的 admin token(环境变量 > backend/.env)。"""
-    return os.environ.get("PA_ADMIN_TOKEN") or _read_env_token()
-
-
-def ensure_admin_token() -> str:
-    """确保 PA_ADMIN_TOKEN 可用: env 优先; 缺失时生成 64 hex 并持久化到 backend/.env。
-
-    仅生产启动(run_sidecar)调用 —— 测试/uvicorn 直接跑 app 不触发写文件。
-    """
+    """当前生效的 admin token(环境变量 > 用户配置 backend.env > backend/.env)。"""
     token = os.environ.get("PA_ADMIN_TOKEN")
     if token:
         return token
-    token = _read_env_token()
+    token = _read_token_from(_user_env_path(), "PA_ADMIN_TOKEN")
+    if token:
+        return token
+    return _read_env_token()
+
+
+def ensure_admin_token() -> str:
+    """确保 PA_ADMIN_TOKEN 可用: env 优先; 缺失时生成 64 hex 并持久化。
+
+    2026-08-06 打包版修复: 持久化位置 = Electron 用户配置
+    %APPDATA%/Private Agent/backend.env(可写) —— 原实现只写
+    backend/.env, 打包版 resourcesPath 只读 → 写失败 → 每次启动新
+    token → 前端注入的旧 token 全部 401。
+
+    仅生产启动(run_sidecar)调用 —— 测试/uvicorn 直接跑 app 不触发写文件。
+    """
+    token = get_admin_token()
     if token:
         os.environ["PA_ADMIN_TOKEN"] = token
         return token
     new_token = secrets.token_hex(32)  # 64 hex chars = 32 bytes
-    p = _env_path()
-    if p is not None:
-        try:
-            lines = p.read_text(encoding="utf-8").splitlines()
-            if not any(l.startswith("PA_ADMIN_TOKEN=") for l in lines):
-                lines.append(f"PA_ADMIN_TOKEN={new_token}")
-                p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            os.environ["PA_ADMIN_TOKEN"] = new_token
-        except OSError:
-            # 写入失败(.env 不可写)时仅内存生效, 本次运行仍受保护
-            os.environ["PA_ADMIN_TOKEN"] = new_token
-    else:
-        os.environ["PA_ADMIN_TOKEN"] = new_token
+    # 用户配置优先(打包版可写, dev 同样生效)
+    _upsert_env_key(_user_env_path(), "PA_ADMIN_TOKEN", new_token)
+    # 兼容 dev: backend/.env 存在则同步追加
+    if _env_path() is not None:
+        _upsert_env_key(_env_path(), "PA_ADMIN_TOKEN", new_token)
+    os.environ["PA_ADMIN_TOKEN"] = new_token
     return new_token
 
 

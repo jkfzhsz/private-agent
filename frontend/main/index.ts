@@ -9,7 +9,16 @@ import { join } from "path";
 import { loadSidecarConfig } from "./config-loader";
 import { SidecarManager } from "./sidecar";
 import { createWindow } from "./window";
-import { checkForUpdates } from "./updater";
+import { checkForUpdates, downloadUpdate, installUpdate } from "./updater";
+
+// 2026-08-06: 显式统一 Electron userData 路径(%APPDATA%\Private Agent)。
+// package.json "name" 与 electron-builder "productName" 不一致 → Electron
+// 默认 userData = %APPDATA%\private-agent-frontend, 与后端 _user_env_path()
+// 的 %APPDATA%\Private Agent\backend.env 不一致 → 后端能找到 token, 前端
+// preload 取不到 → 401。setPath 必须在 app.ready 之前调用(此处在文件顶层)。
+if (!process.env.PA_USER_DATA_PATH_OVERRIDE) {
+  app.setPath("userData", join(app.getPath("appData"), "Private Agent"));
+}
 
 let sidecarManager: SidecarManager | null = null;
 // 保存主窗口引用: Electron BrowserWindow 若无强引用会被 V8 GC 回收,
@@ -45,28 +54,25 @@ function loadDotEnv(filePath: string): void {
   }
 }
 
-/** 窗口创建后异步弹出配置提示(不阻塞主进程, 窗口先出来再弹)。 */
+/** 窗口创建后异步弹出配置提示(不阻塞主进程, 窗口先出来再弹)。
+ *
+ * 2026-08-06: 仅检查 PA_DB_PASSWORD(数据库连接必需, 缺失时后端连不上库)。
+ * provider API Key 不再检查 —— V1.4 去预置化后 Key 存 DB(config_runtime,
+ * AES 加密), 由后端启动时 _restore_keys_from_runtime() 恢复, main 进程
+ * 从不加载 PA_*_API_KEY, 检查必然误报。配置引导指向设置页数据库卡片。
+ */
 function notifyMissingEnvAsync(): void {
-  const missing: string[] = [];
-  if (!process.env.PA_DB_PASSWORD) missing.push("PA_DB_PASSWORD");
-  if (
-    !process.env.PA_DEEPSEEK_API_KEY &&
-    !process.env.PA_GLM_API_KEY &&
-    !process.env.PA_KIMI_API_KEY
-  ) {
-    missing.push("PA_*_API_KEY(任一)");
-  }
-  if (missing.length === 0) return;
+  if (process.env.PA_DB_PASSWORD) return;
   // 异步弹窗: 不阻塞 createWindow 后流程, 窗口先正常显示
   setTimeout(() => {
     void dialog.showMessageBox({
       type: "warning",
-      title: "私人智能体 - 配置提示",
-      message: `缺少环境配置: ${missing.join(", ")}`,
+      title: "私人智能体 - 首次配置提示",
+      message: "尚未配置数据库连接(PA_DB_PASSWORD)",
       detail:
-        "将配置写入 %APPDATA%\\Private Agent\\backend.env (KEY=VALUE, 每行一个; " +
-        "打包版 resources 目录只读, 请写此文件), 开发模式也可写 backend/.env。\n" +
-        "未配置时聊天会返回模型不可用提示。",
+        "请打开 设置 → 🗄️ 数据库, 填写 PostgreSQL 密码并保存, 重启应用生效。\n" +
+        "配置持久化于 %APPDATA%\\Private Agent\\backend.env, 升级/重装不丢。\n" +
+        "LLM API Key 请在 设置 → 模型提供商 中配置(加密存库)。",
     });
   }, 500);
 }
@@ -114,15 +120,24 @@ async function bootstrap(): Promise<void> {
   console.log("[main] Sidecar health OK");
 
   // 阶段二批次 1: 补读 sidecar 首次启动时 ensure_admin_token 生成的
-  // PA_ADMIN_TOKEN(写入 backend/.env)。loadDotEnv 发生在此前, 首启时
-  // token 尚未生成; sidecar start 后重新读取并注入 preload 可访问的 env。
+  // PA_ADMIN_TOKEN(写入用户配置 backend.env / backend/.env)。loadDotEnv
+  // 发生在此前, 首启时 token 尚未生成; sidecar start 后重新读取并注入
+  // preload 可访问的 env。2026-08-06: 优先读用户配置 userEnv(打包版
+  // backend/.env 只读, token 持久化在用户配置), 回退 backend/.env(dev)。
   if (!process.env.PA_ADMIN_TOKEN) {
     try {
-      const envText = readFileSync(join(backendDir, ".env"), "utf-8");
+      const envText = readFileSync(userEnv, "utf-8");
       const match = envText.match(/^PA_ADMIN_TOKEN=(.+)$/m);
       if (match) process.env.PA_ADMIN_TOKEN = match[1].trim();
     } catch {
-      // .env 不可读时跳过(token 由后端校验逻辑返回 401)
+      // 用户配置不可读时, 回退读 backend/.env(dev 场景)
+      try {
+        const envText = readFileSync(join(backendDir, ".env"), "utf-8");
+        const match = envText.match(/^PA_ADMIN_TOKEN=(.+)$/m);
+        if (match) process.env.PA_ADMIN_TOKEN = match[1].trim();
+      } catch {
+        // .env 不可读时跳过(token 由后端校验逻辑返回 401)
+      }
     }
   }
 
@@ -149,6 +164,28 @@ app.whenReady().then(() => {
       return await checkForUpdates();
     } catch (e) {
       return { hasUpdate: false, currentVersion: "", latestVersion: "", releaseUrl: "", notes: String(e), failed: true };
+    }
+  });
+
+  // 2026-08-06: 应用内一键升级 —— 下载安装器(进度推送) → 静默安装
+  ipcMain.handle("app:download-update", async (event, asset) => {
+    try {
+      const onProgress = (received: number, total: number, percent: number): void => {
+        event.sender.send("update:progress", { received, total, percent });
+      };
+      const result = await downloadUpdate(asset, onProgress);
+      return { ...result, error: undefined };
+    } catch (e) {
+      return { path: "", size: 0, sha256: "", error: String(e) };
+    }
+  });
+
+  ipcMain.handle("app:install-update", async (_event, installerPath: string) => {
+    try {
+      installUpdate(installerPath);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
     }
   });
 

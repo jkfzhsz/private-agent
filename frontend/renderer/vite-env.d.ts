@@ -18,11 +18,18 @@ interface Window {
     };
     envStatus?: {
       dbPassword?: boolean;
-      deepseekKey?: boolean;
-      glmKey?: boolean;
-      kimiKey?: boolean;
     };
     checkForUpdates?: () => Promise<unknown>;
+    // 2026-08-06: 应用内一键升级(下载进度 → 静默安装重启)
+    downloadUpdate?: (asset: {
+      url: string;
+      name: string;
+      sha256?: string;
+    }) => Promise<{ path: string; size: number; sha256: string; error?: string }>;
+    installUpdate?: (installerPath: string) => Promise<{ ok: boolean; error?: string }>;
+    onUpdateProgress?: (
+      cb: (p: { received: number; total: number; percent: number }) => void
+    ) => () => void;
     // 阶段二批次 1: admin 控制面鉴权 token(Electron 主进程从 backend/.env 注入)
     adminToken?: string;
   };

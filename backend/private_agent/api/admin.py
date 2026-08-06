@@ -1387,30 +1387,287 @@ async def _set_runtime(conn, key: str, value) -> None:
 
 
 def _ensure_master_key() -> bytes:
-    """确保 PA_MASTER_KEY 可用: 未设置时生成 64 hex 并追加到 backend/.env。"""
+    """确保 PA_MASTER_KEY 可用: env > user_env > backend/.env > 生成。
+
+    2026-08-06 打包版修复: 原实现只写 backend/.env, 打包后 resourcesPath
+    只读 → 写失败 → 每次启动生成新 key → 已加密的 provider API key 解密
+    失败(设置页"key 全清")。现改为优先写 Electron 用户配置
+    %APPDATA%/Private Agent/backend.env(打包版与 dev 均在此读写)。
+    """
     import os
 
     from private_agent.config import secrets
 
     hex_key = os.environ.get("PA_MASTER_KEY", "")
-    if hex_key:
-        return bytes.fromhex(hex_key)
-    # 自动生成并持久化到 backend/.env(个人应用, 首次使用自动初始化)
-    import secrets as _secrets
+    if not hex_key:
+        hex_key = _read_env_map(_user_env_path()).get("PA_MASTER_KEY", "")
+    if not hex_key:
+        # 继承 dev 历史 backend/.env(保持 master key 一致 → 旧 provider key 可解密)
+        try:
+            workspace = os.path.expandvars(
+                loader.load_config().get("system", {}).get("workspace_root", ".")
+            )
+            hex_key = _read_env_map(os.path.join(workspace, ".env")).get(
+                "PA_MASTER_KEY", ""
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    if not hex_key:
+        import secrets as _secrets
 
-    new_key = _secrets.token_hex(32)  # 64 hex chars = 32 bytes
-    cfg = loader.load_config()
-    import os as _os
+        hex_key = _secrets.token_hex(32)  # 64 hex chars = 32 bytes
+        _write_env_updates(_user_env_path(), {"PA_MASTER_KEY": hex_key})
+    os.environ["PA_MASTER_KEY"] = hex_key
+    return bytes.fromhex(hex_key)
 
-    workspace = _os.path.expandvars(cfg.get("system", {}).get("workspace_root", "."))
-    env_path = _os.path.join(workspace, ".env")
+
+def _user_env_path() -> str:
+    """Electron sidecar 的用户可写配置位置(打包版与 dev 统一):
+    Windows: %APPDATA%\\Private Agent\\backend.env; 其他平台: XDG 配置目录。"""
+    import os
+
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Private Agent", "backend.env")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(xdg, "Private Agent", "backend.env")
+
+
+def _read_env_map(path: str) -> dict:
+    """读取 .env 文件为 {KEY: VALUE}(跳过注释/空行/非法行)。"""
+    out: dict = {}
     try:
-        with open(env_path, "a", encoding="utf-8") as f:
-            f.write(f"\n# AES master key (auto-generated)\nPA_MASTER_KEY={new_key}\n")
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                k, v = stripped.split("=", 1)
+                out[k.strip()] = v.strip()
     except OSError:
         pass
-    os.environ["PA_MASTER_KEY"] = new_key
-    return bytes.fromhex(new_key)
+    return out
+
+
+def _write_env_updates(path: str, updates: dict) -> None:
+    """更新/新增 .env 的 KEY=VALUE: 保留原文件注释与其他 key, 重复 key 覆盖。"""
+    import os
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    lines: list[str] = []
+    seen: set[str] = set()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if (
+                    stripped
+                    and not stripped.startswith("#")
+                    and "=" in stripped
+                    and stripped.split("=", 1)[0].strip() in updates
+                ):
+                    k = stripped.split("=", 1)[0].strip()
+                    lines.append(f"{k}={updates[k]}\n")
+                    seen.add(k)
+                    continue
+                lines.append(line)
+    for k, v in updates.items():
+        if k not in seen:
+            lines.append(f"{k}={v}\n")
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def _ensure_admin_token_for_user_env() -> str:
+    """确保 PA_ADMIN_TOKEN 稳定(打包版 backend/.env 只读时写入 user_env)。"""
+    import os
+    import secrets as _secrets
+
+    token = os.environ.get("PA_ADMIN_TOKEN")
+    if token:
+        return token
+    # 现有 backend/.env 的 token 优先继承(与 dev 一致)
+    token = _read_env_map(_user_env_path()).get("PA_ADMIN_TOKEN", "")
+    if not token:
+        try:
+            workspace = os.path.expandvars(
+                loader.load_config().get("system", {}).get("workspace_root", ".")
+            )
+            token = _read_env_map(os.path.join(workspace, ".env")).get(
+                "PA_ADMIN_TOKEN", ""
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    if not token:
+        token = _secrets.token_hex(32)
+        _write_env_updates(_user_env_path(), {"PA_ADMIN_TOKEN": token})
+    os.environ["PA_ADMIN_TOKEN"] = token
+    return token
+
+
+class DatabaseSettingsRequest(BaseModel):
+    """PUT /settings/database 请求体: 数据库连接配置(密码仅本地 .env 存储)。
+
+    master_key(可选): 旧的 PA_MASTER_KEY(64 hex)。提供则写入 user_env,
+    保证与历史环境一致的 AES 密钥 → 已加密的 provider API key 可解密
+    (否则每次环境重建生成新 key, 设置页表现为"key 全清")。
+    """
+
+    host: str | None = None
+    port: int | None = None
+    name: str | None = None
+    user: str | None = None
+    password: str | None = None
+    master_key: str | None = None
+
+
+@router.get("/settings/database", response_model=None)
+async def get_database_settings():
+    """返回数据库连接配置状态(密码不回显; master key 明文供备份/迁移)。
+
+    2026-08-06: 不依赖 DB 可用 —— 首次配置(DB 未连接)时也返回 200,
+    展示 yaml 默认值 + env(PA_DB_*) 覆盖; 不再 _load_cfg()(需连 DB)。
+
+    Returns:
+        200: {
+            host, port, name, user,          # env(PA_DB_*) > config.yaml
+            password_configured,             # PA_DB_PASSWORD 是否可用
+            master_key_configured,           # PA_MASTER_KEY 是否稳定
+            master_key,                      # 明文(本机回环+admin token 保护),
+                                             # 供用户查看/备份
+            env_file,                        # 用户配置写入位置
+        }
+    """
+    env_path = _user_env_path()
+    # yaml 默认值(load_config 不连 DB) + env 覆盖(PA_DB_*)
+    try:
+        db_cfg = loader.load_config().get("database", {}) or {}
+    except Exception:  # noqa: BLE001
+        db_cfg = {}
+    host = os.environ.get("PA_DB_HOST") or db_cfg.get("host", "")
+    port = os.environ.get("PA_DB_PORT") or str(db_cfg.get("port", ""))
+    name = os.environ.get("PA_DB_NAME") or db_cfg.get("name", "")
+    user = os.environ.get("PA_DB_USER") or db_cfg.get("user", "")
+    mk = os.environ.get("PA_MASTER_KEY") or _read_env_map(env_path).get(
+        "PA_MASTER_KEY", ""
+    )
+    if not mk:
+        # 兜底: 未持久化时生成并写入(正常已由启动链路完成)
+        try:
+            mk = _ensure_master_key()
+            mk = mk.hex() if not isinstance(mk, str) else mk
+        except Exception:  # noqa: BLE001
+            mk = ""
+    return {
+        "host": host,
+        "port": port,
+        "name": name,
+        "user": user,
+        "password_configured": bool(
+            os.environ.get("PA_DB_PASSWORD")
+            or _read_env_map(env_path).get("PA_DB_PASSWORD")
+        ),
+        "master_key_configured": bool(mk),
+        "master_key": mk,
+        "env_file": env_path,
+        # 2026-08-06: 数据库可达性(配置后重启生效; 首次未配置时不可达是正常的)
+        "db_reachable": await _probe_db_reachable(),
+    }
+
+
+async def _probe_db_reachable() -> bool:
+    """探测数据库是否可连接(快速失败, 不抛异常)。"""
+    try:
+        conn = await db.connect()
+        try:
+            await conn.fetchval("SELECT 1")
+            return True
+        finally:
+            await conn.close()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@router.put("/settings/database", response_model=None)
+async def update_database_settings(body: DatabaseSettingsRequest):
+    """保存数据库连接配置(2026-08-06 打包版首启能力, 不依赖 DB 可用)。
+
+    - host/port/name/user/password → 写 Electron 用户配置
+      %APPDATA%/Private Agent/backend.env(PA_DB_HOST/PORT/NAME/USER/
+      PASSWORD) —— build_dsn 优先读 env, 首次配置时 DB 连不上也能保存
+      (修复"401/500 鸡生蛋": 旧实现写 config_runtime 需 DB, 密码未设时
+      DB 连不上 → 500)
+    - **password 可选(2026-08-06)**: 已配置时留空 = 不修改(改 host/name
+      无需重输密码); 首次未配置且为空 → 400
+    - 同步确保 PA_MASTER_KEY / PA_ADMIN_TOKEN 稳定(user_env)
+    - 若 DB 可用, 连接参数也写 config_runtime(运行中覆盖, 容错跳过)
+    - 生效: 需重启应用(sidecar DB 连接池启动时创建)
+
+    Returns:
+        200: {"saved": true, "env_file": str, "need_restart": true,
+              "message": "已保存, 重启应用后生效"}
+        400: 首次配置 password 缺失 / master_key 非法
+    """
+    env_path = _user_env_path()
+    password_configured = bool(
+        os.environ.get("PA_DB_PASSWORD") or _read_env_map(env_path).get("PA_DB_PASSWORD")
+    )
+    if not body.password and not password_configured:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "database password is required(首次配置必填)"},
+        )
+    # 密钥稳定化(写入 user_env; master key 继承 dev 历史值以解密旧 provider key)
+    if body.master_key:
+        mk = body.master_key.strip()
+        if len(mk) != 64:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "master_key 必须为 64 位 hex(PA_MASTER_KEY)"},
+            )
+        os.environ["PA_MASTER_KEY"] = mk
+        _write_env_updates(_user_env_path(), {"PA_MASTER_KEY": mk})
+    _ensure_master_key()
+    _ensure_admin_token_for_user_env()
+    # DB 连接参数全量写 user_env(build_dsn env 优先, 重启即生效);
+    # 密码已配置且本次留空 → 不覆盖(保留原密码)
+    env_updates: dict = {}
+    if body.password:
+        env_updates["PA_DB_PASSWORD"] = body.password
+    if body.host:
+        env_updates["PA_DB_HOST"] = body.host.strip()
+    if body.port:
+        env_updates["PA_DB_PORT"] = str(int(body.port))
+    if body.name:
+        env_updates["PA_DB_NAME"] = body.name.strip()
+    if body.user:
+        env_updates["PA_DB_USER"] = body.user.strip()
+    _write_env_updates(_user_env_path(), env_updates)
+    # 可选: DB 可用时同步写 config_runtime(运行中覆盖; 首次配置 DB 不可用
+    # 则跳过 —— env 已覆盖, 不影响重启生效)
+    try:
+        conn = await db.connect()
+        try:
+            if body.host:
+                await _set_runtime(conn, "database.host", body.host)
+            if body.port:
+                await _set_runtime(conn, "database.port", int(body.port))
+            if body.name:
+                await _set_runtime(conn, "database.name", body.name)
+            if body.user:
+                await _set_runtime(conn, "database.user", body.user)
+        finally:
+            await conn.close()
+    except Exception:  # noqa: BLE001
+        pass  # DB 不可用(首次配置)时跳过 config_runtime, env 已生效
+    return {
+        "saved": True,
+        "env_file": _user_env_path(),
+        "need_restart": True,
+        "message": "数据库配置已保存, 重启应用后生效",
+    }
 
 
 class ProviderUpdateRequest(BaseModel):
@@ -3936,6 +4193,81 @@ async def list_session_events(session_id: int, limit: int = 50):
         return JSONResponse(
             status_code=503,
             content={"error": "events_list_failed"},
+        )
+
+
+@router.get("/subagents/{subagent_id}/events", response_model=None)
+async def list_subagent_events(subagent_id: int, limit: int = 200):
+    """子代理完整对话流(2026-08-06): 读子 session 的 react_events,
+    与主对话流 replay 同源(子代理 ReactLoop 事件已全量入库)。
+
+    Returns:
+        200: [{id, turn, event_type, payload, ts}] 按 id 升序(时间顺序),
+        payload 为完整负载(thinking 增量 / tool_call 参数 / tool_result
+        输出 / final 文本), 供前端子任务卡片展开渲染思考链+工具调用+结果。
+        未创建子 session(未开始执行) → []。
+        404: subagent_not_found
+    """
+    import json as _json
+
+    try:
+        conn = await db.connect()
+        try:
+            # 仅 kind='sub' 的子会话返回(未回填/指向父会话 → []),
+            # 防误读父会话历史事件
+            sub_session = await conn.fetchval(
+                """
+                SELECT s.id FROM subagents sa
+                JOIN sessions s ON s.id = sa.session_id
+                WHERE sa.id = $1 AND s.kind = 'sub'
+                """,
+                subagent_id,
+            )
+            if sub_session is None:
+                # 子代理不存在 vs 未回填: 区分 404 / []
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM subagents WHERE id = $1", subagent_id
+                )
+                if not exists:
+                    raise HTTPException(
+                        status_code=404, detail="subagent_not_found"
+                    )
+                return []  # 未创建子 session(委派后未执行到子代理)
+            rows = await conn.fetch(
+                """
+                SELECT id, turn, event_type, payload, created_at
+                FROM react_events
+                WHERE session_id = $1
+                ORDER BY id ASC
+                LIMIT $2
+                """,
+                sub_session,
+                min(max(int(limit), 1), 500),
+            )
+            result = []
+            for r in rows:
+                p = r["payload"]
+                if isinstance(p, str):
+                    try:
+                        p = _json.loads(p)
+                    except Exception:  # noqa: BLE001
+                        p = {}
+                result.append({
+                    "id": r["id"],
+                    "turn": r["turn"],
+                    "event_type": r["event_type"],
+                    "payload": p or {},
+                    "ts": r["created_at"].isoformat() if r["created_at"] else None,
+                })
+            return result
+        finally:
+            await conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "subagent_events_failed"},
         )
 
 
