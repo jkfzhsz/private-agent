@@ -115,3 +115,82 @@ def test_mark_session_interrupted_updates_status():
             await conn.close()
 
     asyncio.run(_run())
+
+
+def test_load_latest_checkpoint_returns_newest():
+    """V1.5 项-4: load_latest_checkpoint 返回最新 checkpoint(含 turn/ctx_summary)。"""
+    _setup_schema()
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions (status) VALUES ('active') RETURNING id"
+            )
+            await CheckpointManager.save_checkpoint(
+                conn, session_id=session_id, turn=1,
+                ctx_summary={"active_zone_msg_count": 3},
+            )
+            await CheckpointManager.save_checkpoint(
+                conn, session_id=session_id, turn=2,
+                ctx_summary={"active_zone_msg_count": 6},
+            )
+            ckpt = await CheckpointManager.load_latest_checkpoint(conn, session_id)
+            assert ckpt is not None
+            assert ckpt["turn"] == 2
+            assert ckpt["ctx_summary"]["active_zone_msg_count"] == 6
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_load_latest_checkpoint_none_when_missing():
+    """V1.5 项-4: 无 checkpoint 事件时返回 None。"""
+    _setup_schema()
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions (status) VALUES ('active') RETURNING id"
+            )
+            ckpt = await CheckpointManager.load_latest_checkpoint(conn, session_id)
+            assert ckpt is None
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_load_latest_checkpoint_ignores_other_event_types():
+    """V1.5 项-4: 只认 event_type='checkpoint', 其他事件不干扰。"""
+    _setup_schema()
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions (status) VALUES ('active') RETURNING id"
+            )
+            # 先写 final/thinking 事件, 再写 checkpoint
+            from private_agent.storage.react_events import insert_react_event
+
+            await insert_react_event(
+                conn, session_id=session_id, turn=1,
+                event_type="final", payload={"content": "done"},
+            )
+            await insert_react_event(
+                conn, session_id=session_id, turn=2,
+                event_type="thinking", payload={"reasoning": "x"},
+            )
+            await CheckpointManager.save_checkpoint(
+                conn, session_id=session_id, turn=2,
+                ctx_summary={"active_zone_msg_count": 4},
+            )
+            ckpt = await CheckpointManager.load_latest_checkpoint(conn, session_id)
+            assert ckpt is not None and ckpt["turn"] == 2
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())

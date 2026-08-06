@@ -1302,6 +1302,57 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
+  // V1.5 项-2 连接器开箱即用: 预置模板(纯配置不含凭证, 选中填充表单)
+  interface McpTemplate {
+    id: string;
+    name: string;
+    description: string;
+    type: "http" | "stdio";
+    command: string | null;
+    args: string[];
+    url: string | null;
+    env: Record<string, string>;
+    timeout_sec: number;
+    protocol_version: string;
+    requires: string[];
+  }
+  const [templates, setTemplates] = useState<McpTemplate[]>([]);
+  const [templateNotes, setTemplateNotes] = useState<string[]>([]);
+
+  // 打开表单时拉取模板列表
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void adminFetch(`${API_BASE}/mcp/templates`)
+      .then((r) => (r.ok ? r.json() : { templates: [] }))
+      .then((d) => {
+        if (!cancelled) setTemplates(d.templates ?? []);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  // 选中模板 → 填充表单(用户只补凭证/目录等个性化字段)
+  const applyTemplate = (id: string): void => {
+    const t = templates.find((x) => x.id === id);
+    if (!t) return;
+    setType(t.type);
+    setName(t.id); // 模板 id 作为默认 server 名称(可改)
+    setUrl(t.url ?? "");
+    setCommand(t.command ?? "");
+    setArgs((t.args ?? []).join(" "));
+    setAuthToken("");
+    setEnvText(
+      Object.entries(t.env ?? {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n")
+    );
+    setTemplateNotes(t.requires ?? []);
+    setMsg(null);
+  };
+
   const importJson = async (): Promise<void> => {
     if (!jsonText.trim()) {
       setMsg("请粘贴 JSON 配置");
@@ -1446,6 +1497,36 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
         </>
       ) : (
         <>
+      {/* V1.5 项-2: 从模板添加(连接器开箱即用, 选中即填充) */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>从模板</span>
+        <select
+          value=""
+          onChange={(e) => applyTemplate(e.target.value)}
+          style={{
+            flex: 1, padding: "6px 10px", borderRadius: 6,
+            border: "1px solid rgba(148,163,184,0.3)", fontSize: 12,
+            background: "rgba(255,255,255,0.6)", color: "var(--text-primary)",
+          }}
+          title="选择预置连接器模板, 自动填充下方字段"
+        >
+          <option value="">选择预置模板…(fetch/time/filesystem/github 等)</option>
+          {templates.map((t) => (
+            <option key={t.id} value={t.id}>{t.name}</option>
+          ))}
+        </select>
+      </div>
+      {templateNotes.length > 0 && (
+        <div
+          style={{
+            fontSize: 11, color: "#92400e", background: "#fffbeb",
+            border: "1px solid #fde68a", borderRadius: 6, padding: "6px 10px",
+            lineHeight: 1.5,
+          }}
+        >
+          ⚠️ 需补充: {templateNotes.join("；")}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>名称</span>
         <input

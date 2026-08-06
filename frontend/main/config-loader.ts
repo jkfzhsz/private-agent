@@ -62,16 +62,18 @@ function packagedBackendDir(): string | null {
 }
 
 function findConfigPath(): string {
-  // 打包后: resourcesPath/backend/config/config.yaml
+  // V1.5 项-6 打包收敛(方案 A): 打包后 config.yaml 唯一来源
+  // resourcesPath/backend/config/config.yaml(extraResources 内置, 自包含);
+  // 开发模式仅项目根 backend/。已删除 D:\PA1.0 部署目录候选(双目录
+  // 同步是历史 405 事故根源, 打包版不再依赖磁盘目录)。
   const packaged = packagedBackendDir();
   const candidates = [
+    // 打包后: resourcesPath/backend/config/config.yaml
     // 优先相对进程工作目录查找 backend/config/config.yaml(frontend/ 下运行时)
     join(process.cwd(), "backend", "config", "config.yaml"),
     join(process.cwd(), "..", "backend", "config", "config.yaml"),
     join(process.cwd(), "config.yaml"),
-    // 部署目录(D:\PA1.0 自包含)优先于项目根
-    "D:\\PA1.0\\backend\\config\\config.yaml",
-    // 轻度打包: 后端复用项目根目录(D:\Private agent\backend)
+    // 开发模式: 项目根 backend/config/config.yaml
     "D:\\Private agent\\backend\\config\\config.yaml",
   ];
   if (packaged) {

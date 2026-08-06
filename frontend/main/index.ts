@@ -64,7 +64,8 @@ function notifyMissingEnvAsync(): void {
       title: "私人智能体 - 配置提示",
       message: `缺少环境配置: ${missing.join(", ")}`,
       detail:
-        "可将配置写入 backend/.env(KEY=VALUE, 每行一个), 或在本终端设置环境变量后重新启动。\n" +
+        "将配置写入 %APPDATA%\\Private Agent\\backend.env (KEY=VALUE, 每行一个; " +
+        "打包版 resources 目录只读, 请写此文件), 开发模式也可写 backend/.env。\n" +
         "未配置时聊天会返回模型不可用提示。",
     });
   }, 500);
@@ -72,22 +73,21 @@ function notifyMissingEnvAsync(): void {
 
 async function bootstrap(): Promise<void> {
   console.log("[main] bootstrap start");
-  // 1) 加载 backend/.env(PA_DB_PASSWORD / PA_*_API_KEY 等, 供 Sidecar 继承)
-  //    打包后 backend 在 resourcesPath/backend(只读, 仅读配置);
-  //    开发模式在项目根 backend/
+  // 1) 加载环境配置(PA_DB_PASSWORD / PA_*_API_KEY 等, 供 Sidecar 继承)
+  //    V1.5 项-6 打包收敛(方案 A): 打包版 backend 内置在
+  //    resourcesPath/backend(extraResources, 自包含, 不含 .env);
+  //    开发模式在项目根 backend/。
+  //    用户可写配置优先: %APPDATA%/Private Agent/backend.env(打包版
+  //    resourcesPath 只读, 配置请写这里) > backend/.env(项目/开发)。
   const packaged = app.isPackaged;
-  // 轻度打包: exe 只含 Electron 壳, 后端复用 backend/ 目录
-  // 探测顺序: D:\PA1.0\backend(部署自包含) > D:\Private agent\backend(项目) > resourcesPath
-  const devBackend = join(__dirname, "..", "..", "backend");
-  const deployBackend = "D:\\PA1.0\\backend";
-  const projBackend = "D:\\Private agent\\backend";
-  const backendDir = existsSync(deployBackend)
-    ? deployBackend
-    : existsSync(projBackend)
-      ? projBackend
-      : packaged
-        ? join(process.resourcesPath, "backend")
-        : devBackend;
+  const backendDir = packaged
+    ? join(process.resourcesPath, "backend")
+    : join(__dirname, "..", "..", "backend");
+  // 用户可写配置(打包版必选路径; 开发模式可选)
+  const userEnv = join(app.getPath("userData"), "backend.env");
+  if (existsSync(userEnv)) {
+    loadDotEnv(userEnv); // 先加载, 后加载的 backend/.env 不会覆盖已存在 key
+  }
   if (!existsSync(backendDir)) {
     console.error(`[main] backend dir not found: ${backendDir}`);
   }
@@ -98,8 +98,6 @@ async function bootstrap(): Promise<void> {
   console.log(`[main] Sidecar config: python=${config.pythonCommand} port=${config.port}`);
   // cwd 必须指向 backend 目录: config.yaml 的 skills.storage.dev_dir="./skills"
   // 等相对路径基于 cwd 解析, 否则技能加载为空(skill not found)。
-  // 轻度打包后端在外部可写目录(D:\PA1.0\backend / D:\Private agent\backend),
-  // cwd 与 WORKSPACE 都指向 backendDir, outputs/logs/skills 均正常落盘。
   console.log(`[main] backend dir: ${backendDir}`);
   sidecarManager = new SidecarManager({
     pythonCommand: config.pythonCommand,

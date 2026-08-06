@@ -114,11 +114,14 @@ function TaskTree({
   currentSessionId,
   onSwitchSession,
   onNavigate,
+  onResumeSession,
 }: {
   currentSessionId: number | null;
   onSwitchSession: (id: number, skillName?: string | null, modelId?: string | null) => void;
   // V1.4-8.4: 跨模块搜索结果跳转(技能/知识库视图)
   onNavigate: (v: ViewKey) => void;
+  // V1.5 项-4: 断点恢复(interrupted 会话"断点继续"按钮)
+  onResumeSession?: (id: number) => void;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
@@ -390,8 +393,28 @@ function TaskTree({
           />
         ) : (
           <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, flex: 1, minWidth: 0 }}>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>
-              {s.title || `#${s.id}`}
+            <span style={{ display: "flex", alignItems: "center", gap: 4, maxWidth: "100%", overflow: "hidden" }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {s.title || `#${s.id}`}
+              </span>
+              {/* V1.5 项-4: interrupted 状态徽标(断点可恢复) */}
+              {s.status === "interrupted" && (
+                <span
+                  style={{
+                    flexShrink: 0,
+                    fontSize: 9,
+                    padding: "1px 6px",
+                    borderRadius: 8,
+                    background: "#fff3e0",
+                    color: "#e65100",
+                    border: "1px solid #ffcc80",
+                    whiteSpace: "nowrap",
+                  }}
+                  title="会话被中断, 可断点继续"
+                >
+                  已中断
+                </span>
+              )}
             </span>
             <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
               {s.locked_skill_name ?? "无 skill"}
@@ -413,6 +436,17 @@ function TaskTree({
           >
             <ActionBtn label="✎" title="重命名" onClick={() => startRename(s)} />
             <ActionBtn label="📁" title={s.folder ? `移到文件夹(当前:${s.folder})` : "移到文件夹"} onClick={() => promptFolder(s)} />
+            {/* V1.5 项-4: 中断会话断点继续按钮(先切到该会话再 resume) */}
+            {s.status === "interrupted" && onResumeSession && (
+              <ActionBtn
+                label="▶"
+                title="断点继续: 从中断处恢复生成"
+                onClick={() => {
+                  onSwitchSession(s.id, s.locked_skill_name, s.model_id);
+                  onResumeSession(s.id);
+                }}
+              />
+            )}
             <ActionBtn
               label={s.status === "archived" ? "▶" : "⏸"}
               title={s.status === "archived" ? "恢复会话" : "归档会话"}
@@ -748,6 +782,7 @@ export default function Sidebar({
   onSwitchSession,
   status,
   width = 220,
+  onResumeSession,
 }: {
   active: ViewKey;
   onChange: (v: ViewKey) => void;
@@ -756,6 +791,8 @@ export default function Sidebar({
   status: "connected" | "disconnected" | "reconnecting";
   /** V1.1 布局优化: 展开时的宽度(外部拖拽控制), 折叠仍为 44px */
   width?: number;
+  /** V1.5 项-4: 断点恢复 —— 点击对 interrupted 会话发送 resume(可空: 兼容未接入方) */
+  onResumeSession?: (id: number) => void;
 }): JSX.Element {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -898,6 +935,7 @@ export default function Sidebar({
             currentSessionId={currentSessionId}
             onSwitchSession={onSwitchSession}
             onNavigate={onChange}
+            onResumeSession={onResumeSession}
           />
 
           <NavLabel>系统</NavLabel>

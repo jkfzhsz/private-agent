@@ -48,6 +48,26 @@
       "build/icon-256.png"
     ],
     "asar": true,
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!**/.venv/**",
+          "!**/.env",
+          "!**/.env.*",
+          "!**/outputs/**",
+          "!**/logs/**",
+          "!**/tests/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/private_agent.egg-info/**",
+          "!**/${WORKSPACE}/**",
+          "!**/config_runtime.yaml"
+        ]
+      }
+    ],
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity"

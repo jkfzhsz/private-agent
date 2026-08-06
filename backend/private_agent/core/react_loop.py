@@ -75,6 +75,8 @@ class ReactLoop:
         permission_manager: Any | None = None,
         compress_adapter: Any | None = None,
         hook_runner: Any | None = None,
+        resume_from_turn: int | None = None,
+        pause_controller: Any | None = None,
     ) -> None:
         self._session_id = session_id
         self._context_manager = context_manager
@@ -171,6 +173,15 @@ class ReactLoop:
         self._compress_adapter = compress_adapter
         self._compress_failures = 0
         self._compress_disabled = False
+        # V1.5 项-4 断点恢复: 非 None 时 run_turn(resume=True) 从该 turn 原地续跑
+        # (不递增 turn、不重复 append user 消息 —— 中断轮的 user 消息已持久化)
+        self._resume_from_turn = (
+            int(resume_from_turn) if resume_from_turn is not None else None
+        )
+        # V1.5 项-5 流程级暂停: per-session 暂停控制器(含 is_paused()/wait()/resume()).
+        # 每次迭代开始前检查, 暂停则产出 turn_paused 并挂起等待; 区别于
+        # cancel(终止)。None 时零回归(测试/兼容)。
+        self._pause_controller = pause_controller
 
     # ──────────────────────────────────────────────────────────────────────────
     # State machine
@@ -237,25 +248,39 @@ class ReactLoop:
     # Public API
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def run_turn(self, user_message: str) -> None:
+    async def run_turn(self, user_message: str = "", *, resume: bool = False) -> None:
         """执行一轮 ReAct 循环。
 
         Args:
-            user_message: 用户消息文本。
+            user_message: 用户消息文本(resume=True 时忽略 —— 中断轮的
+                user 消息已在 messages 表持久化)。
+            resume: V1.5 项-4 断点恢复模式。从构造函数给定的
+                resume_from_turn 原地续跑: turn 不递增(该轮 user 消息已存在,
+                续跑沿用同一 turn 号, 前端按 turn 分组不错乱)、跳过
+                append_user_message。调用前调用方必须已清理该轮残留的
+                assistant/tool 消息并置会话 active。
         """
-        # 历史会话续聊: 首次调用时从 messages 表最大 turn 续号(新消息 turn 不
-        # 与历史冲突, 否则前端分组合并、上下文错乱)
-        if not self._turn_initialized:
-            try:
-                max_turn = await self._conn.fetchval(
-                    "SELECT COALESCE(MAX(turn), 0) FROM messages WHERE session_id = $1",
-                    self._session_id,
+        if resume:
+            if self._resume_from_turn is None:
+                raise ValueError(
+                    "resume=True 但未提供 resume_from_turn(ReactLoop 构造参数)"
                 )
-                self._turn = int(max_turn or 0)
-            except Exception:
-                self._logger.exception("load max turn failed, 从 0 开始")
+            self._turn = self._resume_from_turn
             self._turn_initialized = True
-        self._turn += 1
+        else:
+            # 历史会话续聊: 首次调用时从 messages 表最大 turn 续号(新消息 turn 不
+            # 与历史冲突, 否则前端分组合并、上下文错乱)
+            if not self._turn_initialized:
+                try:
+                    max_turn = await self._conn.fetchval(
+                        "SELECT COALESCE(MAX(turn), 0) FROM messages WHERE session_id = $1",
+                        self._session_id,
+                    )
+                    self._turn = int(max_turn or 0)
+                except Exception:
+                    self._logger.exception("load max turn failed, 从 0 开始")
+                self._turn_initialized = True
+            self._turn += 1
         self._iteration = 0
         self._transition(ReactLoopState.THINKING)
 
@@ -304,16 +329,37 @@ class ReactLoop:
             except Exception:
                 self._logger.exception("user_prompt_submit hook failed (pass-through)")
 
-        # 追加 user_message 到上下文
-        await self._context_manager.append_user_message(
-            self._conn, turn=self._turn, content=user_message,
-        )
+        # 追加 user_message 到上下文(V1.5 项-4: resume 模式跳过 ——
+        # 中断轮的 user 消息已持久化, 重复追加会产生同轮两条 user 消息)
+        if not resume:
+            await self._context_manager.append_user_message(
+                self._conn, turn=self._turn, content=user_message,
+            )
 
         # thinking event 仅触发一次(首次模型调用后)
         has_emitted_thinking = False
 
         while self._iteration < self._max_iterations:
             self._iteration += 1
+            # V1.5 项-5 流程级暂停: 迭代开始前检查(当前迭代完成后暂停请求
+            # 于下一次迭代生效; 挂起期间不调用模型/工具, 不消耗 token)。
+            # 暂停请求由 WS pause 消息触发; wait() 挂起当前 task, 不阻塞
+            # WS 主循环(resume 消息仍可到达)。
+            if (
+                self._pause_controller is not None
+                and self._pause_controller.is_paused()
+            ):
+                await self._emit_event(
+                    "turn_paused",
+                    payload={"turn": self._turn},
+                    persist=False,
+                )
+                await self._pause_controller.wait()
+                await self._emit_event(
+                    "turn_resumed",
+                    payload={"turn": self._turn},
+                    persist=False,
+                )
             self._transition(ReactLoopState.ACTING)
             self._logger.info(
                 "run_turn[%s] iter=%d/%d: 开始(模型调用)",

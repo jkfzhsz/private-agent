@@ -314,6 +314,24 @@ export default function KnowledgeView({
         <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8 }}>
           文本文件直接入库(utf-8/gbk); PDF 等二进制请先转文本
         </div>
+        {/* V1.5 项-7a: 网页入库引导(纯前端, 粘贴正文入库, 无需抓取器) */}
+        <div
+          style={{
+            fontSize: 12,
+            marginBottom: 8,
+            padding: "8px 12px",
+            borderRadius: 8,
+            background: "#eef6ff",
+            border: "1px solid #b8d9f5",
+            color: "#1d4e89",
+            lineHeight: 1.6,
+          }}
+        >
+          🌐 <b>网页入库:</b> 在浏览器中打开目标网页 → 全选复制正文(<code>Ctrl+A</code> /
+          <code>Cmd+A</code>) → 粘贴到下方输入框并填写文件名, 即可切片入库, 供对话检索。
+          无需安装抓取器(也可在对话中让 Agent 用 MCP 检索工具抓取后调用本页接口入库,
+          见 <code>docs/web-import-guide.md</code>)。
+        </div>
         <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
           <input
             className="flow-input"
@@ -325,8 +343,8 @@ export default function KnowledgeView({
         </div>
         <textarea
           className="flow-input"
-          style={{ width: "100%", minHeight: 100, resize: "vertical", fontFamily: "var(--font-mono)", fontSize: 13 }}
-          placeholder="粘贴文档内容(支持 Markdown / 纯文本 / 代码)"
+          style={{ width: "100%", minHeight: 120, resize: "vertical", fontFamily: "var(--font-mono)", fontSize: 13 }}
+          placeholder="粘贴网页正文 / 文档内容(支持 Markdown / 纯文本 / 代码)"
           value={content}
           onChange={(e) => setContent(e.target.value)}
         />
