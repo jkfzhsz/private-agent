@@ -22,9 +22,20 @@ export function deAIfy(text: string): string {
   t = t.replace(/^\s*[-*•]\s+/gm, "");
   // 有序列表: 1. x → x
   t = t.replace(/^\s*\d+[.、)]\s+/gm, "");
-  // 表格行: | a | b | 与分隔行 --- 移除
-  t = t.replace(/^\s*\|.*\|\s*$/gm, "");
+  // 表格: 分隔行(|---|---|)删除; 数据行(| a | b | c |)转自然文本 a: b · c
+  // 2026-08-08 修复: 原实现整行删除导致表格内容全丢 —— 搜索摘要/新闻速览
+  // 这类以表格为核心的回答只剩标题没内容(mempalace/searchpin 结果"不完整"
+  // 的根因; 后端 DB/事件数据完整, 是前端渲染层丢的)。
   t = t.replace(/^\s*\|?[\s:|-]+\|?\s*$/gm, "");
+  t = t.replace(/^\s*\|(.+)\|\s*$/gm, (_m, cells: string) => {
+    const parts = cells
+      .split("|")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (parts.length < 2) return "";
+    // 单元格内残留 markdown(加粗/链接)由后续规则统一处理, 这里保留语义
+    return `${parts[0]}: ${parts.slice(1).join(" · ")}`;
+  });
   // 超链接: [text](url) → text
   t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
   // 残留的孤立符号清理(行首 -, *, | 等)
