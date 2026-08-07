@@ -125,6 +125,10 @@ class MCPClient:
         self._reconnect_count: int = 0
         self._read_task: asyncio.Task[None] | None = None
         self._pending: dict[int, asyncio.Future[dict]] = {}
+        # 2026-08-07: stdio 写入锁 —— 并发工具调用(同轮并行)同时 write stdin
+        # 会交错请求行, server 收到无效 JSON → 无响应 → 超时/空结果
+        # (mempalace/searchpin 并行调用失败的根因; http 无共享管道不受影响)
+        self._write_lock: asyncio.Lock = asyncio.Lock()
         self._latency_ms: float = 0.0
         # 自动协商状态
         self._negotiated: str | None = None   # 协商后的协议版本(进程内)
@@ -560,8 +564,10 @@ class MCPClient:
         try:
             assert self._process is not None and self._process.stdin is not None
             data = (json.dumps(request) + "\n").encode("utf-8")
-            self._process.stdin.write(data)
-            await self._process.stdin.drain()
+            # 2026-08-07: 写锁串行化 stdin 写入(防并发请求行交错)
+            async with self._write_lock:
+                self._process.stdin.write(data)
+                await self._process.stdin.drain()
 
             return await asyncio.wait_for(future, timeout=self._config.timeout_sec)
         finally:

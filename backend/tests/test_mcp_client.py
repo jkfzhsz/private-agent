@@ -256,3 +256,52 @@ class TestMCPClientStdio:
             assert sent_request["method"] == "tools/call"
             assert sent_request["params"]["name"] == "echo"
             assert sent_request["params"]["arguments"] == {"text": "hello"}
+
+
+class TestStdioConcurrency:
+    """2026-08-07: stdio 并发工具调用(同轮并行)写锁 —— 防请求行交错。
+
+    无写锁时多个协程同时 write stdin → 请求行拼接 → server 收到无效
+    JSON → 无响应 → 超时/空结果(mempalace/searchpin 并行调用失败的根因)。
+    用真实 stdio 子进程端到端验证: 并发 8 个调用全部收到响应。
+    """
+
+    async def test_concurrent_tools_against_real_stdio(self) -> None:
+        import asyncio
+        import sys
+
+        echo_code = (
+            "import sys, json\n"
+            "for line in sys.stdin:\n"
+            "    req = json.loads(line)\n"
+            "    resp = {'jsonrpc':'2.0','id':req.get('id'),"
+            "'result':{'content':[{'type':'text','text':'ok'}]}}\n"
+            "    sys.stdout.write(json.dumps(resp)+'\\n')\n"
+            "    sys.stdout.flush()\n"
+        )
+        client = MCPClient(
+            MCPClientConfig(
+                server_id="echo", server_type="stdio",
+                command=sys.executable, args=["-c", echo_code],
+                timeout_sec=15,
+            )
+        )
+        await client.connect()
+        try:
+            results = await asyncio.gather(
+                *(client.call_tool("echo", {"i": i}) for i in range(8))
+            )
+            # 无写锁时并发写入交错 → server 解析失败 → 部分超时/空
+            assert len(results) == 8
+            assert all(r.get("content") for r in results), (
+                "并发 stdio 调用存在写交错(应有 _write_lock 串行化)"
+            )
+        finally:
+            await client.disconnect()
+
+    async def test_write_lock_exists(self) -> None:
+        import asyncio
+
+        client = MCPClient(MCPClientConfig(server_id="s", server_type="stdio"))
+        assert isinstance(client._write_lock, asyncio.Lock)
+
