@@ -352,8 +352,13 @@ export default function App(): JSX.Element {
   // HomeView 模式按钮: 激活 skill + 切换到对话视图
   // 会话锁定(AC-4): 同一 session 激活后不允许切换 skill(409),
   // 因此切换到不同模式时必须新建会话(随机 session_id, 后端懒创建)
+  // 2026-08-07 修复: 首页(view=home)点模式必须新建会话 —— 原逻辑在
+  // activeSkill=null(如从"无 skill"历史会话切回首页)时复用 realSessionId,
+  // 导致"新对话走进旧会话" / 对已锁定其他 skill 的历史会话报 409
   const handlePickMode = async (skill: string): Promise<void> => {
-    const needNewSession = activeSkill !== null && activeSkill !== skill;
+    const onHome = view === "home";
+    const needNewSession =
+      onHome || (activeSkill !== null && activeSkill !== skill);
     const sid =
       needNewSession
         ? Math.floor(Math.random() * 100000) + 1

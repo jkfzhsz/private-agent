@@ -104,6 +104,56 @@ describe("App 首页与模式选择集成", () => {
     expect(await screen.findByText("工作模式")).toBeInTheDocument();
   });
 
+  // 2026-08-07: 首页点模式必须新建会话(不复用历史会话 id)
+  it("回首页后再点模式 → 新建会话(不复用历史 session)", async () => {
+    const activateUrls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+        if (typeof url === "string" && url.includes("/activate")) {
+          activateUrls.push(url);
+          const body = JSON.parse((options?.body as string) ?? "{}");
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                locked_version: "1.0.0",
+                frozen_hash: "abc",
+                skill_name: body.skill_name,
+              }),
+          });
+        }
+        if (typeof url === "string" && url.includes("/skills")) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve(SKILLS),
+          });
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${url}`));
+      })
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+    // 第一次点工作模式 → 会话 A
+    await pickMode(user);
+    expect(activateUrls.length).toBe(1);
+    // skill_not_found → 回首页
+    act(() => {
+      ws().onmessage?.({
+        data: JSON.stringify({ type: "error", message: "skill_not_found" }),
+      });
+    });
+    await screen.findByText("工作模式");
+    // 再点工作模式 → 必须是新会话(不同 session id)
+    await user.click(screen.getByText("工作模式"));
+    await waitFor(() => expect(activateUrls.length).toBe(2));
+    expect(activateUrls[1]).not.toBe(activateUrls[0]);
+    vi.unstubAllGlobals();
+    void originalFetch;
+  });
+
   it("普通 error 不切回首页", async () => {
     const user = userEvent.setup();
     render(<App />);
