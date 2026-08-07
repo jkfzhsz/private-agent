@@ -133,6 +133,10 @@ class MCPClient:
         # 自动协商状态
         self._negotiated: str | None = None   # 协商后的协议版本(进程内)
         self._session_id: str | None = None   # 旧协议 Mcp-Session-Id
+        # 2026-08-07: discover_tools 缓存的 serverInfo(name/version),
+        # 供 test API 返回有意义的 server 标识(避免误显示协议版本号"2026-07-28"
+        # 被误读为"连接时间")
+        self._server_info: dict[str, Any] = {}
 
     # --------------------------------------------------------------------------
     # Properties
@@ -272,16 +276,19 @@ class MCPClient:
     # --------------------------------------------------------------------------
 
     async def discover_tools(self) -> list[dict]:
-        """调用 MCP tools/list 发现服务器工具列表。"""
+        """调用 MCP tools/list 发现服务器工具列表(同步缓存 serverInfo 到 self._server_info)。"""
         if not self._connected:
             raise RuntimeError(f"MCP server '{self._config.server_id}' not connected")
 
         if self._config.server_type == "http":
             result = await self._http_post("tools/list")
+            self._server_info = result.get("serverInfo") or {}
             return result.get("tools", [])
 
         response = await self._send_request({"method": "tools/list"})
-        return response.get("result", {}).get("tools", [])
+        result = response.get("result", {}) or {}
+        self._server_info = result.get("serverInfo") or {}
+        return result.get("tools", [])
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict:
         """调用 MCP tools/call 执行工具(自动协商协议版本)。

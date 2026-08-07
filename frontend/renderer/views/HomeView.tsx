@@ -1,7 +1,7 @@
 // Phase 1.5 - HomeView 首页
 // 顶部: 壁纸背景(由设置页"主题壁纸"管理) + 暖心短语 + 天气
 // 中部: 三个模式按钮(工作/分析/设计)
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
 
@@ -126,6 +126,48 @@ export default function HomeView({
   const px = hasOverflow ? wpStyle.position_x : 50;
   const py = hasOverflow ? wpStyle.position_y : 50;
 
+  // 2026-08-07 修复"壁纸被切割"反馈: 用户上传横屏图(3:2 全景), HomeView
+  // 容器(flex 占剩余空间)较窄时 cover 模式会让图片放大到左右填满, 上下
+  // 被裁出可视区域 → 只见中间一段。
+  // 解决: 图片 onLoad 时取 naturalWidth/naturalHeight, 与容器 clientWidth/
+  // clientHeight 对比, 若图片与容器宽高比差 > 2.0(横图配明显竖容器), 自动
+  // 从 cover 临时切到 contain, 让用户看到完整图。用户 wpStyle.fit 偏好不
+  // 变(下次进设置还是 cover)。
+  const [imgRatio, setImgRatio] = useState<number | null>(null);
+  const [boxRatio, setBoxRatio] = useState<number | null>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (wpType !== "image" || !wallpaper) return;
+    const el = document.createElement("img");
+    el.onload = () => {
+      setImgRatio(el.naturalWidth / Math.max(1, el.naturalHeight));
+    };
+    el.src = wallpaper;
+  }, [wallpaper, wpType]);
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const measure = () => {
+      const r = box.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        setBoxRatio(r.width / r.height);
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, []);
+  const extremeMismatch =
+    imgRatio != null && boxRatio != null &&
+    Math.max(imgRatio / boxRatio, boxRatio / imgRatio) > 2.0;
+  const effectiveFit =
+    wpType === "image" && extremeMismatch && wpStyle.fit === "cover"
+      ? "contain"
+      : wpStyle.fit === "contain"
+        ? "contain"
+        : "cover";
+
   return (
     <div
       style={{
@@ -205,6 +247,7 @@ export default function HomeView({
 
       {/* ② 中间: 壁纸区(居中显示, 占满剩余空间) */}
       <div
+        ref={boxRef}
         className="glass-panel"
         style={{
           flex: 1,
@@ -256,7 +299,7 @@ export default function HomeView({
               top: `${py}%`,
               width: `${wpStyle.scale ?? 100}%`,
               height: `${wpStyle.scale ?? 100}%`,
-              objectFit: wpStyle.fit === "contain" ? "contain" : "cover",
+              objectFit: effectiveFit,
               transform: `translate(-${px}%, -${py}%) rotate(${wpStyle.rotate ?? 0}deg)`,
             }}
           />

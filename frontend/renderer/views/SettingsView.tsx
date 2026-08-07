@@ -1485,11 +1485,18 @@ function McpRow({
         method: "POST",
       });
       const data = await resp.json();
-      setMsg(
-        data.ok
-          ? `✅ 连接正常 (${data.server_info || data.protocol || "ok"})`
-          : `❌ ${data.error ?? "测试失败"}`
-      );
+      if (data.ok) {
+        // 2026-08-07 修复 UI 误导: 之前 `data.server_info || data.protocol || "ok"`
+        // 把"2026-07-28"(MCP 协议版本号)显示出来, 被用户误读为"连接时间"。
+        // 现在按"服务器名 · N 工具 · Xms"显示, 协议版本号放 detail 字段。
+        const name = data.server || server.id;
+        const tools = data.tools_count ?? "—";
+        const lat = data.latency_ms != null ? `${data.latency_ms}ms` : "";
+        const detail = data.detail ? ` · ${data.detail}` : "";
+        setMsg(`✅ ${name} · ${tools} 工具 ${lat}${detail}`);
+      } else {
+        setMsg(`❌ ${data.error ?? "测试失败"}`);
+      }
     } catch (err) {
       setMsg(`测试失败: ${String(err)}`);
     } finally {

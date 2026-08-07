@@ -5685,6 +5685,10 @@ async def _test_mcp_http(
     """HTTP MCP 探活: 复用 MCPClient(自动协商协议 + SSE 流式 + Bearer 认证)。"""
     from private_agent.tools.mcp_client import MCPClient, MCPClientConfig
 
+    # 2026-08-07 修复 UI 误导: 协议版本号不再放主显示, 改返回 server_name/
+    # server_version/tools_count/latency_ms 供前端展示"服务器名 · N工具 · Xms"。
+    import time as _time
+
     client = MCPClient(
         MCPClientConfig(
             server_id=name,
@@ -5695,16 +5699,32 @@ async def _test_mcp_http(
             protocol_version=protocol_version,
         )
     )
-    async with client:
-        await client.connect()
-        tools = await client.discover_tools()
-        return {
-            "ok": True,
-            "server": name,
-            "protocol": client.negotiated_version or protocol_version,
-            "negotiated": client.negotiated_version,
-            "tools_count": len(tools),
-        }
+    t0 = _time.monotonic()
+    try:
+        async with client:
+            await client.connect()
+            tools = await client.discover_tools()
+            server_info = getattr(client, "_server_info", None) or {}
+            server_name = (
+                (server_info.get("name") if isinstance(server_info, dict) else None)
+                or name
+            )
+            server_version = (
+                server_info.get("version") if isinstance(server_info, dict) else ""
+            )
+            latency_ms = round((_time.monotonic() - t0) * 1000, 1)
+            return {
+                "ok": True,
+                "server": server_name,
+                "server_id": name,
+                "server_version": server_version,
+                "tools_count": len(tools),
+                "latency_ms": latency_ms,
+                "detail": f"HTTP MCP {client.negotiated_version or protocol_version}",
+                "negotiated": client.negotiated_version,
+            }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}
 
 
 async def _test_mcp_stdio(name: str, command: str, args: list[str], auth_token: str = "") -> dict:
@@ -5742,18 +5762,35 @@ async def _test_mcp_stdio(name: str, command: str, args: list[str], auth_token: 
         }
         import json as _json
 
+        # 2026-08-07 修复 UI 误导: 之前固定返回 "2026-07-28", 被前端 fallback
+        # 显示成类似"连接时间"的格式, 引发用户误解"为什么时间是 7 月 28 日"
+        # → 改为返回 server 真实名 + 工具数 + 耗时, 前端按"服务器名 · N 工具 · Xms"
+        # 显示, 协议版本号放 detail 字段(默认折叠, 不进主显示)。
+        import time as _time
+
+        t0 = _time.monotonic()
         proc.stdin.write((_json.dumps(payload) + "\n").encode("utf-8"))
         await proc.stdin.drain()
         line = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
+        latency_ms = round((_time.monotonic() - t0) * 1000, 1)
         data = _json.loads(line.decode("utf-8"))
         result = data.get("result", {})
         tools = result.get("tools", [])
+        server_info = result.get("serverInfo", {}) or {}
+        server_name = (
+            server_info.get("name")
+            or result.get("name")
+            or name  # 最后兜底用 server id
+        )
+        server_version = server_info.get("version", "")
         return {
             "ok": True,
-            "server": name,
-            "protocol": "2026-07-28",
-            "server_info": result.get("serverInfo", {}).get("name", ""),
+            "server": server_name,
+            "server_id": name,
+            "server_version": server_version,
             "tools_count": len(tools),
+            "latency_ms": latency_ms,
+            "detail": "stdio MCP 2026-07-28 无状态协议",
         }
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}

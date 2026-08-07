@@ -30,6 +30,24 @@ class TestMcpResultToText:
         })
         assert "[图片数据]" in r and "done" in r
 
+    def test_fully_empty_result_returns_explicit_placeholder(self):
+        """2026-08-07: 完全空 result(无 content 也不带其他字段)不应静默返回空串,
+        而要给 LLM 一个明确占位以区分"无数据"与"协议结构问题",便于换工具或重试。
+        含其他字段(如 foo: bar)时仍走 JSON 回退路径, 与原行为一致。
+        """
+        # 只有空 content → 新占位
+        r = mcp_result_to_text({"content": []})
+        assert "[工具返回空]" in r and "重试" in r
+        # 完全空 dict → 新占位
+        r2 = mcp_result_to_text({})
+        assert "[工具返回空]" in r2
+        # isError 且无内容 → isError 优先
+        r3 = mcp_result_to_text({"isError": True})
+        assert "[工具错误]" in r3
+        # 有额外字段时仍走原 JSON 回退(避免破坏既有契约)
+        r4 = mcp_result_to_text({"content": [], "data": [1, 2]})
+        assert "重试" not in r4 and "[1,2]" in r4.replace(" ", "")
+
 
 class TestMcpToolManager:
     def _fake_client(self, tools: list[dict]):

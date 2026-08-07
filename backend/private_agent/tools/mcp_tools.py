@@ -70,7 +70,9 @@ def mcp_result_to_text(result: dict) -> str:
         result: MCP 工具调用结果 dict(含 content 列表 / isError 等)。
 
     Returns:
-        拼接后的文本(空 content 时回退为剩余字段的 JSON)。
+        拼接后的文本(空 content 时回退为剩余字段的 JSON; 完全空时给出
+        明确占位, 避免 LLM 把 "空串" 误读为"工具正常但没结果"——尤其
+        stdio server(协议未传 content)+ 并发 write_lock 阻塞场景)。
     """
     parts: list[str] = []
     for item in result.get("content", []):
@@ -92,6 +94,11 @@ def mcp_result_to_text(result: dict) -> str:
         remaining = {k: v for k, v in result.items() if k not in ("content",)}
         if remaining:
             text = json.dumps(remaining, ensure_ascii=False)
+    # 2026-08-07: 完全空 result(无 content 且无其他字段)常见于 stdio 并发写
+    # 入交错或 server 协议不返 content, 给 LLM 一个明确占位而非空串, 让模型
+    # 能识别"这是工具结构问题, 不是没有数据"并可主动重试/换工具。
+    if not text:
+        return "[工具返回空] 该工具未回传 content 字段, 请检查 server 协议或换个工具重试"
     return text
 
 
