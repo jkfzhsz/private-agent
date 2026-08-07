@@ -5637,11 +5637,17 @@ async def _test_mcp_stdio(name: str, command: str, args: list[str], auth_token: 
 
     if not command:
         return {"ok": False, "server": name, "error": "stdio server 缺少 command"}
+    # 2026-08-07: 注入 PYTHONIOENCODING=utf-8 + server 级 env —— 与主链路
+    # MCPClient(env={**os.environ, **config.env}) 对齐; 缺 PYTHONIOENCODING
+    # 时 Windows Python 子进程 stdout 为 GBK, 含中文 JSON 响应乱码 →
+    # tools/list 解析为空(Searchpin tools_count=0 根因)
+    svc_env = {"PYTHONIOENCODING": "utf-8"}
     proc = await asyncio.create_subprocess_exec(
         command, *args,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, **svc_env},
     )
     try:
         payload = {
