@@ -1133,3 +1133,106 @@ def test_run_turn_error_event_payload_contains_message():
     assert event["event_type"] == "error"
     assert "message" in event["payload"]
     assert "simulated failure" in event["payload"]["message"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2026-08-08: MCP 工具参数注入回归 —— T-1 data_dir/workspace 只注入内置文件工具
+# Source: mempalace/searchpin 调用"返回空"终极根因(注入未知参数 → server 校验失败)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_tool_injection_skips_mcp_tools_but_applies_to_file_tools():
+    """ReactLoop 对 MCP 工具(mcp__ 前缀)不得注入 data_dir/workspace;
+    对内置文件工具(file_read/file_write/read_artifact)必须注入。
+
+    2026-08-08 根因: _exec_plan 原对所有工具无条件注入 data_dir/workspace,
+    MCP server(inputSchema 严格校验)收到未知参数 → 参数校验失败 → isError
+    → output 空 → LLM 看到"空结果"。
+    """
+    _setup_schema()
+
+    captured: dict[str, dict] = {}
+
+    async def _mcp_handler(args: dict):
+        captured["mcp"] = dict(args)
+        return ToolResult(output="mcp-ok")
+
+    async def _file_handler(args: dict):
+        captured["file"] = dict(args)
+        return ToolResult(output="file-ok")
+
+    mcp_tool = ToolDef(
+        name="mcp__mempalace__mempalace_status",
+        description="test mcp tool",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=_mcp_handler,
+    )
+    file_tool = ToolDef(
+        name="file_read",
+        description="test file tool",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=_file_handler,
+    )
+
+    async def _run() -> list[str]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id, system_prompt="sys", tools=[mcp_tool, file_tool]
+            )
+            await cm.build_initial(conn)
+            adapter = _MockAdapter(
+                responses=[
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "call_mcp",
+                                "type": "function",
+                                "function": {
+                                    "name": "mcp__mempalace__mempalace_status",
+                                    "arguments": "{}",
+                                },
+                            },
+                            {
+                                "id": "call_file",
+                                "type": "function",
+                                "function": {
+                                    "name": "file_read",
+                                    "arguments": '{"path": "x"}',
+                                },
+                            },
+                        ],
+                        used_provider="mock",
+                    ),
+                    ChatResult(content="done", used_provider="mock"),
+                ]
+            )
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=adapter,
+                tools=[mcp_tool, file_tool],
+                conn=conn,
+                cfg={"system": {"workspace_root": r"D:\work"}},
+            )
+            await loop.run_turn("test")
+            events = []
+            while not loop.event_queue.empty():
+                events.append(loop.event_queue.get_nowait())
+            return [e["event_type"] for e in events]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+    # MCP 工具: 不得注入 data_dir/workspace(否则 server 参数校验失败 → 空结果)
+    assert "data_dir" not in captured.get("mcp", {}), (
+        f"MCP 工具被注入 data_dir: {captured.get('mcp')}"
+    )
+    assert "workspace" not in captured.get("mcp", {}), (
+        f"MCP 工具被注入 workspace: {captured.get('mcp')}"
+    )
+    # 内置文件工具: 必须注入(路径校验安全网, T-1 原语义)
+    assert captured.get("file", {}).get("data_dir") == r"D:\work"
+    assert captured.get("file", {}).get("workspace") == r"D:\work"

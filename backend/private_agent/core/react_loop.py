@@ -788,6 +788,14 @@ class ReactLoop:
                             # T-1(架构修订 A.1.4): 路径校验由服务端强制 ——
                             # 覆盖 LLM 提供的 data_dir/workspace 为会话工作区,
                             # 防止模型省略该字段跳过 file_read/write 路径校验。
+                            # 2026-08-08 修复: 仅对内置文件工具(file_read/
+                            # file_write)注入 —— 此前对所有工具(含 MCP 工具)
+                            # 无条件注入, MCP server(inputSchema 严格校验)
+                            # 收到未知参数 data_dir/workspace → 参数校验失败
+                            # → isError → output 空 → LLM 看到"空结果"
+                            # (mempalace/searchpin 工具调用"返回空"的终极根因;
+                            # 设置页 test 不走 ReactLoop 无注入 → 一直正常,
+                            # 故此前每次修复都绕过了这一层)。
                             args = dict(plan["args"])
                             ws_root = os.path.expandvars(
                                 str(
@@ -796,7 +804,11 @@ class ReactLoop:
                                     .get("workspace_root", "")
                                 )
                             )
-                            if ws_root:
+                            if ws_root and plan["tool_name"] in (
+                                "file_read",
+                                "file_write",
+                                "read_artifact",
+                            ):
                                 args["data_dir"] = ws_root
                                 args["workspace"] = ws_root
                             # T-2(架构修订 A.2.5): 工具执行超时按类别分级
