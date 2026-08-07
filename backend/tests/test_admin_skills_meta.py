@@ -192,3 +192,34 @@ async def test_delete_skill_in_use_rejected(client, schema):
     resp = await client.delete("/admin/skills/locked_skill")
     assert resp.status_code == 400
     assert (dev_dir / "locked_skill").exists()  # 未删除
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Skill 健康测试(2026-08-07 基础功能补齐: 让技能"可测试")
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def test_skill_test_endpoint(client, schema):
+    """POST /admin/skills/{name}/test: 加载/工具白名单/system_prompt 校验。"""
+    client, dev_dir = client
+    _make_skill(dev_dir, "echo_skill")
+
+    resp = await client.post("/admin/skills/echo_skill/test")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["ok"] is True
+    names = [c["name"] for c in d["checks"]]
+    assert "加载" in names
+    assert "工具白名单" in names
+    assert "system_prompt" in names
+
+
+async def test_skill_test_missing_skill(client, schema):
+    """不存在的技能 → 200 + ok=false + 加载失败详情(非 500)。"""
+    client, _ = client
+    resp = await client.post("/admin/skills/no_such_skill_xyz/test")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["ok"] is False
+    assert d["checks"][0]["name"] == "加载"
+    assert d["checks"][0]["ok"] is False

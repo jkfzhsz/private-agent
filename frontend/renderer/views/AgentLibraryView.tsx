@@ -93,6 +93,36 @@ export default function AgentLibraryView({
     }
   };
 
+  // 2026-08-07: 技能健康测试(加载/工具白名单/system_prompt 一键校验)
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{
+    name: string;
+    ok: boolean;
+    checks: { name: string; ok: boolean; detail: string }[];
+  } | null>(null);
+
+  const testSkill = async (s: SkillItem): Promise<void> => {
+    setTesting(s.name);
+    setTestResult(null);
+    try {
+      const resp = await adminFetch(`${API_BASE}/skills/${s.name}/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      setTestResult({
+        name: s.name,
+        ok: Boolean(data.ok),
+        checks: Array.isArray(data.checks) ? data.checks : [],
+      });
+    } catch (e) {
+      setTestResult({ name: s.name, ok: false, checks: [{ name: "请求", ok: false, detail: String(e) }] });
+    } finally {
+      setTesting(null);
+    }
+  };
+
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -181,6 +211,23 @@ export default function AgentLibraryView({
                   flexShrink: 0,
                   padding: "6px 12px",
                   fontSize: 12,
+                  border: "1px solid rgba(148,163,184,0.4)",
+                  borderRadius: 6,
+                  background: "#fff",
+                  color: "var(--text-secondary)",
+                  cursor: "pointer",
+                }}
+                title="一键验证技能能否加载/工具是否齐全"
+                onClick={() => void testSkill(s)}
+                disabled={testing === s.name}
+              >
+                {testing === s.name ? "测试中…" : "🔍 测试"}
+              </button>
+              <button
+                style={{
+                  flexShrink: 0,
+                  padding: "6px 12px",
+                  fontSize: 12,
                   border: "1px solid rgba(220,38,38,0.3)",
                   borderRadius: 6,
                   background: "rgba(254,226,226,0.4)",
@@ -193,6 +240,23 @@ export default function AgentLibraryView({
                 🗑 删除
               </button>
             </div>
+            {testResult && testResult.name === s.name && (
+              <div
+                style={{
+                  fontSize: 11, padding: "8px 10px", borderRadius: 8,
+                  background: testResult.ok ? "rgba(209,250,229,0.5)" : "rgba(254,226,226,0.5)",
+                  color: testResult.ok ? "#047857" : "#b91c1c",
+                  lineHeight: 1.6,
+                }}
+              >
+                {testResult.ok ? "✅ 技能正常" : "❌ 技能存在问题"} · 工具数 {testResult.checks.length ? "" : "—"}
+                {testResult.checks.map((c) => (
+                  <div key={c.name}>
+                    {c.ok ? "✓" : "✗"} {c.name}: {c.detail}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ))}
       </div>

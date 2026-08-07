@@ -749,6 +749,81 @@ async def activate_skill(session_id: int, body: ActivateSkillRequest):
         )
 
 
+@router.post("/skills/{name}/test", response_model=None)
+async def test_skill(name: str):
+    """Skill 健康测试(2026-08-07, 基础功能补齐: 让技能"可测试")。
+
+    只读校验(不写会话状态、不激活): 加载 → 工具白名单 → system_prompt
+    构建。任一环节失败返回 ok=false + 具体原因, 供前端"测试"按钮展示。
+
+    Returns:
+        200: {"ok": bool, "checks": [{"name", "ok", "detail"}],
+              "tools_count": int}
+        404: {"ok": false, "checks": [{"name": "加载", "ok": false, ...}]}
+    """
+    from private_agent.skills.errors import (
+        SkillNotFoundError,
+        SkillValidationError,
+    )
+
+    conn = await db.connect()
+    try:
+        cfg = loader.load_config()
+        mgr = _build_skill_manager(cfg)
+        try:
+            skill = await mgr.loader.load(name, conn)
+        except SkillNotFoundError:
+            return {
+                "ok": False,
+                "checks": [{"name": "加载", "ok": False, "detail": "技能不存在"}],
+                "tools_count": 0,
+            }
+        except Exception as e:  # noqa: BLE001
+            return {
+                "ok": False,
+                "checks": [{"name": "加载", "ok": False, "detail": f"{type(e).__name__}: {e}"}],
+                "tools_count": 0,
+            }
+
+        checks = [
+            {"name": "加载", "ok": True, "detail": f"v{skill.manifest.version}"}
+        ]
+
+        # 工具白名单校验(manifest 引用必须都在 ToolRegistry)
+        try:
+            mgr._validate_tools(skill.manifest.dependencies.tools)
+            enabled = [
+                t.name for t in skill.manifest.dependencies.tools if t.enabled
+            ]
+            checks.append(
+                {"name": "工具白名单", "ok": True, "detail": f"{len(enabled)} 个启用工具"}
+            )
+        except SkillValidationError as e:
+            return {
+                "ok": False,
+                "checks": checks
+                + [{"name": "工具白名单", "ok": False, "detail": str(e)}],
+                "tools_count": len(enabled) if "enabled" in locals() else 0,
+            }
+
+        # system_prompt 构建(模板变量 + 少样本注入; session=0 无行, 不写库)
+        try:
+            sp = await mgr.build_system_prompt(skill, name, 0, conn)
+            checks.append({"name": "system_prompt", "ok": True, "detail": f"{len(sp)} 字符"})
+        except Exception as e:  # noqa: BLE001
+            checks.append(
+                {"name": "system_prompt", "ok": False, "detail": f"{type(e).__name__}: {e}"}
+            )
+
+        return {
+            "ok": all(c["ok"] for c in checks),
+            "checks": checks,
+            "tools_count": len(enabled),
+        }
+    finally:
+        await conn.close()
+
+
 @router.get("/skills", response_model=None)
 async def list_skills():
     """列出所有 enabled Skill(plan step 17)。
