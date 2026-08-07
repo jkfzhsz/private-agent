@@ -301,7 +301,12 @@ class MCPClient:
             "method": "tools/call",
             "params": {"name": name, "arguments": arguments},
         })
-        return response.get("result", {})
+        # 2026-08-06: server 返回 JSON-RPC error(非 result)时透传 isError,
+        # 避免被 mcp_result_to_text 静默吞成"空结果"(排查 MCP 空返回根因)
+        result = response.get("result", {})
+        if "error" in response and not result:
+            return {"isError": True, "error": response.get("error")}
+        return result
 
     # --------------------------------------------------------------------------
     # 双探活:ping / health_check / liveness_loop
@@ -520,7 +525,12 @@ class MCPClient:
         data = await self._parse_http_response(resp)
         if is_ping:
             return "result" in data and "error" not in data
-        return data.get("result", {})
+        # 2026-08-06: HTTP 4xx/5xx 或解析失败(data 为 {"error": ...})时透传
+        # isError —— 原实现 data.get("result", {}) 静默吞成"空结果"
+        result = data.get("result", {})
+        if "error" in data and not result:
+            return {"isError": True, "error": data.get("error")}
+        return result
 
     async def _http_post(
         self, method: str, params: dict[str, Any] | None = None, name: str | None = None

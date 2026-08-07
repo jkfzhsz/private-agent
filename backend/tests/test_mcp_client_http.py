@@ -158,3 +158,38 @@ class TestMCPClientHttp:
         client = _mock_client(lambda r: httpx.Response(404), http_config)
         with pytest.raises(RuntimeError, match="not connected"):
             await client.discover_tools()
+
+
+class TestErrorVisibility:
+    """2026-08-06: JSON-RPC error / HTTP 错误透传 isError(不静默空)。"""
+
+    async def test_http_4xx_returns_iserror(self, http_config: MCPClientConfig) -> None:
+        """HTTP 4xx + JSON error body → call_tool 返回 isError(而非空 result)。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                500,
+                json={"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "boom"}},
+            )
+
+        client = _mock_client(handler, http_config)
+        client._connected = True
+        result = await client.call_tool("web_search", {"query": "x"})
+        assert result.get("isError") is True
+        assert "boom" in str(result.get("error"))
+
+    async def test_http_error_body_no_result_returns_iserror(
+        self, http_config: MCPClientConfig
+    ) -> None:
+        """200 但 body 为 JSON-RPC error → isError 透传(修复空结果根因)。"""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "internal"}},
+            )
+
+        client = _mock_client(handler, http_config)
+        client._connected = True
+        result = await client.call_tool("web_search", {"query": "x"})
+        assert result.get("isError") is True
+        assert "internal" in str(result.get("error"))
