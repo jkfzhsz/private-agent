@@ -2831,6 +2831,12 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
   // 2026-08-04 加固: video/img 加载失败时显示提示(原代码静默失败用户看不到原因)
   const [loadError, setLoadError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // 2026-08-07: 预览与首页自适应逻辑对齐 —— 图片横屏(宽高比)与预览容器
+  // (240x136 偏竖)差 > 2.0 时 cover 会裁切, 预览需与首页一样自动 contain
+  // + 模糊填充, 否则"首页完整、设置页截断"两侧不一致(用户反馈)。
+  const [imgRatio, setImgRatio] = useState<number | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const [boxRatio, setBoxRatio] = useState<number | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoadError(null);
@@ -2860,6 +2866,42 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 2026-08-07: 预览图片比例检测(与首页 HomeView 一致) —— 横屏图 + 偏竖
+  // 预览容器时 cover 裁切, 自动切 contain 保证预览与首页所见一致。
+  useEffect(() => {
+    if (wpType !== "image" || !wallpaper) return;
+    const el = document.createElement("img");
+    el.onload = () => {
+      setImgRatio(el.naturalWidth / Math.max(1, el.naturalHeight));
+    };
+    el.src = wallpaper;
+  }, [wallpaper, wpType]);
+  useEffect(() => {
+    const box = previewRef.current;
+    if (!box) return;
+    const measure = () => {
+      const r = box.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        setBoxRatio(r.width / r.height);
+      }
+    };
+    measure();
+    // jsdom 测试环境无 ResizeObserver → 优雅降级(仅测量一次)
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, []);
+  const extremeMismatch =
+    imgRatio != null && boxRatio != null &&
+    Math.max(imgRatio / boxRatio, boxRatio / imgRatio) > 2.0;
+  const effectiveFit: "cover" | "contain" =
+    wpType === "image" && extremeMismatch && fit === "cover"
+      ? "contain"
+      : fit === "contain"
+        ? "contain"
+        : "cover";
 
   const saveStyle = async (): Promise<void> => {
     setBusy(true);
@@ -2958,6 +3000,7 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
       </div>
       <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
         <div
+          ref={previewRef}
           style={{
             width: 240,
             height: 136,
@@ -2995,6 +3038,23 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
               }}
             />
           )}
+          {wallpaper && wpType === "image" && effectiveFit === "contain" && (
+            <img
+              src={wallpaper}
+              alt=""
+              aria-hidden
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                filter: "blur(20px) saturate(1.15)",
+                transform: "scale(1.15)",
+                opacity: 0.9,
+              }}
+            />
+          )}
           {wallpaper && wpType === "image" && (
             <img
               src={wallpaper}
@@ -3009,7 +3069,7 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
                 top: `${scale > 100 ? posY : 50}%`,
                 width: `${scale}%`,
                 height: `${scale}%`,
-                objectFit: fit,
+                objectFit: effectiveFit,
                 transform: `translate(-${scale > 100 ? posX : 50}%, -${scale > 100 ? posY : 50}%) rotate(${rotate}deg)`,
                 display: "block",
               }}

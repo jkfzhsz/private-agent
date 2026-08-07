@@ -69,6 +69,33 @@ def test_always_include_anchored():
     assert len(selected) <= 3  # top_n(2) + 锚点(1)
 
 
+def test_always_include_wildcard_prefix():
+    """V1.5.1(2026-08-07): always_include 支持 fnmatch 通配前缀 ——
+    记忆/搜索类 server(mcp__mempalace__*)整组工具无条件注入,
+    修复 top-15 竞争把 mempalace 关键工具挤出模型可见集的根因。
+    """
+    sel = ToolSelector({
+        "tools": {"tool_selection": {
+            "enabled": True, "top_n": 2, "min_pool_size": 3,
+            "always_include": ["mcp__mempalace__*"],
+        }}
+    })
+    tools = (
+        [_tool(f"t{i}") for i in range(10)]
+        + [
+            _tool("mcp__mempalace__mempalace_status", "palace status"),
+            _tool("mcp__mempalace__mempalace_search", "search memory"),
+            _tool("mcp__mempalace__mempalace_kg_query", "kg query"),
+        ]
+    )
+    selected = sel.select(tools, "完全无关的内容 keywords")
+    names = {t.name for t in selected}
+    # 通配锚点下的 3 个 mempalace 工具全部无条件注入(即使与查询无关)
+    assert "mcp__mempalace__mempalace_status" in names
+    assert "mcp__mempalace__mempalace_search" in names
+    assert "mcp__mempalace__mempalace_kg_query" in names
+
+
 def test_keyword_relevance_ranking():
     # 相关工具(描述含关键词)应优先于无关工具
     sel = ToolSelector({"tools": {"tool_selection": {"enabled": True, "top_n": 3, "min_pool_size": 3}}})

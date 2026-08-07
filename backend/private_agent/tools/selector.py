@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from collections import Counter
 
@@ -72,12 +73,20 @@ class ToolSelector:
             return tools
         query_tokens = _tokenize(user_message)
         # 内核工具 + always_include 配置 → 锚点集合
+        # V1.5.1(2026-08-07 修复): always_include 支持 fnmatch 通配前缀
+        # (如 "mcp__mempalace__*"), 使记忆/搜索类 server 的整组工具无条件
+        # 注入 —— 修复 "LLM 看不到 mempalace/Searchpin 工具→返回空" 的注入层
+        # 裁剪根因(top-15 竞争把关键工具挤出模型可见集)。
         anchors = [
             t for t in tools
-            if t.name in self.always_include or getattr(t, "is_kernel", True)
+            if any(fnmatch.fnmatch(t.name, pat) for pat in self.always_include)
+            or getattr(t, "is_kernel", True)
         ]
-        rest = [t for t in tools if t.name not in self.always_include
-                and not getattr(t, "is_kernel", True)]
+        rest = [
+            t for t in tools
+            if not any(fnmatch.fnmatch(t.name, pat) for pat in self.always_include)
+            and not getattr(t, "is_kernel", True)
+        ]
         ranked = sorted(rest, key=lambda t: self._score(t, query_tokens), reverse=True)
         # top-N 减去锚点数后从 rest 取(防超限)
         remaining = max(1, self.top_n - len(anchors))

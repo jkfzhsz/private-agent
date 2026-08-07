@@ -186,20 +186,28 @@ tools:
     # 会话激活某 skill 时只装配绑定列表内的 server(支持 * 通配),
     # 工具池从全量收敛到 skill 相关子集; 未列出的 skill 装配全部(兼容旧行为)。
     # 注意: 绑定不宜过窄 —— 工作模式也常问行情/新闻, 故 office 保留常用金融 MCP。
+    # V1.5.1(2026-08-07 修复): 记忆(mempalace)/搜索(Searchpin)是跨模式通用
+    # 能力, 三个模式全部装配 —— 修复 "LLM 调用 mempalace/Searchpin 返回空"
+    # 的装配层根因(此前 office 两工具均不装配, data_analysis 缺 Searchpin,
+    # 模型看不到工具自然返回空)。
     skill_binding:
-      office: ["hexin-ifind-ds-stock-mcp", "hexin-ifind-ds-index-mcp", "hexin-ifind-ds-news-mcp"]
-      data_analysis: ["hexin-ifind-ds-*", "mempalace"]
-      frontend_design: ["mempalace"]
+      office: ["hexin-ifind-ds-stock-mcp", "hexin-ifind-ds-index-mcp", "hexin-ifind-ds-news-mcp", "mempalace", "Searchpin"]
+      data_analysis: ["hexin-ifind-ds-*", "mempalace", "Searchpin"]
+      frontend_design: ["mempalace", "Searchpin"]
   # 对话流畅度优化(方向一): 每轮动态 top-N 工具注入(避免全量 schema)
   tool_selection:
     enabled: true
     strategy: "keyword_score"  # 关键词/描述匹配(确定性)
     top_n: 15                  # 每轮注入上限(工具 schema ~2-3k token)
     min_pool_size: 8           # 池内工具 ≤ 8 时全量注入(小池无需裁剪)
-    always_include:            # 锚点: 无条件注入
+    always_include:            # 锚点: 无条件注入(支持 fnmatch 通配, V1.5.1)
       - "code_execution"
       - "file_read"
       - "file_write"
+      # V1.5.1: 记忆/搜索整组工具无条件注入 —— 修复 top-15 竞争把
+      # mempalace_search/mempalace_kg_query 挤出模型可见集 → LLM 返回空
+      - "mcp__mempalace__*"
+      - "mcp__Searchpin__*"
   web_search:
     backend: "duckduckgo"  # duckduckgo(国际,无 key) | bocha(已停用) | bing(HTML 解析, 当前默认 .env)
     # 外部服务统一从前端接入(MCP), 专用搜索 API(如 bocha)不再后端配置

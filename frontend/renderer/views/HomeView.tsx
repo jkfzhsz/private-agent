@@ -154,6 +154,8 @@ export default function HomeView({
       }
     };
     measure();
+    // jsdom 测试环境无 ResizeObserver → 优雅降级(仅测量一次)
+    if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(measure);
     ro.observe(box);
     return () => ro.disconnect();
@@ -266,6 +268,26 @@ export default function HomeView({
               "linear-gradient(135deg, #eef1f8 0%, #e6ebf6 45%, #ece7f7 100%)",
           }}
         />
+        {/* 2026-08-07 模糊填充层: 图片 fit=contain 时(完整显示)在底层铺一张
+            模糊放大的同图(cover), 让"完整可见"与"视觉铺满"兼得 —— 修复
+            "contain 模式留白/不满"反馈; 顶层 contain 的清晰图叠加其上。 */}
+        {wallpaper && wpType === "image" && effectiveFit === "contain" && (
+          <img
+            src={wallpaper}
+            alt=""
+            aria-hidden
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              filter: "blur(28px) saturate(1.15)",
+              transform: "scale(1.18)",
+              opacity: 0.9,
+            }}
+          />
+        )}
         {/* 用户壁纸/视频背景(支持位置/填充/缩放/旋转; 视频自动循环播放) */}
         {wallpaper && wpType === "video" && (
           <video
