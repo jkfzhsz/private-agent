@@ -147,7 +147,7 @@ function getSessionIdFromUrl(): number {
 const taskBtnStyle: React.CSSProperties = {
   fontSize: 12,
   padding: "5px 14px",
-  borderRadius: 6,
+  borderRadius: 10,
   border: "1px solid #ddd",
   background: "#fff",
   color: "#334155",
@@ -192,7 +192,7 @@ function MsgActionBtn({
         border: "1px solid #e5e7eb",
         background: "#f9fafb",
         color: danger ? "#dc2626" : "#6b7280",
-        borderRadius: 6,
+        borderRadius: 10,
         padding: "3px 10px",
         cursor: "pointer",
         lineHeight: 1.5,
@@ -1563,7 +1563,7 @@ export default function App(): JSX.Element {
                     onClick={() => setSkillPickerOpen(true)}
                     title="切换技能(将新建会话)"
                     style={{
-                      fontSize: 12, padding: "4px 12px", borderRadius: 8,
+                      fontSize: 12, padding: "4px 12px", borderRadius: 10,
                       border: "1px solid #ddd", background: "#fff", cursor: "pointer",
                     }}
                   >
@@ -1577,7 +1577,7 @@ export default function App(): JSX.Element {
                     style={{
                       fontSize: 11,
                       padding: "4px 8px",
-                      borderRadius: 6,
+                      borderRadius: 10,
                       border: "1px solid rgba(148,163,184,0.3)",
                       background: "rgba(255,255,255,0.6)",
                       color: "var(--text-primary)",
@@ -1598,7 +1598,7 @@ export default function App(): JSX.Element {
                     onClick={toggleTheme}
                     title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
                     style={{
-                      fontSize: 13, padding: "4px 10px", borderRadius: 8,
+                      fontSize: 13, padding: "4px 10px", borderRadius: 10,
                       border: "1px solid #ddd", background: "#fff", cursor: "pointer",
                     }}
                   >
@@ -1609,7 +1609,7 @@ export default function App(): JSX.Element {
                     onClick={() => void openSettings()}
                     title="会话设置(记忆/截断/系统提示词)"
                     style={{
-                      fontSize: 12, padding: "4px 10px", borderRadius: 8,
+                      fontSize: 12, padding: "4px 10px", borderRadius: 10,
                       border: "1px solid #ddd", background: "#fff", cursor: "pointer",
                     }}
                   >
@@ -1623,7 +1623,7 @@ export default function App(): JSX.Element {
                     }}
                     title="任务执行状态"
                     style={{
-                      fontSize: 12, padding: "4px 10px", borderRadius: 8,
+                      fontSize: 12, padding: "4px 10px", borderRadius: 10,
                       border: "1px solid #ddd", background: "#fff", cursor: "pointer",
                     }}
                   >
@@ -1639,7 +1639,7 @@ export default function App(): JSX.Element {
                       gap: 10,
                       margin: "0 4px 8px",
                       padding: "8px 12px",
-                      borderRadius: 8,
+                      borderRadius: 10,
                       background: "#fff8e1",
                       border: "1px solid #ffcc80",
                       fontSize: 12,
@@ -1653,7 +1653,7 @@ export default function App(): JSX.Element {
                     <button
                       onClick={() => resumeSession()}
                       style={{
-                        fontSize: 12, padding: "4px 14px", borderRadius: 6,
+                        fontSize: 12, padding: "4px 14px", borderRadius: 10,
                         border: "1px solid #e6a23c", background: "#f7a83b",
                         color: "#fff", cursor: "pointer", fontWeight: 600,
                       }}
@@ -1755,7 +1755,7 @@ export default function App(): JSX.Element {
                           marginLeft: 6,
                           padding: "4px 8px",
                           fontSize: 11,
-                          borderRadius: 6,
+                          borderRadius: 10,
                           border: "1px solid var(--border)",
                           background: "var(--panel-bg)",
                           color: "var(--text-tertiary)",
@@ -1802,7 +1802,7 @@ export default function App(): JSX.Element {
                       <div
                         style={{
                           border: "1px solid #e5e7eb",
-                          borderRadius: 8,
+                          borderRadius: 10,
                           marginBottom: 8,
                           overflow: "hidden",
                         }}
@@ -1842,7 +1842,7 @@ export default function App(): JSX.Element {
                               color: "#6b7280",
                               maxHeight: 260,
                               overflowY: "auto",
-                              fontStyle: "italic",
+                              // 2026-08-07: 去掉斜体(用户反馈)
                             }}
                           >
                             {thinkingText || "（无推理内容）"}
@@ -1869,7 +1869,7 @@ export default function App(): JSX.Element {
                               style={{
                                 backgroundColor:
                                   te.event_type === "tool_call" ? "#eef2ff" : "#ecfdf5",
-                                borderRadius: 8,
+                                borderRadius: 10,
                                 padding: "6px 10px",
                                 fontSize: 12,
                                 color: "#6b7280",
@@ -1890,7 +1890,7 @@ export default function App(): JSX.Element {
                                     key={p}
                                     src={imagePathToUrl(p)}
                                     alt={p}
-                                    style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid #e5e7eb" }}
+                                    style={{ maxWidth: "100%", borderRadius: 10, border: "1px solid #e5e7eb" }}
                                   />
                                 ))}
                               </div>
@@ -1905,7 +1905,7 @@ export default function App(): JSX.Element {
                         style={{
                           marginBottom: 8,
                           border: "1px solid #e2e8f0",
-                          borderRadius: 8,
+                          borderRadius: 10,
                           overflow: "hidden",
                         }}
                       >
@@ -1958,7 +1958,7 @@ export default function App(): JSX.Element {
                             style={{
                               marginBottom: 8,
                               border: "1px solid #fcd34d",
-                              borderRadius: 8,
+                              borderRadius: 10,
                               background: "#fffbeb",
                               padding: "10px 12px",
                             }}
@@ -2018,7 +2018,7 @@ export default function App(): JSX.Element {
                                     background: "#16a34a",
                                     color: "#fff",
                                     border: "none",
-                                    borderRadius: 6,
+                                    borderRadius: 10,
                                     padding: "4px 14px",
                                     fontSize: 12,
                                     cursor: "pointer",
@@ -2039,7 +2039,7 @@ export default function App(): JSX.Element {
                                     background: "#dc2626",
                                     color: "#fff",
                                     border: "none",
-                                    borderRadius: 6,
+                                    borderRadius: 10,
                                     padding: "4px 14px",
                                     fontSize: 12,
                                     cursor: "pointer",
@@ -2061,7 +2061,7 @@ export default function App(): JSX.Element {
                                     background: "#6d28d9",
                                     color: "#fff",
                                     border: "none",
-                                    borderRadius: 6,
+                                    borderRadius: 10,
                                     padding: "4px 14px",
                                     fontSize: 12,
                                     cursor: "pointer",
@@ -2127,7 +2127,7 @@ export default function App(): JSX.Element {
                       <div
                         style={{
                           backgroundColor: "#ffebee",
-                          borderRadius: 8,
+                          borderRadius: 10,
                           padding: "8px 12px",
                           fontSize: 13,
                           color: "#c62828",
@@ -2192,7 +2192,7 @@ export default function App(): JSX.Element {
               style={{
                 flex: 1,
                 padding: "6px 10px",
-                borderRadius: 6,
+                borderRadius: 10,
                 border: "1px solid #ccc",
                 fontSize: 12,
                 outline: "none",
@@ -2200,13 +2200,13 @@ export default function App(): JSX.Element {
             />
             <button
               onClick={() => void saveWorkspace()}
-              style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "#1976d2", color: "#fff", fontSize: 12, cursor: "pointer" }}
+              style={{ padding: "6px 12px", borderRadius: 10, border: "none", background: "#1976d2", color: "#fff", fontSize: 12, cursor: "pointer" }}
             >
               保存
             </button>
             <button
               onClick={() => setEditingWorkspace(false)}
-              style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#666", fontSize: 12, cursor: "pointer" }}
+              style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", color: "#666", fontSize: 12, cursor: "pointer" }}
             >
               取消
             </button>
@@ -2221,7 +2221,7 @@ export default function App(): JSX.Element {
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
                 background: "#f3f4f6",
-                borderRadius: 6,
+                borderRadius: 10,
                 padding: "4px 8px",
               }}
               title={workspace ?? "（默认工作目录）"}
@@ -2233,7 +2233,7 @@ export default function App(): JSX.Element {
                 setWorkspaceInput(workspace ?? "");
                 setEditingWorkspace(true);
               }}
-              style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #ddd", background: "#fff", color: "#374151", fontSize: 12, cursor: "pointer" }}
+              style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", color: "#374151", fontSize: 12, cursor: "pointer" }}
             >
               更换
             </button>
@@ -2253,7 +2253,7 @@ export default function App(): JSX.Element {
           onClick={() => fileInputRef.current?.click()}
           title="上传文档(≤15MB, 支持 pdf/docx/xlsx/txt/图片等)"
           style={{
-            padding: "10px 12px", borderRadius: 6, border: "1px solid #ddd",
+            padding: "10px 12px", borderRadius: 10, border: "1px solid #ddd",
             backgroundColor: "#fff", fontSize: 14, cursor: "pointer",
           }}
         >
@@ -2264,7 +2264,7 @@ export default function App(): JSX.Element {
           onClick={() => setTemplatesOpen(!templatesOpen)}
           title="提示词模板库(保存常用提示词/插入)"
           style={{
-            padding: "10px 12px", borderRadius: 6, border: "1px solid #ddd",
+            padding: "10px 12px", borderRadius: 10, border: "1px solid #ddd",
             backgroundColor: templatesOpen ? "#f5f3ff" : "#fff",
             color: templatesOpen ? "#5b21b6" : "#333",
             fontSize: 14, cursor: "pointer",
@@ -2290,7 +2290,7 @@ export default function App(): JSX.Element {
             <img
               src={pendingImage.preview}
               alt="待发送图片"
-              style={{ height: 34, borderRadius: 6, border: "1px solid #ddd" }}
+              style={{ height: 34, borderRadius: 10, border: "1px solid #ddd" }}
             />
             <button
               onClick={() => setPendingImage(null)}
@@ -2332,7 +2332,7 @@ export default function App(): JSX.Element {
           style={{
             flex: 1,
             padding: "10px 12px",
-            borderRadius: 6,
+            borderRadius: 12,
             border: "1px solid #ddd",
             fontSize: 14,
             outline: "none",
@@ -2344,54 +2344,25 @@ export default function App(): JSX.Element {
           }}
         />
         <button
-          onClick={sendMessage}
-          disabled={status !== "connected" || !input.trim()}
+          onClick={isGenerating ? stopGeneration : sendMessage}
+          disabled={!isGenerating && (status !== "connected" || !input.trim())}
+          title={isGenerating ? "停止生成(彻底终止当前轮次)" : "发送消息"}
           style={{
-            padding: "10px 20px", borderRadius: 6, border: "none",
-            backgroundColor: status === "connected" ? "#1976d2" : "#bbb",
-            color: "#fff", fontSize: 14, cursor: status === "connected" ? "pointer" : "not-allowed",
+            padding: "10px 22px",
+            borderRadius: 12,
+            border: isGenerating ? "1px solid #d97706" : "none",
+            backgroundColor: isGenerating
+              ? "#fff"
+              : (status === "connected" && input.trim() ? "#1976d2" : "#bbb"),
+            color: isGenerating ? "#d97706" : "#fff",
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: (status === "connected" || isGenerating) ? "pointer" : "not-allowed",
+            transition: "all 0.15s var(--transition-smooth)",
           }}
         >
-          发送
+          {isGenerating ? "■ 停止" : "发送"}
         </button>
-        {isGenerating && (
-          <>
-            {/* V1.5 项-5: 流程级暂停/继续(生成中暂停挂起, 可继续) */}
-            {!isPaused ? (
-              <button
-                onClick={pauseGeneration}
-                title="暂停生成(区别于停止: 可稍后继续)"
-                style={{
-                  padding: "10px 20px", borderRadius: 6, border: "none",
-                  backgroundColor: "#f57c00", color: "#fff", fontSize: 14, cursor: "pointer",
-                }}
-              >
-                ⏸ 暂停
-              </button>
-            ) : (
-              <button
-                onClick={resumeGeneration}
-                title="继续生成"
-                style={{
-                  padding: "10px 20px", borderRadius: 6, border: "none",
-                  backgroundColor: "#2e7d32", color: "#fff", fontSize: 14, cursor: "pointer",
-                }}
-              >
-                ▶ 继续
-              </button>
-            )}
-            <button
-              onClick={stopGeneration}
-              title="停止生成"
-              style={{
-                padding: "10px 20px", borderRadius: 6, border: "none",
-                backgroundColor: "#d32f2f", color: "#fff", fontSize: 14, cursor: "pointer",
-              }}
-            >
-              ⏹ 停止
-            </button>
-          </>
-        )}
           </div>
           </div>
           )}
@@ -2476,7 +2447,7 @@ export default function App(): JSX.Element {
                     onChange={(e) => setAutoRounds(Number(e.target.value))}
                     disabled={!autoExec}
                     style={{
-                      width: 70, padding: "4px 8px", borderRadius: 6,
+                      width: 70, padding: "4px 8px", borderRadius: 10,
                       border: "1px solid #ddd", fontSize: 13,
                     }}
                   />
@@ -2484,7 +2455,7 @@ export default function App(): JSX.Element {
                   <button
                     onClick={() => void saveAutoExec()}
                     style={{
-                      fontSize: 12, padding: "5px 14px", borderRadius: 6,
+                      fontSize: 12, padding: "5px 14px", borderRadius: 10,
                       border: "1px solid #6d28d9", background: "#f5f3ff",
                       color: "#5b21b6", cursor: "pointer",
                     }}
@@ -2508,7 +2479,7 @@ export default function App(): JSX.Element {
                     value={truncateTurn}
                     onChange={(e) => setTruncateTurn(Number(e.target.value))}
                     style={{
-                      width: 80, padding: "4px 8px", borderRadius: 6,
+                      width: 80, padding: "4px 8px", borderRadius: 10,
                       border: "1px solid #ddd", fontSize: 13,
                     }}
                   />
@@ -2516,7 +2487,7 @@ export default function App(): JSX.Element {
                   <button
                     onClick={() => void doTruncate()}
                     style={{
-                      fontSize: 12, padding: "5px 14px", borderRadius: 6,
+                      fontSize: 12, padding: "5px 14px", borderRadius: 10,
                       border: "1px solid #d97706", background: "#fffbeb",
                       color: "#92400e", cursor: "pointer",
                     }}
@@ -2535,7 +2506,7 @@ export default function App(): JSX.Element {
                 <button
                   onClick={() => void loadSystemPrompt()}
                   style={{
-                    fontSize: 12, padding: "5px 14px", borderRadius: 6,
+                    fontSize: 12, padding: "5px 14px", borderRadius: 10,
                     border: "1px solid #ddd", background: "#f8fafc",
                     color: "#334155", cursor: "pointer", marginBottom: 8,
                   }}
@@ -2549,7 +2520,7 @@ export default function App(): JSX.Element {
                     style={{
                       width: "100%", boxSizing: "border-box", minHeight: 180,
                       resize: "vertical", fontSize: 12, fontFamily: "Consolas, monospace",
-                      border: "1px solid #e2e8f0", borderRadius: 8, padding: 10,
+                      border: "1px solid #e2e8f0", borderRadius: 10, padding: 10,
                       color: "#334155", background: "#f8fafc",
                     }}
                   />
@@ -2614,14 +2585,14 @@ export default function App(): JSX.Element {
                   onChange={(e) => setTplName(e.target.value)}
                   placeholder="模板名(默认取输入前 20 字)"
                   style={{
-                    flex: 1, padding: "6px 10px", borderRadius: 6,
+                    flex: 1, padding: "6px 10px", borderRadius: 10,
                     border: "1px solid #ddd", fontSize: 12,
                   }}
                 />
                 <button
                   onClick={saveCurrentAsTemplate}
                   style={{
-                    fontSize: 12, padding: "6px 14px", borderRadius: 6,
+                    fontSize: 12, padding: "6px 14px", borderRadius: 10,
                     border: "1px solid #6d28d9", background: "#f5f3ff",
                     color: "#5b21b6", cursor: "pointer", whiteSpace: "nowrap",
                   }}
@@ -2642,7 +2613,7 @@ export default function App(): JSX.Element {
                     key={t.name}
                     style={{
                       display: "flex", alignItems: "center", gap: 8,
-                      padding: "8px 10px", borderRadius: 8,
+                      padding: "8px 10px", borderRadius: 10,
                       background: "rgba(245,243,255,0.6)", fontSize: 12,
                     }}
                   >
@@ -2882,7 +2853,7 @@ export default function App(): JSX.Element {
                             value: usageData.total_cost.toFixed(4),
                           },
                         ].map((s) => (
-                          <div key={s.label} style={{ background: "#fff", borderRadius: 8, padding: "8px 10px" }}>
+                          <div key={s.label} style={{ background: "#fff", borderRadius: 10, padding: "8px 10px" }}>
                             <div style={{ fontSize: 10, color: "#94a3b8" }}>{s.label}</div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: "#334155" }}>{s.value}</div>
                           </div>
@@ -3037,7 +3008,7 @@ export default function App(): JSX.Element {
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "space-between",
                     width: "100%", padding: "10px 14px", marginBottom: 8,
-                    borderRadius: 8, border: "1px solid #ddd", background: "#fff",
+                    borderRadius: 10, border: "1px solid #ddd", background: "#fff",
                     fontSize: 14, cursor: "pointer", textAlign: "left",
                   }}
                 >
@@ -3052,7 +3023,7 @@ export default function App(): JSX.Element {
               )}
               <button
                 onClick={() => setSkillPickerOpen(false)}
-                style={{ width: "100%", padding: "8px", marginTop: 6, borderRadius: 6, border: "none", background: "#eee", cursor: "pointer", fontSize: 13 }}
+                style={{ width: "100%", padding: "8px", marginTop: 6, borderRadius: 10, border: "none", background: "#eee", cursor: "pointer", fontSize: 13 }}
               >
                 取消
               </button>

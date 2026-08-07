@@ -264,19 +264,20 @@ body,
  * 覆盖核心语义变量; 组件硬编码 rgba(255,255,255,*) 的少量处保持亮色可接受
  * ══════════════════════════════════════════════════════════════════════ */
 [data-theme="dark"] {
-  --text-primary: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-tertiary: #64748b;
-  --glass-bg: rgba(30, 41, 59, 0.6);
-  --glass-border: rgba(148, 163, 184, 0.15);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
-  --neutral-bg: rgba(30, 41, 59, 0.5);
-  --neutral-text: #94a3b8;
-  --success-bg: rgba(5, 150, 105, 0.18);
-  --success-text: #34d399;
-  --warning-bg: rgba(217, 119, 6, 0.18);
-  --warning-text: #fbbf24;
-  --danger-text: #f87171;
+  /* 2026-08-07: 提亮文本/表面/边框对比度(用户反馈"暗色没法看") */
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-tertiary: #94a3b8;
+  --glass-bg: rgba(51, 65, 85, 0.85);
+  --glass-border: rgba(203, 213, 225, 0.25);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --neutral-bg: rgba(51, 65, 85, 0.7);
+  --neutral-text: #cbd5e1;
+  --success-bg: rgba(5, 150, 105, 0.28);
+  --success-text: #6ee7b7;
+  --warning-bg: rgba(217, 119, 6, 0.28);
+  --warning-text: #fcd34d;
+  --danger-text: #fca5a5;
 }
 
 [data-theme="dark"] .glass-panel,
