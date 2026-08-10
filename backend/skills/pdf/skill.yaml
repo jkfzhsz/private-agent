@@ -1,0 +1,35 @@
+name: pdf
+version: "1.0.0"
+description: "PDF文档生成与处理：支持HTML→PDF(weasyprint)、Markdown→PDF、纯Python(reportlab)、合并拆分(pypdf)四种方案，含中文排版、分页、字体配置指南。"
+scenario: documents
+author: "reasonix-community"
+created_at: "2026-08-08"
+enabled: true
+model_scope: ["deepseek"]
+
+dependencies:
+  tools:
+    - name: code_execution
+      safety_level_override: safe
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+
+permissions:
+  allow_file_write: true
+  allow_network: true
+  sandbox_enabled: true
+  max_file_size_mb: 50
+
+knowledge_base:
+  enabled: false
+  scenario: documents
+  auto_retrieve: false
+
+examples:
+  enabled: false
+  max_examples: 0
+  inject_to: frozen_zone
+
+max_frozen_token: 4000
