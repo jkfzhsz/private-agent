@@ -41,7 +41,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         "test-react",
@@ -499,7 +499,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         "test-react-tool",
@@ -518,7 +518,7 @@ class _MockAdapter:
         self._idx = 0
         self.chat_calls: list[tuple[list[dict], list[dict] | None]] = []
 
-    async def chat(self, messages, tools=None, max_tokens=None):
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
         self.chat_calls.append((list(messages), list(tools) if tools else None))
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock exhausted: idx={self._idx}")
@@ -535,7 +535,7 @@ class _FailingAdapter:
         streaming=False, function_calling=False, vision=False, json_mode=False
     )
 
-    async def chat(self, messages, tools=None, max_tokens=None):
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
         raise ProviderError("failing", "always fails")
 
 
@@ -1012,7 +1012,7 @@ def test_run_turn_all_providers_failed_produces_error_event():
                     streaming=False, function_calling=False, vision=False, json_mode=False
                 )
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     raise AllProvidersFailedError("all 3 providers failed")
 
             loop = ReactLoop(
@@ -1113,7 +1113,7 @@ def test_run_turn_error_event_payload_contains_message():
                     streaming=False, function_calling=False, vision=False, json_mode=False
                 )
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     raise AllProvidersFailedError("simulated failure")
 
             loop = ReactLoop(
@@ -1133,3 +1133,313 @@ def test_run_turn_error_event_payload_contains_message():
     assert event["event_type"] == "error"
     assert "message" in event["payload"]
     assert "simulated failure" in event["payload"]["message"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2026-08-08: MCP 工具参数注入回归 —— T-1 data_dir/workspace 只注入内置文件工具
+# Source: mempalace/searchpin 调用"返回空"终极根因(注入未知参数 → server 校验失败)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_tool_injection_skips_mcp_tools_but_applies_to_file_tools():
+    """ReactLoop 对 MCP 工具(mcp__ 前缀)不得注入 data_dir/workspace;
+    对内置文件工具(file_read/file_write/read_artifact)必须注入。
+
+    2026-08-08 根因: _exec_plan 原对所有工具无条件注入 data_dir/workspace,
+    MCP server(inputSchema 严格校验)收到未知参数 → 参数校验失败 → isError
+    → output 空 → LLM 看到"空结果"。
+    """
+    _setup_schema()
+
+    captured: dict[str, dict] = {}
+
+    async def _mcp_handler(args: dict):
+        captured["mcp"] = dict(args)
+        return ToolResult(output="mcp-ok")
+
+    async def _file_handler(args: dict):
+        captured["file"] = dict(args)
+        return ToolResult(output="file-ok")
+
+    mcp_tool = ToolDef(
+        name="mcp__mempalace__mempalace_status",
+        description="test mcp tool",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=_mcp_handler,
+    )
+    file_tool = ToolDef(
+        name="file_read",
+        description="test file tool",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=_file_handler,
+    )
+
+    async def _run() -> list[str]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id, system_prompt="sys", tools=[mcp_tool, file_tool]
+            )
+            await cm.build_initial(conn)
+            adapter = _MockAdapter(
+                responses=[
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "call_mcp",
+                                "type": "function",
+                                "function": {
+                                    "name": "mcp__mempalace__mempalace_status",
+                                    "arguments": "{}",
+                                },
+                            },
+                            {
+                                "id": "call_file",
+                                "type": "function",
+                                "function": {
+                                    "name": "file_read",
+                                    "arguments": '{"path": "x"}',
+                                },
+                            },
+                        ],
+                        used_provider="mock",
+                    ),
+                    ChatResult(content="done", used_provider="mock"),
+                ]
+            )
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=adapter,
+                tools=[mcp_tool, file_tool],
+                conn=conn,
+                cfg={"system": {"workspace_root": r"D:\work"}},
+            )
+            await loop.run_turn("test")
+            events = []
+            while not loop.event_queue.empty():
+                events.append(loop.event_queue.get_nowait())
+            return [e["event_type"] for e in events]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+    # MCP 工具: 不得注入 data_dir/workspace(否则 server 参数校验失败 → 空结果)
+    assert "data_dir" not in captured.get("mcp", {}), (
+        f"MCP 工具被注入 data_dir: {captured.get('mcp')}"
+    )
+    assert "workspace" not in captured.get("mcp", {}), (
+        f"MCP 工具被注入 workspace: {captured.get('mcp')}"
+    )
+    # 内置文件工具: 必须注入(路径校验安全网, T-1 原语义)
+    assert captured.get("file", {}).get("data_dir") == r"D:\work"
+    assert captured.get("file", {}).get("workspace") == r"D:\work"
+
+
+class TestImageInjection:
+    """0.5.1: 图片文本引用 → image_url(data URL)注入(多模态链路修复)。"""
+
+    def _make_png(self, path) -> None:
+        # 最小 1x1 PNG
+        import base64
+        png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQAB"
+            "h6FO1AAAAABJRU5ErkJggg=="
+        )
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(png_b64))
+
+    def test_injects_image_url_for_uploaded_image(self, tmp_path) -> None:
+        from private_agent.core.react_loop import _inject_image_urls
+        img = tmp_path / "photo.png"
+        self._make_png(img)
+        messages = [{
+            "role": "user",
+            "content": f"识别这张图 [已上传文件: photo.png 路径: {img}]",
+        }]
+        out, _skipped = _inject_image_urls(messages)
+        content = out[0]["content"]
+        assert isinstance(content, list)
+        parts = {p["type"]: p for p in content}
+        assert parts["image_url"]["image_url"]["url"].startswith("data:image/png;base64,")
+        assert "识别这张图" in parts["text"]["text"]
+
+    def test_paste_image_reference(self, tmp_path) -> None:
+        from private_agent.core.react_loop import _inject_image_urls
+        img = tmp_path / "clip.jpg"
+        self._make_png(img)
+        messages = [{
+            "role": "user",
+            "content": f"[用户粘贴图片: clip.jpg 路径: {img}] 这是什么?",
+        }]
+        out, _skipped = _inject_image_urls(messages)
+        content = out[0]["content"]
+        assert isinstance(content, list)
+        assert any(
+            p.get("type") == "image_url"
+            and p["image_url"]["url"].startswith("data:image/jpeg;base64,")
+            for p in content
+        )
+
+    def test_no_image_reference_keeps_content(self) -> None:
+        from private_agent.core.react_loop import _inject_image_urls
+        messages = [{"role": "user", "content": "普通文本消息"}]
+        out, _skipped = _inject_image_urls(messages)
+        assert out[0]["content"] == "普通文本消息"
+
+    def test_missing_file_keeps_text(self, tmp_path) -> None:
+        from private_agent.core.react_loop import _inject_image_urls
+        messages = [{
+            "role": "user",
+            "content": f"[已上传文件: gone.png 路径: {tmp_path}/gone.png] 描述",
+        }]
+        out, _skipped = _inject_image_urls(messages)
+        # 文件不存在 → 原样保留(不注入也不崩溃)
+        assert isinstance(out[0]["content"], str)
+        assert "gone.png" in out[0]["content"]
+
+    def test_non_image_extension_ignored(self, tmp_path) -> None:
+        from private_agent.core.react_loop import _inject_image_urls
+        f = tmp_path / "doc.zip"
+        f.write_bytes(b"PK")
+        messages = [{
+            "role": "user",
+            "content": f"[已上传文件: doc.zip 路径: {f}] 解压",
+        }]
+        out, _skipped = _inject_image_urls(messages)
+        assert isinstance(out[0]["content"], str)
+
+    def test_historical_image_ref_ignored_for_pure_text_turn(self) -> None:
+        """2026-08-10 误判修复: 历史 user 含图引用 + 本轮纯文本 → 不触发 vision。"""
+        from private_agent.core.react_loop import _messages_contain_image
+        messages = [
+            {"role": "user", "content": "[已上传文件: a.png 路径: /tmp/a.png] 识别"},
+            {"role": "assistant", "content": "已识别"},
+            {"role": "user", "content": "把这些持仓记录下来"},
+        ]
+        assert _messages_contain_image(messages) is False
+
+    def test_last_user_image_ref_triggers(self) -> None:
+        from private_agent.core.react_loop import _messages_contain_image
+        messages = [
+            {"role": "user", "content": "旧文本"},
+            {"role": "user", "content": "[已上传文件: b.png 路径: /tmp/b.png]"},
+        ]
+        assert _messages_contain_image(messages) is True
+
+    def test_injected_image_url_in_history_keeps_vision(self) -> None:
+        """历史已注入 image_url(list) → 即使本轮纯文本仍保持 vision(上下文有图)。"""
+        from private_agent.core.react_loop import _messages_contain_image
+        messages = [
+            {"role": "user", "content": [
+                {"type": "text", "text": "识别"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+            ]},
+            {"role": "user", "content": "继续"},
+        ]
+        assert _messages_contain_image(messages) is True
+
+    def test_skipped_oversize_image_reported(self, tmp_path) -> None:
+        """2026-08-10 错误零静默: 超限图片返回 skipped 而非静默。"""
+        from private_agent.core.react_loop import _inject_image_urls
+        big = tmp_path / "big.png"
+        big.write_bytes(b"\x89PNG" + b"\x00" * (9 * 1024 * 1024))  # ~9MB
+        messages = [{
+            "role": "user",
+            "content": f"[已上传文件: big.png 路径: {big}]",
+        }]
+        _out, skipped = _inject_image_urls(messages)
+        assert any("big.png" in s and "超上限" in s for s in skipped)
+        assert isinstance(_out[0]["content"], str)  # 原文本保留
+
+    def test_skipped_missing_file_reported(self, tmp_path) -> None:
+        from private_agent.core.react_loop import _inject_image_urls
+        messages = [{
+            "role": "user",
+            "content": f"[已上传文件: gone.png 路径: {tmp_path}/gone.png]",
+        }]
+        _out, skipped = _inject_image_urls(messages)
+        assert any("gone.png" in s and "文件不存在" in s for s in skipped)
+
+
+class TestToolLoopDetection:
+    """0.5.1: 死循环检测 —— 批量记忆(同工具不同参数)不误判。"""
+
+    def _detector(self):
+        from private_agent.core.react_loop import ReactLoop
+        loop = ReactLoop.__new__(ReactLoop)
+        loop._tool_call_trace = []
+        loop._loop_same_args_threshold = 3
+        loop._loop_same_tool_threshold = 5
+        return loop
+
+    def test_batch_memory_different_args_not_loop(self):
+        """批量记忆 8 只股票(同工具、参数各异) → 不判死循环。"""
+        d = self._detector()
+        result = None
+        for i in range(8):
+            args = {"content": f"持仓: 股票{i} 市值 {i * 1000}", "scope": "data_analysis"}
+            result = d._detect_tool_loop("memory_save", args)
+            import json as _json
+            d._tool_call_trace.append(
+                f"memory_save:{_json.dumps(args, sort_keys=True, ensure_ascii=False)[:200]}"
+            )
+        assert result is None
+
+    def test_same_args_repeated_is_loop(self):
+        d = self._detector()
+        args = {"content": "相同内容", "scope": "global"}
+        result = None
+        for _ in range(4):
+            result = d._detect_tool_loop("memory_save", args)
+            import json as _json
+            d._tool_call_trace.append(
+                f"memory_save:{_json.dumps(args, sort_keys=True, ensure_ascii=False)[:200]}"
+            )
+        assert result == "same_args"
+
+    def test_same_tool_few_arg_variants_is_loop(self):
+        """同工具高频但参数只有 1-2 种 → 仍判 same_tool(真正无进展)。"""
+        d = self._detector()
+        args_list = [{"content": f"重试{i % 2}", "scope": "global"} for i in range(6)]
+        result = None
+        import json as _json
+        for a in args_list:
+            result = d._detect_tool_loop("web_search", a)
+            d._tool_call_trace.append(
+                f"web_search:{_json.dumps(a, sort_keys=True, ensure_ascii=False)[:200]}"
+            )
+        assert result is not None
+
+
+class TestToolResultTrim:
+    """0.5.1(P2-A): 超长工具结果 API 侧截断, 事实型保留。"""
+
+    def _loop(self):
+        from private_agent.core.react_loop import ReactLoop
+        return ReactLoop.__new__(ReactLoop)
+
+    def test_long_non_factual_tool_result_trimmed(self):
+        loop = self._loop()
+        long_text = "普通文本" * 3001  # >12000 chars
+        messages = [{"role": "tool", "content": long_text}]
+        out = loop._trim_tool_results(messages)
+        assert "已截断" in out[0]["content"]
+        assert len(out[0]["content"]) < len(long_text)
+
+    def test_factual_tool_result_kept_verbatim(self):
+        loop = self._loop()
+        # 表格(事实型)超长不截断
+        table = "股票|市值|盈亏\n" + "\n".join(f"股{i}|{i*1000}|+{i}" for i in range(400))
+        messages = [{"role": "tool", "content": table}]
+        out = loop._trim_tool_results(messages)
+        assert "已截断" not in out[0]["content"]
+        assert out[0]["content"] == table
+
+    def test_non_tool_messages_untouched(self):
+        loop = self._loop()
+        messages = [{"role": "user", "content": "x" * 20000}]
+        out = loop._trim_tool_results(messages)
+        assert out[0]["content"] == "x" * 20000

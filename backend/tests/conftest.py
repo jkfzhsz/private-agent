@@ -18,6 +18,15 @@ def _admin_token_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _embedding_mock_env(monkeypatch):
+    """0.5.1: 强制 embedding mock 模式 —— factory.build_embedding_service
+    检查 PA_EMBEDDING_MOCK=1 → worker_pool=None(全 0 mock 分支)。
+    任何测试误触 KB 装配也不会加载真实 bge 模型(防内存暴涨/用例超时);
+    真实链路验证由手动脚本/实际运行路径触发(PA_EMBEDDING_MOCK 不设)。"""
+    monkeypatch.setenv("PA_EMBEDDING_MOCK", "1")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_appdata(monkeypatch, tmp_path_factory):
     """APPDATA 指向 session 级临时目录: 用户配置写文件类操作(backend.env /
     master key)不污染真实用户目录。APPDATA 跨测试稳定 → master key 继承稳定。"""

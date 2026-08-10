@@ -37,7 +37,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-def _create_session(conn: asyncpg.Connection) -> int:
+def _create_session(conn: "asyncpg.Connection") -> int:
     """创建一个 session,返回 id。"""
     return asyncio.get_event_loop().run_until_complete(
         conn.fetchval("INSERT INTO sessions DEFAULT VALUES RETURNING id")

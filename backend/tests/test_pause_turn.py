@@ -62,6 +62,7 @@ class _MockAdapter:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        **kwargs,  # 多模态(require_vision)等扩展参数, mock 忽略
     ) -> ChatResult:
         # 每次 chat 前触发回调(测试可在迭代间隙注入 pause)
         if self.on_chat is not None:

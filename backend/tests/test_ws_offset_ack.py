@@ -36,7 +36,7 @@ def _setup_schema() -> None:
 
 
 async def _seed_events(
-    conn: asyncpg.Connection, session_id: int, turns: list[int],
+    conn: "asyncpg.Connection", session_id: int, turns: list[int],
 ) -> None:
     """插入指定 turn 序列的事件。"""
     for turn in turns:

@@ -36,7 +36,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection, title: str = "test-ctx") -> int:
+async def _create_session(conn: "asyncpg.Connection", title: str = "test-ctx") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         title,

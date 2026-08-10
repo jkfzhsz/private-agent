@@ -37,7 +37,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _seed_three_events(conn: asyncpg.Connection, session_id: int) -> None:
+async def _seed_three_events(conn: "asyncpg.Connection", session_id: int) -> None:
     """插入 turn=1,2,3 三条事件。"""
     for turn, event_type in [(1, "thinking"), (2, "tool_call"), (3, "final")]:
         await insert_react_event(
@@ -384,3 +384,46 @@ def test_build_replay_messages_replay_end_has_required_fields():
     assert required.issubset(msg.keys()), f"缺少字段: {required - msg.keys()}"
     assert msg["type"] == "replay_end"
     assert msg["count"] == 2
+
+
+def test_build_replay_messages_filters_confirmation_and_marks_replayed():
+    """2026-08-10: replay 过滤 tool_confirmation_required 且带 replayed: True。
+
+    回归: 切回历史会话时后端 replay 重放历史事件, 若含 tool_confirmation_required
+    前端会再次弹权限确认框。修复: ① 过滤该事件类型(历史工具调用已执行完毕,
+    恢复会话只读回放不应重新确认); ② 其余重放消息带 replayed: True 标记,
+    供前端区分实时事件与回放(跳过确认弹窗等实时副作用)。
+    """
+    _setup_schema()
+
+    async def _run() -> list[dict]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions DEFAULT VALUES RETURNING id"
+            )
+            await _seed_three_events(conn, session_id)
+            # 插入一条历史确认事件(模拟某轮工具调用走 elevated 确认)
+            await insert_react_event(
+                conn, session_id=session_id, turn=4,
+                event_type="tool_confirmation_required",
+                payload={"message": "Allow tool 'code_execution' to execute?"},
+            )
+            msgs = await ws_offset.build_replay_messages(
+                conn, session_id=session_id, last_turn=0, full=True,
+            )
+            return msgs
+        finally:
+            await conn.close()
+
+    msgs = asyncio.run(_run())
+    # 不含确认事件: 3 条业务事件 + 1 条 replay_end
+    assert len(msgs) == 4
+    assert all(
+        m.get("event_type") != "tool_confirmation_required"
+        for m in msgs if m["type"] == "react_event"
+    )
+    # 业务事件均带 replayed: True
+    replay_evts = [m for m in msgs if m["type"] == "react_event"]
+    assert len(replay_evts) == 3
+    assert all(m["replayed"] is True for m in replay_evts)

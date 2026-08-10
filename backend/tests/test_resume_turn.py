@@ -59,6 +59,7 @@ class _MockAdapter:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        **kwargs,  # 多模态(require_vision)等扩展参数, mock 忽略
     ) -> ChatResult:
         self.chat_calls.append(list(messages))
         if self._idx >= len(self._responses):

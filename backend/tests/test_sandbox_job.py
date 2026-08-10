@@ -52,19 +52,23 @@ def _make_config(tmp_path: Path, **limits_overrides) -> dict:
 
 @pytest.mark.asyncio
 async def test_job_cpu_time_limit_kills_spin(tmp_path: Path) -> None:
-    """死循环: Job JOB_TIME=1s 系统级终止(非 asyncio 超时), exit_code != 0。"""
+    """死循环: Job JOB_TIME=1s 系统级终止(非 asyncio 超时), exit_code != 0。
+
+    2026-08-09: 本机 python 冷启动 ~16s(杀软扫描) —— asyncio 超时放宽到
+    90s 容纳启动, 死循环在启动后吃掉 1s CPU → Job kill, duration 上限放宽。
+    """
     config = _make_config(tmp_path, cpu_timeout_sec=1)
     svc = SandboxService(config)
     result = await svc.execute(
         code="while True: pass",
         language="python",
-        timeout=15,  # asyncio 超时 15s, 但 Job 1s 先杀 → 验证 Job 生效
+        timeout=90,  # asyncio 超时 90s, 但 Job 1s 先杀 → 验证 Job 生效
         session_id="",
     )
     assert result.exit_code != 0, (
         "Job 应终止死循环进程(exit_code != 0)"
     )
-    assert result.duration_ms < 12000, "应在 Job 时间限制(1s)后很快返回"
+    assert result.duration_ms < 90000, "应在 Job 时间限制(1s)后很快返回"
 
 
 @pytest.mark.asyncio

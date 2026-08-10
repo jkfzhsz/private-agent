@@ -47,12 +47,12 @@ async def conn():
 
 
 @pytest.fixture
-def repo(conn: asyncpg.Connection) -> MemoriesRepo:
+def repo(conn: "asyncpg.Connection") -> MemoriesRepo:
     return MemoriesRepo(conn)
 
 
 @pytest.fixture
-async def sample_session(conn: asyncpg.Connection) -> int:
+async def sample_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title) VALUES ($1) RETURNING id",
         "test_memories",

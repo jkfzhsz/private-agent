@@ -42,7 +42,7 @@ def _setup_schema() -> None:
 
 
 async def _insert_eval_run_with_low_score(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     skill_name: str = "office",
     skill_version: str = "1.0.0",

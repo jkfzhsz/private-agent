@@ -129,7 +129,7 @@ class _MockAdapter:
         self._idx = 0
         self.chat_calls = []
 
-    async def chat(self, messages, tools=None, max_tokens=None):
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
         self.chat_calls.append(list(messages))
         if self._idx >= len(self._responses):
             raise RuntimeError("mock exhausted")

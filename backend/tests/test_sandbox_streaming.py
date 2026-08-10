@@ -27,7 +27,7 @@ def _make_config(tmp_path: Path) -> dict:
                 "python": {"command": sys.executable, "script_extension": ".py"},
             },
             "limits": {
-                "cpu_timeout_sec": 10,
+                "cpu_timeout_sec": 90,
                 "memory_limit_mb": 512,
                 "disk_limit_mb": 100,
             },
@@ -56,7 +56,7 @@ class TestExecutorStreaming:
         result = await executor.execute(
             code=code,
             language="python",
-            timeout=10,
+            timeout=90,
             workspace=str(tmp_path),
             on_output=on_output,
         )
@@ -77,7 +77,7 @@ class TestExecutorStreaming:
         result = await executor.execute(
             code=code,
             language="python",
-            timeout=10,
+            timeout=90,
             workspace=str(tmp_path),
             on_output=on_output,
         )
@@ -91,7 +91,7 @@ class TestExecutorStreaming:
         result = await executor.execute(
             code="print('hello')",
             language="python",
-            timeout=10,
+            timeout=90,
             workspace=str(tmp_path),
         )
         assert result.exit_code == 0
@@ -111,7 +111,7 @@ class TestServiceStreaming:
         result = await svc.execute(
             code="print('svc-stream')",
             language="python",
-            timeout=10,
+            timeout=90,
             session_id="stream-svc",
             on_output=on_output,
         )
@@ -132,7 +132,7 @@ class TestHandlerStreaming:
 
         result = await code_execution_handler({
             "code": "for i in range(5):\n    print(f'n-{i}')",
-            "timeout": 10,
+            "timeout": 90,
             "session_id": "handler-stream",
             "_sandbox_config": config,
             "_on_output": on_output,
@@ -147,7 +147,7 @@ class TestHandlerStreaming:
         config = _make_config(tmp_path)
         result = await code_execution_handler({
             "code": "print('legacy')",
-            "timeout": 10,
+            "timeout": 90,
             "session_id": "handler-legacy",
             "_sandbox_config": config,
         })

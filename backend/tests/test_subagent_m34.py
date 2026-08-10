@@ -95,7 +95,7 @@ class _MockAdapter:
         self._responses = list(responses)
         self._idx = 0
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")
         r = self._responses[self._idx]
@@ -107,7 +107,7 @@ class _HungAdapter:
     provider_name = "mock"
     capability = _MockAdapter.capability
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         await asyncio.sleep(3600)
         return ChatResult(content="unreachable")
 
@@ -237,7 +237,7 @@ def test_subagent_heartbeat_ws_event():
                 provider_name = "mock"
                 capability = _MockAdapter.capability
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     await asyncio.sleep(1.2)  # 留出多个心跳周期
                     return ChatResult(content="done", used_provider="m")
 
@@ -281,7 +281,7 @@ def test_max_restarts_retries_then_succeeds():
                 provider_name = "mock"
                 capability = _MockAdapter.capability
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     attempts["n"] += 1
                     if attempts["n"] == 1:
                         raise RuntimeError("transient upstream failure")
@@ -330,7 +330,7 @@ def test_max_restarts_exhausted_marks_failed():
                 provider_name = "mock"
                 capability = _MockAdapter.capability
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     raise RuntimeError("always broken")
 
             cfg = _test_cfg()
@@ -366,7 +366,7 @@ def test_restart_disabled_by_default():
                 provider_name = "mock"
                 capability = _MockAdapter.capability
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     raise RuntimeError("no restart")
 
             runner = _make_runner(

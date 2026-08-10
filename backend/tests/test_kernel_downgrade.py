@@ -41,12 +41,13 @@ class TestBuiltinKernelMarkers:
             "file_write", "http_request", "web_search",
         }
 
-    def test_two_downgraded_tools(self):
-        """search_knowledge/read_artifact 下沉为 is_kernel=False。"""
+    def test_three_downgraded_tools(self):
+        """search_knowledge/read_artifact/memory_search 下沉为 is_kernel=False
+        (0.5.0 M1: memory_search 为记忆按需检索工具, 非内核)。"""
         registry = ToolRegistry()
         register_all_builtins(registry)
         non_kernel = {t.name for t in registry.list_tools() if not t.is_kernel}
-        assert non_kernel == {"search_knowledge", "read_artifact"}
+        assert non_kernel == {"search_knowledge", "read_artifact", "memory_search"}
 
 
 class TestSelectorKernelAnchors:
@@ -123,4 +124,5 @@ class TestWhitelistUnchanged:
         registry = ToolRegistry()
         register_all_builtins(registry)
         all_tools = registry.list_tools_for_session(None)
-        assert len(all_tools) == 9
+        # 0.5.0 M1: 10 类内置(新增 memory_search)
+        assert len(all_tools) == 10

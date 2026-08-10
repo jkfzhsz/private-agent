@@ -34,7 +34,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _insert_event(conn: asyncpg.Connection, session_id: int, event_type: str) -> None:
+async def _insert_event(conn: "asyncpg.Connection", session_id: int, event_type: str) -> None:
     """插入 react_events 行,验证 event_type CHECK 通过。"""
     await conn.execute(
         """

@@ -119,9 +119,11 @@ def test_get_vector_dim_default():
 
 
 def test_get_vector_dim_light():
+    """0.5.1: _get_vector_dim 返回存储维(DB 列 1024, 含 padding); 模型维经 get_model_dim。"""
     svc = EmbeddingService(config={"local_light": "bge-small", "local_default": "bge-small"})
     svc._model_name = "bge-small"
-    assert svc._get_vector_dim() == 384
+    assert svc._get_vector_dim() == 1024  # 存储维(DB vector(1024))
+    assert svc.get_model_dim() == 512     # 模型真实输出维(bge-small 系, ModelScope 官方 512)
 
 
 def test_clear_cache():

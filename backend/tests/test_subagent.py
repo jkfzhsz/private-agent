@@ -115,7 +115,7 @@ class _MockAdapter:
         self._responses = list(responses)
         self._idx = 0
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")
         r = self._responses[self._idx]
@@ -131,7 +131,7 @@ class _HungAdapter:
         streaming=False, function_calling=True, vision=False, json_mode=False
     )
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         await asyncio.sleep(3600)
         return ChatResult(content="unreachable")
 
@@ -292,7 +292,7 @@ def test_runner_model_error_marks_failed():
                 provider_name = "mock"
                 capability = _MockAdapter.capability
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     raise RuntimeError("upstream exploded")
 
             runner = _make_runner(
@@ -601,7 +601,7 @@ def test_heartbeat_failure_observable(monkeypatch):
                 provider_name = "mock"
                 capability = _MockAdapter.capability
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     await asyncio.sleep(3.0)  # 业务慢但正常
                     return ChatResult(content="slow done", used_provider="m")
 

@@ -17,7 +17,7 @@ async def test_execute_normal_code(tmp_path: Path) -> None:
     result = await executor.execute(
         code='print("hello from sandbox")',
         language="python",
-        timeout=10,
+        timeout=90,
         workspace=str(tmp_path),
     )
     assert result.exit_code == 0
@@ -44,7 +44,7 @@ async def test_execute_syntax_error(tmp_path: Path) -> None:
     result = await executor.execute(
         code="print(hello",
         language="python",
-        timeout=10,
+        timeout=90,
         workspace=str(tmp_path),
     )
     assert result.exit_code != 0
@@ -58,7 +58,7 @@ async def test_execute_exit_nonzero(tmp_path: Path) -> None:
     result = await executor.execute(
         code="import sys; sys.exit(1)",
         language="python",
-        timeout=10,
+        timeout=90,
         workspace=str(tmp_path),
     )
     assert result.exit_code == 1
@@ -72,7 +72,7 @@ async def test_cross_platform_preexec_fn(tmp_path: Path) -> None:
     result = await executor.execute(
         code='print("platform check")',
         language="python",
-        timeout=10,
+        timeout=90,
         workspace=str(tmp_path),
     )
     assert result.exit_code == 0

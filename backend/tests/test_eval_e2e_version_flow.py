@@ -37,7 +37,7 @@ def _setup_schema() -> None:
 
 
 async def _insert_run(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     skill_name: str,
     skill_version: str,

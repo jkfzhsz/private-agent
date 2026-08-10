@@ -20,7 +20,7 @@ TEST_DSN = os.environ.get(
 
 def _make_fake_size(size_bytes: int):
     """构造 mock get_pg_data_dir_size(磁盘大小不可控,用 mock 注入固定值)。"""
-    async def _fake(conn: asyncpg.Connection) -> int:
+    async def _fake(conn: "asyncpg.Connection") -> int:
         return size_bytes
     return _fake
 

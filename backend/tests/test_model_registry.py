@@ -74,7 +74,7 @@ class _StubAdapter:
         streaming=True, function_calling=True, vision=False, json_mode=True
     )
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, **kwargs):
         return ChatResult(content="stub", tool_calls=[], used_provider="stub")
 
 

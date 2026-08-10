@@ -89,7 +89,7 @@ class TestHandlerWithMock:
             "private_agent.tools.builtins.search_knowledge.loader.load_config",
             return_value={"database": {}},
         ), patch(
-            "private_agent.tools.builtins.search_knowledge.KnowledgeBaseService",
+            "private_agent.tools.builtins.search_knowledge.build_kb_service",
             return_value=mock_svc,
         ):
             result = await SEARCH_KNOWLEDGE_TOOL.handler(
@@ -130,7 +130,7 @@ class TestHandlerWithMock:
             "private_agent.tools.builtins.search_knowledge.loader.load_config",
             return_value={"database": {}},
         ), patch(
-            "private_agent.tools.builtins.search_knowledge.KnowledgeBaseService",
+            "private_agent.tools.builtins.search_knowledge.build_kb_service",
             return_value=mock_svc,
         ):
             result = await SEARCH_KNOWLEDGE_TOOL.handler(
@@ -157,7 +157,7 @@ class TestHandlerWithMock:
             "private_agent.tools.builtins.search_knowledge.loader.load_config",
             return_value={"database": {}},
         ), patch(
-            "private_agent.tools.builtins.search_knowledge.KnowledgeBaseService",
+            "private_agent.tools.builtins.search_knowledge.build_kb_service",
             return_value=mock_svc,
         ):
             await SEARCH_KNOWLEDGE_TOOL.handler(
@@ -182,7 +182,7 @@ class TestHandlerWithMock:
             "private_agent.tools.builtins.search_knowledge.loader.load_config",
             return_value={"database": {}},
         ), patch(
-            "private_agent.tools.builtins.search_knowledge.KnowledgeBaseService",
+            "private_agent.tools.builtins.search_knowledge.build_kb_service",
             return_value=mock_svc,
         ):
             await SEARCH_KNOWLEDGE_TOOL.handler(
@@ -206,7 +206,7 @@ class TestHandlerWithMock:
             "private_agent.tools.builtins.search_knowledge.loader.load_config",
             return_value={"database": {}},
         ), patch(
-            "private_agent.tools.builtins.search_knowledge.KnowledgeBaseService",
+            "private_agent.tools.builtins.search_knowledge.build_kb_service",
             return_value=mock_svc,
         ):
             result = await SEARCH_KNOWLEDGE_TOOL.handler(
@@ -233,7 +233,7 @@ class TestHandlerWithMock:
             "private_agent.tools.builtins.search_knowledge.loader.load_config",
             return_value={"database": {}},
         ), patch(
-            "private_agent.tools.builtins.search_knowledge.KnowledgeBaseService",
+            "private_agent.tools.builtins.search_knowledge.build_kb_service",
             return_value=mock_svc,
         ):
             result = await SEARCH_KNOWLEDGE_TOOL.handler(

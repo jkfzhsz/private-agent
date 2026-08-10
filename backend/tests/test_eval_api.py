@@ -41,7 +41,7 @@ def _setup_schema() -> None:
 
 
 async def _insert_run(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     skill_name: str,
     skill_version: str,
@@ -97,7 +97,7 @@ def test_trigger_eval_run_endpoint_returns_run_id(monkeypatch):
             streaming=False, function_calling=False, vision=False, json_mode=False
         )
 
-        async def chat(self, messages, tools=None, max_tokens=None):
+        async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
             return ChatResult(content="mock")
 
     from private_agent.eval.hybrid_eval import HybridEvaluator

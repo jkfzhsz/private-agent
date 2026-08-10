@@ -28,7 +28,7 @@ def _make_config(tmp_path: Path) -> dict:
                 "python": {"command": sys.executable, "script_extension": ".py"},
             },
             "limits": {
-                "cpu_timeout_sec": 10,
+                "cpu_timeout_sec": 90,
                 "memory_limit_mb": 512,
                 "disk_limit_mb": 100,
             },
@@ -99,7 +99,7 @@ class TestCodeExecutionHandler:
         config = _make_config(tmp_path)
         result = await code_execution_handler({
             "code": "print('hello from tool')",
-            "timeout": 10,
+            "timeout": 90,  # 本机 python 冷启动 ~16s(杀软扫描), 需余量
             "session_id": "tool-test",
             "_sandbox_config": config,
         })
@@ -154,3 +154,49 @@ class TestCodeExecutionToolRegistry:
         tools = registry.list_tools()
         names = [t.name for t in tools]
         assert "code_execution" in names
+
+class TestCodeExecutionNetwork:
+    """0.5.1: network 参数 —— 显式联网放行(绕过沙箱代理隔离)。"""
+
+    @pytest.mark.asyncio
+    async def test_default_network_injects_dead_proxy(self, tmp_path: Path) -> None:
+        """默认 network=false: 沙箱注入死代理(HTTP_PROXY=127.0.0.1:9)。"""
+        config = _make_config(tmp_path)
+        result = await code_execution_handler({
+            "code": "import os; print('PROXY=' + str(os.environ.get('HTTP_PROXY')))",
+            "session_id": "net-default",
+            "_sandbox_config": config,
+        })
+        assert result.error is None
+        assert "127.0.0.1:9" in result.output
+
+    @pytest.mark.asyncio
+    async def test_network_true_bypasses_proxy_isolation(self, tmp_path: Path) -> None:
+        """network=true: 不注入死代理(代码可读真实环境/无代理)。"""
+        config = _make_config(tmp_path)
+        result = await code_execution_handler({
+            "code": "import os; print('PROXY=' + str(os.environ.get('HTTP_PROXY')))",
+            "session_id": "net-open",
+            "_sandbox_config": config,
+            "network": True,
+        })
+        assert result.error is None
+        assert "PROXY=" in result.output
+        assert "127.0.0.1:9" not in result.output
+
+    @pytest.mark.asyncio
+    async def test_utf8_mode_injected(self, tmp_path: Path) -> None:
+        """0.5.1 GBK 治本: 沙箱内 PYTHONUTF8=1(用户脚本内部 subprocess 也 UTF-8)。"""
+        config = _make_config(tmp_path)
+        result = await code_execution_handler({
+            "code": (
+                "import os\n"
+                "print('UTF8=' + str(os.environ.get('PYTHONUTF8')))\n"
+                "print('IOENC=' + str(os.environ.get('PYTHONIOENCODING')))"
+            ),
+            "session_id": "utf8-test",
+            "_sandbox_config": config,
+        })
+        assert result.error is None
+        assert "UTF8=1" in result.output
+        assert "IOENC=utf-8" in result.output

@@ -44,7 +44,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     """创建测试会话并返回 session_id。"""
     row = await conn.fetchrow(
         "INSERT INTO sessions (title) VALUES ($1) RETURNING id",
@@ -88,10 +88,10 @@ class _MockAdapter:
 
 
 class TestBuiltinToolLifecycle:
-    """AC-8 分支①: ToolRegistry + 9 类内置工具 → ReactLoop 调用。"""
+    """AC-8 分支①: ToolRegistry + 10 类内置工具 → ReactLoop 调用。"""
 
-    def test_tool_registry_contains_all_9_builtins(self):
-        """ToolRegistry 注册全部 9 类内置工具。"""
+    def test_tool_registry_contains_all_10_builtins(self):
+        """ToolRegistry 注册全部 10 类内置工具(0.5.0 M1 新增 memory_search)。"""
         registry = ToolRegistry()
         register_all_builtins(registry)
         tools = registry.list_tools()
@@ -99,8 +99,8 @@ class TestBuiltinToolLifecycle:
         assert names == {
             "calculator", "code_execution", "datetime", "file_read",
             "file_write", "http_request", "search_knowledge",
-            "web_search", "read_artifact",
-        }, f"expected 9 builtins, got {names}"
+            "web_search", "read_artifact", "memory_search",
+        }, f"expected 10 builtins, got {names}"
 
     def test_react_loop_calls_builtin_calculator_via_tool_registry(self):
         """ReactLoop 通过 ToolRegistry 加载内置工具并执行 calculator。"""

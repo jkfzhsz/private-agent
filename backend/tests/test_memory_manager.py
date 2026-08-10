@@ -25,7 +25,7 @@ class _MockCompressAdapter:
     def __init__(self, response_text: str = "[fact] 用户使用 Python") -> None:
         self._response_text = response_text
 
-    async def chat(self, messages: list[dict], tools: list | None = None) -> ChatResult:
+    async def chat(self, messages: list[dict], tools: list | None = None, **kwargs) -> ChatResult:
         return ChatResult(
             content=self._response_text,
         )
@@ -59,21 +59,34 @@ class _MockRepo:
             ids.append(mid)
         return ids
 
-    async def get_top_active(self, user_id: int = 1, order_by: str = "", limit: int = 10) -> list[Memory]:
+    async def get_top_active(self, user_id: int = 1, order_by: str = "", limit: int = 10,
+                             scope: str | None = None) -> list[Memory]:
+        # 0.5.0 M1: scope 过滤(未实现的 mock 忽略过滤, 保持旧语义)
         return self.active_memories[:limit]
+
+    async def get_global_core(self, user_id: int = 1, limit: int = 2) -> list[Memory]:
+        # 0.5.0 M1: 全局偏好画像子集(测试 mock 直接返回全局偏好)
+        return [
+            m for m in self.active_memories
+            if m.scope == "global" and m.type == "preference"
+        ][:limit]
 
     async def count_active(self, user_id: int = 1) -> int:
         return self.active_count
 
-    async def deactivate_lowest(self, user_id: int, count: int) -> list[int]:
-        ids = [m.id for m in self.active_memories[:count] if m.id is not None]
+    async def deactivate_lowest(self, user_id: int, count: int) -> list[Memory]:
+        evicted = self.active_memories[:count]
+        ids = [m.id for m in evicted if m.id is not None]
         self.deactivated.extend(ids)
         self.active_count = max(0, self.active_count - count)
-        return ids
+        return evicted
 
     async def deactivate_expired(self, user_id: int, min_importance: float = 0.3,
-                                  cutoff: datetime | None = None) -> list[int]:
+                                  cutoff: datetime | None = None) -> list[Memory]:
         return []
+
+    async def archive_memories(self, memories: list[Memory], summaries: dict | None = None) -> int:
+        return 0
 
     async def batch_update_access(self, memories: list[Memory]) -> None:
         self.accessed.extend(memories)

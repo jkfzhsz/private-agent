@@ -67,7 +67,7 @@ def _make_skill_payload(
 
 
 async def _insert_snapshot(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     scope: str = "skill",
     version: str,

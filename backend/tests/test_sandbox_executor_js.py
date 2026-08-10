@@ -58,7 +58,7 @@ class TestSandboxExecutorJs:
             executor.execute(
                 code="console.log('hello')",
                 language="javascript",
-                timeout=10,
+                timeout=90,
                 workspace=str(tmp_path),
             )
         )

@@ -39,7 +39,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         "test-event-sink",
@@ -64,6 +64,7 @@ class _MockAdapter:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        **kwargs,  # 多模态(require_vision)等扩展参数, mock 忽略
     ) -> ChatResult:
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")

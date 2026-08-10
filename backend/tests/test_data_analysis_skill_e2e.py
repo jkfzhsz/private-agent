@@ -44,7 +44,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         "data-analysis-e2e-test", "mock-glm",
@@ -80,14 +80,17 @@ class TestDataAnalysisSkillE2E:
                 )
 
                 # AC-1: 返回 locked_version + frozen_hash
-                assert result["locked_version"] == "1.0.0"
+                # 0.5.0 M1: skill.yaml 版本 1.0.0 → 1.1.0(场景命名/记忆检索)
+                assert result["locked_version"] == "1.1.0"
                 assert len(result["frozen_hash"]) == 64
 
-                # AC-3: tools 过滤 — 6 工具,无 web_search/http_request
+                # AC-3: tools 过滤 — 7 工具,无 web_search/http_request
+                # 0.5.0 M1: 新增 memory_search(记忆按需检索)
                 tool_names = [t.name for t in result["filtered_tools"]]
                 expected_tools = {
                     "calculator", "code_execution", "datetime",
                     "file_read", "file_write", "search_knowledge",
+                    "memory_search",
                 }
                 assert set(tool_names) == expected_tools, (
                     f"expected {expected_tools}, got {set(tool_names)}"
@@ -102,7 +105,7 @@ class TestDataAnalysisSkillE2E:
                     session_id,
                 )
                 assert row["locked_skill_name"] == "data_analysis"
-                assert row["locked_skill_version"] == "1.0.0"
+                assert row["locked_skill_version"] == "1.1.0"
                 assert row["frozen_hash"] == result["frozen_hash"]
 
                 return result
@@ -113,7 +116,8 @@ class TestDataAnalysisSkillE2E:
 
         # AC-4: system_prompt 含四段式框架关键字
         prompt = result["system_prompt"]
-        assert "数据分析" in prompt
+        # 0.5.0 M1: 场景改名 白圭 · 投资与理财
+        assert "白圭" in prompt
         assert "工具" in prompt
         # examples 注入
         assert "示例" in prompt
@@ -133,19 +137,25 @@ class TestDataAnalysisSkillE2E:
         tools = skill.manifest.dependencies.tools
         tool_names = {t.name: t.enabled for t in tools}
 
-        # AC-5: 蓝图 7.5 矩阵:6 工具 enabled,无 web_search/http_request 条目
+        # AC-5: 蓝图 7.5 矩阵:7 工具 enabled,无 web_search/http_request 条目
         assert tool_names["calculator"] is True
         assert tool_names["code_execution"] is True
         assert tool_names["datetime"] is True
         assert tool_names["file_read"] is True
         assert tool_names["file_write"] is True
         assert tool_names["search_knowledge"] is True
+        # 0.5.0 M1: memory_search(记忆按需检索)
+        assert tool_names["memory_search"] is True
         assert "web_search" not in tool_names
         assert "http_request" not in tool_names
 
         # AC-6: permissions / knowledge_base / examples 配置
         assert skill.manifest.permissions.allow_file_write is True
         assert skill.manifest.knowledge_base.scenario == "data_analysis"
+        # 0.5.0 M2(2026-08-08): auto_retrieve 打开 + 示例 3 条
+        assert skill.manifest.knowledge_base.auto_retrieve is True
         assert skill.manifest.examples.enabled is True
-        assert skill.manifest.examples.max_examples == 2
+        assert skill.manifest.examples.max_examples == 3
         assert skill.manifest.max_frozen_token == 4000
+        # 0.5.0 M1: 场景命名(白圭)
+        assert skill.manifest.scene_name == "白圭"

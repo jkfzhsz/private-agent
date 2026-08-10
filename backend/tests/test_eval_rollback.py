@@ -38,7 +38,7 @@ def _setup_schema() -> None:
 
 
 async def _insert_skill_row(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     name: str = "office",
     version: str = "1.1.0",
@@ -71,7 +71,7 @@ async def _insert_skill_row(
 
 
 async def _insert_snapshot(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     scope: str,
     version: str,

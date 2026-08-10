@@ -44,7 +44,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         "frontend-design-e2e-test", "mock-glm",
@@ -80,14 +80,17 @@ class TestFrontendDesignSkillE2E:
                 )
 
                 # AC-1: 返回 locked_version + frozen_hash
-                assert result["locked_version"] == "1.0.0"
+                # 0.5.0 M1: skill.yaml 版本 1.0.0 → 1.1.0(场景命名/记忆检索)
+                assert result["locked_version"] == "1.1.0"
                 assert len(result["frozen_hash"]) == 64
 
-                # AC-3: tools 过滤 — 6 工具,无 calculator/http_request
+                # AC-3: tools 过滤 — 7 工具,无 calculator/http_request
+                # 0.5.0 M1: 新增 memory_search(记忆按需检索)
                 tool_names = [t.name for t in result["filtered_tools"]]
                 expected_tools = {
                     "code_execution", "datetime", "file_read",
-                    "file_write", "search_knowledge", "web_search",
+                    "file_write", "search_knowledge", "memory_search",
+                    "web_search",
                 }
                 assert set(tool_names) == expected_tools, (
                     f"expected {expected_tools}, got {set(tool_names)}"
@@ -102,7 +105,7 @@ class TestFrontendDesignSkillE2E:
                     session_id,
                 )
                 assert row["locked_skill_name"] == "frontend_design"
-                assert row["locked_skill_version"] == "1.0.0"
+                assert row["locked_skill_version"] == "1.1.0"
                 assert row["frozen_hash"] == result["frozen_hash"]
 
                 return result
@@ -113,7 +116,8 @@ class TestFrontendDesignSkillE2E:
 
         # AC-4: system_prompt 含四段式框架关键字
         prompt = result["system_prompt"]
-        assert "前端设计" in prompt
+        # 0.5.0 M1: 场景改名 清和 · 生活健康与美学设计
+        assert "清和" in prompt
         assert "工具" in prompt
         # examples 注入
         assert "示例" in prompt
@@ -133,12 +137,14 @@ class TestFrontendDesignSkillE2E:
         tools = skill.manifest.dependencies.tools
         tool_names = {t.name: t.enabled for t in tools}
 
-        # AC-5: 蓝图 7.5 矩阵:6 工具 enabled,无 calculator/http_request 条目
+        # AC-5: 蓝图 7.5 矩阵:7 工具 enabled,无 calculator/http_request 条目
+        # 0.5.0 M1: 新增 memory_search(记忆按需检索)
         assert tool_names["code_execution"] is True
         assert tool_names["datetime"] is True
         assert tool_names["file_read"] is True
         assert tool_names["file_write"] is True
         assert tool_names["search_knowledge"] is True
+        assert tool_names["memory_search"] is True
         assert tool_names["web_search"] is True
         assert "calculator" not in tool_names
         assert "http_request" not in tool_names
@@ -147,5 +153,8 @@ class TestFrontendDesignSkillE2E:
         assert skill.manifest.permissions.allow_file_write is True
         assert skill.manifest.knowledge_base.scenario == "frontend_design"
         assert skill.manifest.examples.enabled is True
-        assert skill.manifest.examples.max_examples == 2
+        # 0.5.0 M2(2026-08-08): 示例 3 条
+        assert skill.manifest.examples.max_examples == 3
         assert skill.manifest.max_frozen_token == 4000
+        # 0.5.0 M1: 场景命名(清和)
+        assert skill.manifest.scene_name == "清和"

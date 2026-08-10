@@ -82,7 +82,7 @@ def _make_sample(
 # ── EvalDatasetRepo ─────────────────────────────────────────────────────
 
 
-async def test_eval_dataset_repo_insert_returns_id(conn: asyncpg.Connection):
+async def test_eval_dataset_repo_insert_returns_id(conn: "asyncpg.Connection"):
     """AC-3: 合法样本入库,返回 id(int > 0)。"""
     repo = EvalDatasetRepo(conn)
     sid = await repo.insert(_make_sample())
@@ -90,7 +90,7 @@ async def test_eval_dataset_repo_insert_returns_id(conn: asyncpg.Connection):
     assert sid > 0
 
 
-async def test_eval_dataset_repo_insert_invalid_raises(conn: asyncpg.Connection, monkeypatch):
+async def test_eval_dataset_repo_insert_invalid_raises(conn: "asyncpg.Connection", monkeypatch):
     """AC-3: validate_expected_trace 抛 InvalidSampleFormatError 时 insert 不入库并向上抛。"""
     repo = EvalDatasetRepo(conn)
     sample = _make_sample()
@@ -109,7 +109,7 @@ async def test_eval_dataset_repo_insert_invalid_raises(conn: asyncpg.Connection,
     assert count == 0
 
 
-async def test_eval_dataset_repo_load_test_set_empty(conn: asyncpg.Connection):
+async def test_eval_dataset_repo_load_test_set_empty(conn: "asyncpg.Connection"):
     """AC-4: 空表 load_test_set 返回空列表。"""
     repo = EvalDatasetRepo(conn)
     result = await repo.load_test_set(scenario="office", skill_version="1.0.0")
@@ -117,7 +117,7 @@ async def test_eval_dataset_repo_load_test_set_empty(conn: asyncpg.Connection):
 
 
 async def test_eval_dataset_repo_load_test_set_returns_samples(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
 ):
     """AC-4: load_test_set 返回 list[EvalSample],过滤 scenario+skill_version+split='test'。"""
     repo = EvalDatasetRepo(conn)
@@ -134,7 +134,7 @@ async def test_eval_dataset_repo_load_test_set_returns_samples(
     assert all(isinstance(s, EvalSample) for s in result)
 
 
-async def test_eval_dataset_repo_load_by_split(conn: asyncpg.Connection):
+async def test_eval_dataset_repo_load_by_split(conn: "asyncpg.Connection"):
     """load_by_split 按 scenario + split 过滤。"""
     repo = EvalDatasetRepo(conn)
     await repo.insert(_make_sample("s1", scenario="office", split="test"))
@@ -147,7 +147,7 @@ async def test_eval_dataset_repo_load_by_split(conn: asyncpg.Connection):
     assert {s.sample_id for s in test} == {"s1"}
 
 
-async def test_eval_dataset_repo_get_by_sample_id(conn: asyncpg.Connection):
+async def test_eval_dataset_repo_get_by_sample_id(conn: "asyncpg.Connection"):
     """get_by_sample_id 命中返回 EvalSample,未命中返回 None。"""
     repo = EvalDatasetRepo(conn)
     await repo.insert(_make_sample("find-me"))
@@ -161,7 +161,7 @@ async def test_eval_dataset_repo_get_by_sample_id(conn: asyncpg.Connection):
 # ── EvalRunRepo ─────────────────────────────────────────────────────────
 
 
-async def test_eval_run_repo_create_run_returns_run_id(conn: asyncpg.Connection):
+async def test_eval_run_repo_create_run_returns_run_id(conn: "asyncpg.Connection"):
     """AC-5: create_run 返回 run_id(str),eval_runs 记录 finished_at IS NULL(隐含 running)。"""
     repo = EvalRunRepo(conn)
     run_id = await repo.create_run(
@@ -181,7 +181,7 @@ async def test_eval_run_repo_create_run_returns_run_id(conn: asyncpg.Connection)
     assert row["mock_enabled"] is False
 
 
-async def test_eval_run_repo_complete_run(conn: asyncpg.Connection):
+async def test_eval_run_repo_complete_run(conn: "asyncpg.Connection"):
     """complete_run 设置 finished_at(状态变 completed)。"""
     repo = EvalRunRepo(conn)
     run_id = await repo.create_run(
@@ -194,7 +194,7 @@ async def test_eval_run_repo_complete_run(conn: asyncpg.Connection):
     assert row["finished_at"] is not None
 
 
-async def test_eval_run_repo_fail_run_sets_error(conn: asyncpg.Connection):
+async def test_eval_run_repo_fail_run_sets_error(conn: "asyncpg.Connection"):
     """fail_run 设置 finished_at + metrics 含 error 键。"""
     repo = EvalRunRepo(conn)
     run_id = await repo.create_run(
@@ -209,7 +209,7 @@ async def test_eval_run_repo_fail_run_sets_error(conn: asyncpg.Connection):
     assert got["metrics"]["error"] == "boom"
 
 
-async def test_eval_run_repo_update_run_metrics(conn: asyncpg.Connection):
+async def test_eval_run_repo_update_run_metrics(conn: "asyncpg.Connection"):
     """update_run_metrics 写入 metrics + sample_results。"""
     repo = EvalRunRepo(conn)
     run_id = await repo.create_run(
@@ -227,7 +227,7 @@ async def test_eval_run_repo_update_run_metrics(conn: asyncpg.Connection):
     assert got["sample_results"][0]["sample_id"] == "s1"
 
 
-async def test_eval_run_repo_list_runs_status_running(conn: asyncpg.Connection):
+async def test_eval_run_repo_list_runs_status_running(conn: "asyncpg.Connection"):
     """list_runs(status='running') 返回 finished_at IS NULL 的 run。"""
     repo = EvalRunRepo(conn)
     rid1 = await repo.create_run(
@@ -246,7 +246,7 @@ async def test_eval_run_repo_list_runs_status_running(conn: asyncpg.Connection):
     assert rid2 not in running_ids
 
 
-async def test_eval_run_repo_list_runs_status_completed(conn: asyncpg.Connection):
+async def test_eval_run_repo_list_runs_status_completed(conn: "asyncpg.Connection"):
     """list_runs(status='completed') 返回 finished_at IS NOT NULL 且无 error 的 run。"""
     repo = EvalRunRepo(conn)
     rid1 = await repo.create_run(
@@ -266,7 +266,7 @@ async def test_eval_run_repo_list_runs_status_completed(conn: asyncpg.Connection
     assert rid2 not in completed_ids
 
 
-async def test_eval_run_repo_list_runs_status_failed(conn: asyncpg.Connection):
+async def test_eval_run_repo_list_runs_status_failed(conn: "asyncpg.Connection"):
     """list_runs(status='failed') 返回 finished_at IS NOT NULL 且 metrics ? 'error' 的 run。"""
     repo = EvalRunRepo(conn)
     rid1 = await repo.create_run(
@@ -286,7 +286,7 @@ async def test_eval_run_repo_list_runs_status_failed(conn: asyncpg.Connection):
     assert rid1 not in failed_ids
 
 
-async def test_eval_run_repo_list_runs_filter_skill_version(conn: asyncpg.Connection):
+async def test_eval_run_repo_list_runs_filter_skill_version(conn: "asyncpg.Connection"):
     """list_runs 按 skill_version 过滤。"""
     repo = EvalRunRepo(conn)
     rid1 = await repo.create_run(
@@ -302,7 +302,7 @@ async def test_eval_run_repo_list_runs_filter_skill_version(conn: asyncpg.Connec
     assert result[0]["run_id"] == rid1
 
 
-async def test_eval_run_repo_get_low_score_samples(conn: asyncpg.Connection):
+async def test_eval_run_repo_get_low_score_samples(conn: "asyncpg.Connection"):
     """get_low_score_samples 返回 completion_rate < threshold 的样本(§8.16 复用)。"""
     repo = EvalRunRepo(conn)
     run_id = await repo.create_run(
@@ -322,7 +322,7 @@ async def test_eval_run_repo_get_low_score_samples(conn: asyncpg.Connection):
     assert result[0]["sample_id"] == "low1"
 
 
-async def test_eval_run_repo_get_run_missing(conn: asyncpg.Connection):
+async def test_eval_run_repo_get_run_missing(conn: "asyncpg.Connection"):
     """get_run 未命中返回 None。"""
     repo = EvalRunRepo(conn)
     got = await repo.get_run("00000000-0000-0000-0000-000000000000")
@@ -332,7 +332,7 @@ async def test_eval_run_repo_get_run_missing(conn: asyncpg.Connection):
 # ── VersionSnapshotRepo ─────────────────────────────────────────────────
 
 
-async def test_version_snapshot_repo_save_get_roundtrip(conn: asyncpg.Connection):
+async def test_version_snapshot_repo_save_get_roundtrip(conn: "asyncpg.Connection"):
     """AC-6: save + get 读写一致。"""
     repo = VersionSnapshotRepo(conn)
     payload = {"system_prompt": "you are an assistant", "version": "1.0.0"}
@@ -342,7 +342,7 @@ async def test_version_snapshot_repo_save_get_roundtrip(conn: asyncpg.Connection
     assert got == payload
 
 
-async def test_version_snapshot_repo_save_upsert(conn: asyncpg.Connection):
+async def test_version_snapshot_repo_save_upsert(conn: "asyncpg.Connection"):
     """save 同 scope+version 重复保存为 upsert(ON CONFLICT 更新 payload)。"""
     repo = VersionSnapshotRepo(conn)
     await repo.save(scope="prompt", version="v1", payload={"k": "old"})
@@ -357,14 +357,14 @@ async def test_version_snapshot_repo_save_upsert(conn: asyncpg.Connection):
     assert count == 1
 
 
-async def test_version_snapshot_repo_get_missing(conn: asyncpg.Connection):
+async def test_version_snapshot_repo_get_missing(conn: "asyncpg.Connection"):
     """get 未命中返回 None。"""
     repo = VersionSnapshotRepo(conn)
     got = await repo.get(scope="prompt", version="nope")
     assert got is None
 
 
-async def test_version_snapshot_repo_list_by_scope(conn: asyncpg.Connection):
+async def test_version_snapshot_repo_list_by_scope(conn: "asyncpg.Connection"):
     """list_by_scope 按 scope 过滤,按 created_at DESC 排序。"""
     repo = VersionSnapshotRepo(conn)
     await repo.save(scope="prompt", version="v1", payload={"i": 1})
@@ -379,7 +379,7 @@ async def test_version_snapshot_repo_list_by_scope(conn: asyncpg.Connection):
     assert versions[1] == "v1"
 
 
-async def test_version_snapshot_repo_get_latest(conn: asyncpg.Connection):
+async def test_version_snapshot_repo_get_latest(conn: "asyncpg.Connection"):
     """get_latest 返回 scope 下最新的一条(按 created_at DESC)。"""
     repo = VersionSnapshotRepo(conn)
     await repo.save(scope="prompt", version="v1", payload={"i": 1})
@@ -390,7 +390,7 @@ async def test_version_snapshot_repo_get_latest(conn: asyncpg.Connection):
     assert latest["version"] == "v2"
 
 
-async def test_version_snapshot_repo_get_latest_empty(conn: asyncpg.Connection):
+async def test_version_snapshot_repo_get_latest_empty(conn: "asyncpg.Connection"):
     """get_latest scope 无记录返回 None。"""
     repo = VersionSnapshotRepo(conn)
     latest = await repo.get_latest(scope="nope")

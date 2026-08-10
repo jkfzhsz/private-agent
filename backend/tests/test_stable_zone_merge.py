@@ -87,7 +87,7 @@ class _MockAdapter:
         self._responses = list(responses)
         self._idx = 0
 
-    async def chat(self, messages, tools=None, max_tokens=None):
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
         r = self._responses[self._idx]
         self._idx += 1
         return r
@@ -109,7 +109,7 @@ def test_react_loop_merges_stable_zone_at_interval():
             assert cm.kb_chunk_count() == 2
 
             class _CompressAdapter:
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     return ChatResult(
                         content="[Merged KB Context]\n茅台 2025 营收 1500 亿, 2026 Q1 400 亿",
                         used_provider="mock",

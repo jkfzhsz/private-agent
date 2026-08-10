@@ -30,7 +30,7 @@ class _FlakyAdapter:
         self.err_msg = err_msg
         self.calls = 0
 
-    async def chat(self, messages, tools=None, max_tokens=None):
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
         self.calls += 1
         if self.calls <= self.fails:
             raise ProviderError(self.provider_name, self.err_msg)
@@ -46,7 +46,7 @@ class _AuthFailAdapter:
     def __init__(self):
         self.calls = 0
 
-    async def chat(self, messages, tools=None, max_tokens=None):
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
         self.calls += 1
         raise ProviderError(self.provider_name, "401 Unauthorized")
 
@@ -70,7 +70,7 @@ class _StreamFlakyAdapter:
             raise ProviderError(self.provider_name, "upstream 503: busy")
         return ChatResult(content="stream-ok", used_provider=self.provider_name)
 
-    async def chat(self, messages, tools=None, max_tokens=None):
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
         return ChatResult(content="fallback", used_provider=self.provider_name)
 
 

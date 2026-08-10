@@ -24,7 +24,7 @@ def _make_config(tmp_path: Path) -> dict:
                 "python": {"command": sys.executable, "script_extension": ".py"},
             },
             "limits": {
-                "cpu_timeout_sec": 10,
+                "cpu_timeout_sec": 90,
                 "memory_limit_mb": 512,
                 "disk_limit_mb": 100,
             },

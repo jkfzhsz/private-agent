@@ -70,7 +70,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection, system_prompt: str = "You are a helpful assistant.") -> int:
+async def _create_session(conn: "asyncpg.Connection", system_prompt: str = "You are a helpful assistant.") -> int:
     """插入 sessions 记录,返回 id。"""
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
@@ -277,7 +277,7 @@ def test_build_initial_records_turn_zero():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _build_cm_with_initial(conn: asyncpg.Connection, system_prompt: str = "sys") -> ContextManager:
+def _build_cm_with_initial(conn: "asyncpg.Connection", system_prompt: str = "sys") -> ContextManager:
     """helper:建 session + build_initial,返回 ContextManager(异步内调用)。"""
     raise NotImplementedError  # 仅占位,测试内联实现
 

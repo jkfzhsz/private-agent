@@ -305,3 +305,45 @@ class TestStdioConcurrency:
         client = MCPClient(MCPClientConfig(server_id="s", server_type="stdio"))
         assert isinstance(client._write_lock, asyncio.Lock)
 
+    async def test_concurrent_slow_responses_no_cross_pop(self) -> None:
+        """2026-08-07 根治回归: 慢响应 server 下并发调用不能互相误删 pending。
+
+        竞态背景: _send_request 的 finally 若用共享 self._request_id 做
+        pop, 请求 A(id=2)完成时 self._request_id 已被请求 B 改成 3 →
+        pop(3) 误删 B 的 pending future → B 的响应到达时无处分发 → 超时
+        (mempalace 并发调 2 工具第二个必超时的根因; echo 响应太快测不出)。
+
+        用 sleep 0.3s 的慢响应 server 放大竞争窗口, 并发 4 个调用必须
+        全部收到响应。
+        """
+        import asyncio
+        import sys
+
+        slow_code = (
+            "import sys, json, time\n"
+            "for line in sys.stdin:\n"
+            "    req = json.loads(line)\n"
+            "    time.sleep(0.3)\n"  # 慢响应放大竞态窗口(响应有先后)
+            "    resp = {'jsonrpc':'2.0','id':req.get('id'),"
+            "'result':{'content':[{'type':'text','text':str(req.get('id'))}]}}\n"
+            "    sys.stdout.write(json.dumps(resp)+'\\n')\n"
+            "    sys.stdout.flush()\n"
+        )
+        client = MCPClient(
+            MCPClientConfig(
+                server_id="slow", server_type="stdio",
+                command=sys.executable, args=["-c", slow_code],
+                timeout_sec=15,
+            )
+        )
+        await client.connect()
+        try:
+            results = await asyncio.gather(
+                *(client.call_tool("echo", {"i": i}) for i in range(4))
+            )
+            assert len(results) == 4, f"got {len(results)} results"
+            for r in results:
+                assert r.get("content"), f"empty content: {r}"
+        finally:
+            await client.disconnect()
+

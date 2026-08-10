@@ -10,7 +10,7 @@
 system:
   app_name: "Private Agent"
   version: "0.1.0"
-  workspace_root: "${WORKSPACE}"           # 工作区根目录
+  workspace_root: "${PA_USER_DATA}"         # 工作区根目录(打包版=userData, 程序/用户数据分离)
   sidecar:
     memory_limit_mb: 1536                  # Python Sidecar 内存上限 [runtime]
     log_level: "INFO"                      # 日志级别 [runtime]
@@ -131,6 +131,14 @@ context:
 memory:
   extract_interval_turns: 8  # [runtime]
   inject_limit: 10  # [runtime]
+  # 0.5.0 M1(2026-08-08): 注入配额 —— 全局只注入"身份+核心偏好"画像,
+  # 其余配额全给场景记忆(用户确认默认 2:8)。global_n 取 min(global_n, limit//2)
+  # 保证场景至少占一半; 全局其他内容按需检索(memory_search/search_knowledge)。
+  inject_ratio:  # [runtime]
+    global: 2
+    scene: 8
+  # 0.5.0 M3 B3: 驱逐前巩固归档(摘要入 user_memories_archive 再 deactivate)
+  archive_before_evict: true  # [runtime]
   eviction:  # [runtime]
     max_active_count: 200
     min_importance_threshold: 0.3
@@ -154,11 +162,20 @@ kb:
       chunk_size: 400
       chunk_overlap: 50
   embedding:
-    local_default: "BAAI/bge-m3"
+    # 0.5.1: 固定 bge-small-zh-v1.5(512 维, ModelScope 官方) —— 本机 7.6GB 内存下 bge-m3 OOM;
+    # padding 至 storage_dim(1024) 与 DB vector(1024) 对齐。
+    # C3 单一模型纪律: 切换模型 = 全量重灌, 由启动自检程序强制, 勿运行时改。
+    local_default: "BAAI/bge-small-zh-v1.5"
     local_light: "BAAI/bge-small-zh-v1.5"  # [runtime]
+    # 模型本地路径(直接模型目录: ModelScope 官方 BAAI/bge-small-zh-v1.5,
+    # 512 维, 2026-08-09 下载至 kb-model-cache/modelscope)。
+    # 显式指定时优先于自动探测(项目根误标目录会干扰探测)。
+    model_path: "D:/Private agent/kb-model-cache/modelscope/models/BAAI--bge-small-zh-v1.5/snapshots/master"  # [runtime]
+    # DB 存储维(补零占位), 与 schema.sql vector(1024) 一致, 勿改
+    storage_dim: 1024
     # V2 P3 去预置化: 云端 embedding 兜底按模型名匹配 providers, 空则禁用
     fallback_cloud: ""
-    auto_switch_memory_gb: 6  # [runtime]
+    auto_switch_memory_gb: 6  # [runtime] 已废弃(C3 固定模型), 保留字段兼容
     lru_cache_size: 512
   hnsw:
     m: 16
@@ -186,20 +203,33 @@ tools:
     # 会话激活某 skill 时只装配绑定列表内的 server(支持 * 通配),
     # 工具池从全量收敛到 skill 相关子集; 未列出的 skill 装配全部(兼容旧行为)。
     # 注意: 绑定不宜过窄 —— 工作模式也常问行情/新闻, 故 office 保留常用金融 MCP。
+    # V1.5.1(2026-08-07 修复): 记忆(mempalace)/搜索(Searchpin)是跨模式通用
+    # 能力, 三个模式全部装配 —— 修复 "LLM 调用 mempalace/Searchpin 返回空"
+    # 的装配层根因(此前 office 两工具均不装配, data_analysis 缺 Searchpin,
+    # 模型看不到工具自然返回空)。
+    # 0.5.0 M1(2026-08-08): 子瞻(office)保留 ifind 金融系(工作与金融相关,
+    # 用户确认) —— office 与 data_analysis 均为 hexin-ifind-ds-* 全系,
+    # 职责边界靠 scene_profile 规则约束; frontend_design(清和) 通用。
     skill_binding:
-      office: ["hexin-ifind-ds-stock-mcp", "hexin-ifind-ds-index-mcp", "hexin-ifind-ds-news-mcp"]
-      data_analysis: ["hexin-ifind-ds-*", "mempalace"]
-      frontend_design: ["mempalace"]
+      office: ["hexin-ifind-ds-*", "mempalace", "Searchpin"]
+      data_analysis: ["hexin-ifind-ds-*", "mempalace", "Searchpin"]
+      frontend_design: ["mempalace", "Searchpin"]
   # 对话流畅度优化(方向一): 每轮动态 top-N 工具注入(避免全量 schema)
   tool_selection:
     enabled: true
     strategy: "keyword_score"  # 关键词/描述匹配(确定性)
     top_n: 15                  # 每轮注入上限(工具 schema ~2-3k token)
     min_pool_size: 8           # 池内工具 ≤ 8 时全量注入(小池无需裁剪)
-    always_include:            # 锚点: 无条件注入
+    always_include:            # 锚点: 无条件注入(支持 fnmatch 通配, V1.5.1)
       - "code_execution"
       - "file_read"
       - "file_write"
+      # V1.5.1: 记忆/搜索整组工具无条件注入 —— 修复 top-15 竞争把
+      # mempalace_search/mempalace_kg_query 挤出模型可见集 → LLM 返回空
+      - "mcp__mempalace__*"
+      - "mcp__Searchpin__*"
+      # 0.5.0 M1: 记忆按需检索(全局其他内容/归档召回)无条件注入
+      - "memory_search"
   web_search:
     backend: "duckduckgo"  # duckduckgo(国际,无 key) | bocha(已停用) | bing(HTML 解析, 当前默认 .env)
     # 外部服务统一从前端接入(MCP), 专用搜索 API(如 bocha)不再后端配置
@@ -238,7 +268,7 @@ tools:
 # ------------------------------------------------------------------------------
 sandbox:
   enabled: true  # [runtime]
-  workspace_root: "${WORKSPACE}/.sandbox"
+  workspace_root: "${PA_USER_DATA}/.sandbox"
   retention_days: 7  # [runtime]
   languages:
     python:
@@ -268,7 +298,7 @@ sandbox:
 # ------------------------------------------------------------------------------
 skills:
   storage:
-    dev_dir: "./skills"
+    dev_dir: "${PA_USER_DATA}/skills"
     runtime_source: "db_first"  # [runtime]
   defaults:
     max_frozen_token: 4000  # [runtime]
@@ -291,7 +321,7 @@ eval:
 observability:
   logging:
     level: "INFO"  # [runtime]
-    file_path: "${WORKSPACE}/logs/agent.log"
+    file_path: "${PA_USER_DATA}/logs/agent.log"
     stdout_enabled: true  # [runtime]
     trace_id_enabled: true
   disk:

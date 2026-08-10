@@ -79,3 +79,45 @@ def test_sliding_window_tool_pairing_preserved_within_active():
     # 配对保护: tool 的 call_turn=1 < 7 → 不豁免 → 两条都压缩(配对一致)
     comp = [m for m in result if m.get("compressed")]
     assert all(m.get("role") in ("assistant", "tool") for m in comp)
+
+
+class TestFactualCompression:
+    """0.5.1: 事实型压缩保护 —— 数字/表格/路径/代码原文保留不摘要。"""
+
+    def _compressor(self):
+        from private_agent.core.compressor import Compressor
+        return Compressor()
+
+    def test_is_factual_numbers(self):
+        c = self._compressor()
+        assert c._is_factual("持仓: 大华股份 117880, 盈亏 -2595.78, 比例 2.16%, 成本 17.211")
+        assert not c._is_factual("今天天气不错，聊得很愉快。")
+
+    def test_is_factual_table(self):
+        c = self._compressor()
+        assert c._is_factual("名称|市值|盈亏\n华东医药|28990|+1660\n特变电工|85320|+24261")
+
+    def test_is_factual_path_code(self):
+        c = self._compressor()
+        assert c._is_factual("文件在 D://PA//data//uploads//x.jpg")
+        assert c._is_factual("代码: ```python\nx = 1\n```")
+
+    async def test_execute_keeps_factual_verbatim(self):
+        import asyncio
+        from private_agent.core.compressor import Compressor
+        c = Compressor()
+        messages = [
+            {"role": "user", "content": "记录持仓：华东医药 1000 股，成本 27.33", "turn": 1, "zone": "active"},
+            {"role": "assistant", "content": "好的，已记录。", "turn": 2, "zone": "active"},
+            {"role": "user", "content": "今天天气不错。", "turn": 3, "zone": "active"},
+            {"role": "user", "content": "继续", "turn": 4, "zone": "active"},
+            {"role": "assistant", "content": "好的", "turn": 5, "zone": "active"},
+        ]
+        result = await c.execute(messages, keep_turns=1, compress_adapter=None)
+        # 事实快照应保留数字原文
+        factual = result.get("factual_snapshot")
+        assert factual is not None
+        assert "27.33" in factual["content"]
+        assert "华东医药" in factual["content"]
+        # 无 compress_adapter → summary 为 None 但 factual_snapshot 仍在
+        assert result["summary"] is None

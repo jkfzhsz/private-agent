@@ -38,7 +38,7 @@ class _FakeAdapter:
         self._content = content
         self.calls = 0
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, **kwargs):
         self.calls += 1
         return type("ChatResult", (), {"content": self._content})()
 
@@ -102,7 +102,7 @@ class TestCorrectionExtract:
 
     def test_llm_failure_falls_back(self):
         class _FailAdapter:
-            async def chat(self, messages, tools=None):
+            async def chat(self, messages, tools=None, **kwargs):
                 raise RuntimeError("llm down")
 
         repo = _FakeRepo()

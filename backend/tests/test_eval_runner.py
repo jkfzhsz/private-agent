@@ -58,7 +58,7 @@ class _MockAdapter:
         self._responses = list(responses)
         self._idx = 0
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         if self._idx >= len(self._responses):
             raise RuntimeError(f"mock adapter exhausted: idx={self._idx}")
         result = self._responses[self._idx]
@@ -74,7 +74,7 @@ class _OfflineAdapter:
         streaming=False, function_calling=True, vision=False, json_mode=False
     )
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         return ChatResult(content="offline final answer", used_provider="mock-offline")
 
 
@@ -130,7 +130,7 @@ def _make_mock_judge():
     return judge
 
 
-async def _insert_samples(conn: asyncpg.Connection, samples: list[EvalSample]) -> None:
+async def _insert_samples(conn: "asyncpg.Connection", samples: list[EvalSample]) -> None:
     """批量插入 EvalSample 到 eval_datasets 表。"""
     repo = EvalDatasetRepo(conn)
     for s in samples:
@@ -351,7 +351,7 @@ def test_run_evaluation_marks_sample_failed_and_continues_run(tmp_path):
                     streaming=False, function_calling=True, vision=False, json_mode=False
                 )
 
-                async def chat(self, messages, tools=None, max_tokens=None):
+                async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
                     raise AllProvidersFailedError("all providers failed: boom")
 
             dataset_repo = EvalDatasetRepo(conn)

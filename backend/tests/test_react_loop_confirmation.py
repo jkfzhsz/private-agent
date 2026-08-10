@@ -42,7 +42,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         "test-confirmation",
@@ -66,7 +66,7 @@ class _MockAdapter:
         self._tool_call_args = list(tool_call_args)
         self.chat_calls: list[list[dict]] = []
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         self.chat_calls.append(list(messages))
         if self._tool_call_args:
             args = self._tool_call_args.pop(0)
@@ -242,3 +242,133 @@ def test_confirmation_timeout_returns_error():
     assert tr["payload"]["error"] is not None
     assert "timeout" in tr["payload"]["error"].lower() or "超时" in tr["payload"]["error"]
     assert state == ReactLoopState.IDLE
+
+
+def test_timeout_tool_message_written_after_assistant_in_db():
+    """权限超时后 tool 消息必须在 assistant 之后写入(DB id 顺序)。
+
+    回归测试 2026-08-08: Phase A 中权限超时/拒绝曾直接 append_tool_message,
+    导致 tool 消息 id < assistant 消息 id → get_messages 按 (turn, id) 排序后
+    tool 出现在 assistant 之前 → DeepSeek API 400 配对错误。
+    修复: Phase A 收集 early_tool_msgs, Phase C 事务中 assistant 之后统一写入。
+    """
+    _setup_schema()
+    calls: list[dict] = []
+    pm = PermissionManager(timeout=0.05)
+
+    async def _run() -> dict:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            tools = [_elevated_tool(calls)]
+            cm = ContextManager(
+                session_id=session_id, system_prompt="sys", tools=tools
+            )
+            await cm.build_initial(conn)
+            adapter = _MockAdapter([{"code": "print(1)"}])
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=adapter,
+                tools=tools,
+                conn=conn,
+                permission_manager=pm,
+            )
+            await loop.run_turn("run code")
+            # 查 DB: 同轮 assistant 和 tool 消息的 id 顺序
+            rows = await conn.fetch(
+                "SELECT id, role, tool_call_id FROM messages "
+                "WHERE session_id=$1 AND role IN ('assistant','tool') "
+                "ORDER BY id",
+                session_id,
+            )
+            return {"rows": [dict(r) for r in rows]}
+        finally:
+            await conn.close()
+
+    result = asyncio.run(_run())
+    rows = result["rows"]
+    # 应有: assistant(tool_calls) → tool(timeout error)
+    assert len(rows) >= 2
+    roles = [r["role"] for r in rows]
+    # 第一个必须是 assistant(在 tool 之前)
+    assert roles[0] == "assistant", (
+        f"assistant must be written before tool, got order: {roles}"
+    )
+    # 至少有一个 tool 在 assistant 之后
+    assert "tool" in roles[1:], (
+        f"tool must appear after assistant, got: {roles}"
+    )
+
+
+def test_repair_tool_pairing_drops_orphan_tool():
+    """_repair_tool_pairing 应移除缺少前置 assistant.tool_calls 的孤儿 tool 消息。
+
+    场景: tool 消息的 tool_call_id 不在已遍历的 assistant 消息中
+    (Phase A 时序 bug / 压缩打破配对 / DB 恢复残留)。
+
+    孤儿 tool 被移除后, 其对应的 assistant(后置)缺 tool 响应 → 补占位。
+    最终: assistant(call_X) 后面跟着占位 tool(call_X), 而非孤儿 tool 在前。
+    """
+    from private_agent.core.react_loop import ReactLoop
+
+    class _MockLoop:
+        _logger = type("_L", (), {"warning": staticmethod(lambda *a, **k: None)})()
+        _repair_tool_pairing = ReactLoop._repair_tool_pairing
+
+    # 构造孤儿序列: tool(call_X) 在 assistant(call_X) 之前
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_A", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "call_A", "content": "result A"},
+        # 孤儿: call_X 的 assistant 在后面(时序 bug 场景)
+        {"role": "tool", "tool_call_id": "call_X", "content": "orphan"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_X", "type": "function", "function": {"name": "bar", "arguments": "{}"}}
+        ]},
+    ]
+    fixed = _MockLoop()._repair_tool_pairing(messages)
+    # 找 assistant(call_X) 的位置
+    asst_x_idx = None
+    for i, m in enumerate(fixed):
+        if m.get("role") == "assistant":
+            for tc in m.get("tool_calls") or []:
+                if tc.get("id") == "call_X":
+                    asst_x_idx = i
+                    break
+    assert asst_x_idx is not None, "assistant(call_X) should be in fixed list"
+    # 孤儿 tool(call_X) 应被移除(不在 assistant 之前)
+    for i, m in enumerate(fixed):
+        if m.get("role") == "tool" and m.get("tool_call_id") == "call_X":
+            assert i > asst_x_idx, (
+                f"tool(call_X) must appear AFTER assistant(call_X) "
+                f"(idx {i} > {asst_x_idx}), got: {[(m.get('role'), m.get('tool_call_id')) for m in fixed]}"
+            )
+    # call_A 的 tool 应保留(有前置 assistant)
+    tool_ids = [m.get("tool_call_id") for m in fixed if m.get("role") == "tool"]
+    assert "call_A" in tool_ids, f"valid tool call_A should be kept, got: {tool_ids}"
+
+
+def test_repair_tool_pairing_adds_missing_tool_response():
+    """_repair_tool_pairing 应为缺少 tool 响应的 assistant 补占位 tool 消息。"""
+    from private_agent.core.react_loop import ReactLoop
+
+    class _MockLoop:
+        _logger = type("_L", (), {"warning": staticmethod(lambda *a, **k: None)})()
+        _repair_tool_pairing = ReactLoop._repair_tool_pairing
+
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_A", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+        ]},
+        # 没有 tool 响应!
+    ]
+    fixed = _MockLoop()._repair_tool_pairing(messages)
+    # 末尾应补一条占位 tool 消息
+    assert fixed[-1]["role"] == "tool"
+    assert fixed[-1]["tool_call_id"] == "call_A"

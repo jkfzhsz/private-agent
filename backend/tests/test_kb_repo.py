@@ -43,7 +43,7 @@ async def conn():
 
 
 @pytest.fixture
-def repo(conn: asyncpg.Connection) -> KnowledgeBaseRepo:
+def repo(conn: "asyncpg.Connection") -> KnowledgeBaseRepo:
     return KnowledgeBaseRepo(conn)
 
 

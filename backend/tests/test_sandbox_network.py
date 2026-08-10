@@ -28,7 +28,7 @@ _VENV_PY = Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "python.e
 
 
 def _make_config(tmp_path: Path, network_enabled: bool | None = None) -> dict:
-    limits = {"cpu_timeout_sec": 10, "memory_limit_mb": 512, "disk_limit_mb": 100}
+    limits = {"cpu_timeout_sec": 90, "memory_limit_mb": 512, "disk_limit_mb": 100}
     if network_enabled is not None:
         limits["network_enabled"] = network_enabled
     return {

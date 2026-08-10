@@ -42,7 +42,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
         "test-parallel",
@@ -63,7 +63,7 @@ class _MockAdapter:
         self._extra = extra_args or {}
         self.chat_calls = 0
 
-    async def chat(self, messages, tools=None, max_tokens=None) -> ChatResult:
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
         self.chat_calls += 1
         if self.chat_calls == 1:
             tcs = [

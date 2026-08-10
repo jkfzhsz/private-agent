@@ -45,7 +45,7 @@ def _setup_schema() -> None:
     asyncio.run(_run())
 
 
-async def _create_session(conn: asyncpg.Connection) -> int:
+async def _create_session(conn: "asyncpg.Connection") -> int:
     """插入 sessions 记录,返回 id。"""
     return await conn.fetchval(
         "INSERT INTO sessions (title, model_id) VALUES ($1, $2) RETURNING id",
@@ -83,14 +83,17 @@ class TestOfficeSkillE2E:
                 )
 
                 # AC-1: 返回 locked_version + frozen_hash
-                assert result["locked_version"] == "1.0.0"
+                # 0.5.0 M1: skill.yaml 版本 1.0.0 → 1.1.0(场景命名/记忆检索)
+                assert result["locked_version"] == "1.1.0"
                 assert len(result["frozen_hash"]) == 64
 
-                # AC-3: tools 过滤 — 7 工具,http_request 排除
+                # AC-3: tools 过滤 — 8 工具,http_request 排除
+                # 0.5.0 M1: 新增 memory_search(记忆按需检索)
                 tool_names = [t.name for t in result["filtered_tools"]]
                 expected_tools = {
                     "calculator", "code_execution", "datetime",
-                    "file_read", "file_write", "search_knowledge", "web_search",
+                    "file_read", "file_write", "search_knowledge",
+                    "memory_search", "web_search",
                 }
                 assert set(tool_names) == expected_tools, (
                     f"expected {expected_tools}, got {set(tool_names)}"
@@ -104,7 +107,7 @@ class TestOfficeSkillE2E:
                     session_id,
                 )
                 assert row["locked_skill_name"] == "office"
-                assert row["locked_skill_version"] == "1.0.0"
+                assert row["locked_skill_version"] == "1.1.0"
                 assert row["frozen_hash"] == result["frozen_hash"]
 
                 return result
@@ -115,7 +118,8 @@ class TestOfficeSkillE2E:
 
         # system_prompt 含四段式框架关键字
         prompt = result["system_prompt"]
-        assert "办公" in prompt or "office" in prompt.lower()
+        # 0.5.0 M1: 场景改名 子瞻 · 工作与学习
+        assert "子瞻" in prompt or "office" in prompt.lower()
         assert "工具" in prompt or "tool" in prompt.lower()
         # examples 注入(excel_summary + web_research)
         assert "示例" in prompt or "example" in prompt.lower()
@@ -148,7 +152,11 @@ class TestOfficeSkillE2E:
         # permissions / knowledge_base / examples 配置
         assert skill.manifest.permissions.allow_file_write is True
         assert skill.manifest.knowledge_base.scenario == "office"
-        assert skill.manifest.knowledge_base.auto_retrieve is False
+        # 0.5.0 M2(2026-08-08): auto_retrieve 打开 + 示例 3 条
+        assert skill.manifest.knowledge_base.auto_retrieve is True
         assert skill.manifest.examples.enabled is True
-        assert skill.manifest.examples.max_examples == 2
+        assert skill.manifest.examples.max_examples == 3
         assert skill.manifest.max_frozen_token == 4000
+        # 0.5.0 M1: 场景命名(子瞻)+ 记忆按需检索工具
+        assert skill.manifest.scene_name == "子瞻"
+        assert skill.manifest.dependencies.tools  # memory_search 已声明
