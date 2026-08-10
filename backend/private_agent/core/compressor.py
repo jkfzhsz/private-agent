@@ -102,6 +102,43 @@ class Compressor:
         compressed = [m for m in marked if m.get("compressed")]
         return {"kept": kept, "compressed": compressed}
 
+    @staticmethod
+    def _is_factual(content: str) -> bool:
+        """0.5.1(2026-08-10 蒋先生要求"压缩不丢事实"): 事实型消息检测。
+
+        满足任一即视为事实型(压缩时原文保留, 不摘要化):
+        - 数字密集: ≥3 个数值/百分比(持仓、账户、指标)
+        - 表格: 含 | 分隔的多列行
+        - 路径: 盘符/反斜杠路径/常见扩展名
+        - 代码块: ``` 包裹
+        - 结构化: JSON/键值对
+        """
+        if not content:
+            return False
+        # 代码块
+        if "```" in content:
+            return True
+        # 表格(至少 2 行含 | 分隔)
+        if sum(1 for ln in content.splitlines() if "|" in ln) >= 2:
+            return True
+        # 数字密集(≥2 个独立数值/百分比 —— 2026-08-10 调优: 3→2,
+        # 持仓/记录类消息含市值+盈亏+比例即可命中)
+        import re
+
+        num_count = len(re.findall(r"\d+(?:[.,]\d+)?%?", content))
+        if num_count >= 2:
+            return True
+        # 用户显式记忆指令("记录/记住/保存/写入/更新" + 具体对象)
+        if re.search(r"(记录|记住|保存|写入|更新|记下)[\u4e00-\u9fa5A-Za-z0-9，,、\s]{0,20}(持仓|资产|数据|内容|结果|信息|配置)", content):
+            return True
+        # 路径(盘符 / 反斜杠 / 常见文件扩展名)
+        if re.search(r"[A-Za-z]:[\\/]|\.(?:md|py|json|yaml|txt|png|jpg|zip)\b", content):
+            return True
+        # 结构化键值(如 "名称: 值" 出现 ≥2 次)
+        if len(re.findall(r"[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_]*[:：]", content)) >= 2:
+            return True
+        return False
+
     async def execute(
         self,
         messages: list[dict],
@@ -138,9 +175,38 @@ class Compressor:
         result_messages = list(plan["kept"])
         summary: dict | None = None
         summary_error = False
-        if compress_adapter is not None:
+        # 0.5.1(2026-08-10 事实型压缩保护): 压缩消息按事实型分级 ——
+        # 事实型(数字/表格/路径/代码)原文保留为"事实快照", 不摘要化;
+        # 仅非事实型(闲聊/寒暄/中间推理)走 LLM 摘要。
+        factual_msgs = [
+            m for m in compressed
+            if self._is_factual(str(m.get("content", "") or ""))
+        ]
+        summarizable = [
+            m for m in compressed if m not in factual_msgs
+        ]
+        factual_snapshot: dict | None = None
+        if factual_msgs:
+            # 事实快照: 原文合并保留(超长截断 + 标注可追溯)
+            factual_text = "\n\n".join(
+                f"[{m.get('role', 'unknown')}]: {m.get('content', '')}"
+                for m in factual_msgs
+            )
+            max_factual_chars = 20000  # ≈ 5K token 事实快照预算
+            if len(factual_text) > max_factual_chars:
+                factual_text = (
+                    factual_text[:max_factual_chars]
+                    + "\n…(事实快照已按预算截断, 完整内容见压缩存档)"
+                )
+            factual_snapshot = {
+                "role": "user",
+                "content": f"[事实快照(原文保留)]\n{factual_text}",
+                "compressed_from_factual": True,
+            }
+            result_messages.insert(0, factual_snapshot)
+        if summarizable and compress_adapter is not None:
             try:
-                summary = await self._summarize(compress_adapter, compressed)
+                summary = await self._summarize(compress_adapter, summarizable)
                 result_messages.insert(0, summary)
             except Exception:
                 # 摘要失败: 降级为纯滑动窗口(不中断对话), 标记供熔断
@@ -150,6 +216,7 @@ class Compressor:
         return {
             "messages": result_messages,
             "summary": summary,
+            "factual_snapshot": factual_snapshot,
             "compressed_msgs": compressed,
             "summary_error": summary_error,
         }
@@ -197,7 +264,9 @@ class Compressor:
     ) -> dict:
         summary_prompt = (
             "Summarize the following conversation concisely, preserving key facts, "
-            "decisions, and action items:\n\n"
+            "decisions, and action items.\n"
+            "IMPORTANT: 必须逐字保留所有数字、金额、比例、路径、文件名、"
+            "表格、代码和结构化数据(不得概括、不得省略具体数值)。\n\n"
         )
         for m in compressed_msgs:
             role = m.get("role", "unknown")

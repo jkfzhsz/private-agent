@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 from private_agent.config import loader
-from private_agent.knowledge.kb_repo import KnowledgeBaseRepo
-from private_agent.knowledge.kb_service import KnowledgeBaseService
+from private_agent.knowledge.factory import build_kb_service
 from private_agent.storage import db
 from private_agent.tools.defs import ToolDef, ToolResult
 
@@ -43,8 +42,7 @@ async def _search_knowledge_handler(args: dict) -> ToolResult:
         )
 
     try:
-        repo = KnowledgeBaseRepo(conn)
-        svc = KnowledgeBaseService(kb_repo=repo)
+        svc = build_kb_service(conn, cfg, processor=None)
         chunks = await svc.search_with_rerank(
             query=query,
             scenario=scenario,

@@ -105,15 +105,14 @@ class KnowledgeBaseService:
         # 3. chunking
         chunks = self._processor.process(content, filename, scenario)
 
-        # 4. embedding
-        try:
-            vectors = await self._embedding_service.embed_chunks(chunks)
-            for i, c in enumerate(chunks):
-                if i < len(vectors):
-                    # MVP:embedding 暂存为 Chunk 属性,DB 写入时转 BYTEA
-                    c.embedding = _vector_to_bytes(vectors[i])
-        except Exception as e:
-            logger.warning("Embedding failed for '%s': %s, inserting without vectors", filename, e)
+        # 4. embedding(0.5.1 C1: 维度校验失败 → EmbeddingError 传播,
+        #   拒绝入库非法向量; worker 故障已在 EmbeddingService 内部降级为
+        #   全 0 mock → 检索 keyword-only, 不在此处吞异常)
+        vectors = await self._embedding_service.embed_chunks(chunks)
+        for i, c in enumerate(chunks):
+            if i < len(vectors):
+                # MVP:embedding 暂存为 Chunk 属性,DB 写入时转 pgvector 文本
+                c.embedding = _vector_to_bytes(vectors[i])
 
         # 5. 写入 kb_chunks
         await self._kb_repo.batch_insert_chunks(doc_id, scenario, chunks)

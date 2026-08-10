@@ -54,13 +54,19 @@ def get_adapter(name: str, cfg: dict | None = None) -> ModelAdapter:
     return factory(cfg if cfg is not None else {})
 
 
-def build_fallback_chain(cfg: dict) -> FallbackChain:
-    """按 cfg['models']['router']['fallback_chain'] 顺序构造 FallbackChain。
+def build_fallback_chain(
+    cfg: dict, chain_key: str = "fallback_chain"
+) -> FallbackChain:
+    """按 cfg['models']['router'][chain_key] 顺序构造 FallbackChain。
 
     跳过 enabled=false 的 provider(蓝图 §2.9)。
+    0.5.1(2026-08-10 双链架构): chain_key 支持 fallback_chain(兼容) /
+    text_chain / vision_chain; 指定的链未配置时回退 fallback_chain。
     """
     router_cfg = cfg["models"]["router"]
-    chain_names = router_cfg.get("fallback_chain", [])
+    chain_names = router_cfg.get(chain_key) or router_cfg.get(
+        "fallback_chain", []
+    )
     providers = cfg["models"]["providers"]
     adapters: list[ModelAdapter] = []
     for name in chain_names:
@@ -192,6 +198,7 @@ def _make_factory(
             api_key=api_key,
             model_name=prov.get("model_name"),
             provider_name=name,
+            multimodal=prov.get("multimodal", False),
         )
 
     return factory

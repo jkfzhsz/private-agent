@@ -43,6 +43,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         model_name: str | None = None,
         client: httpx.AsyncClient | None = None,
         provider_name: str | None = None,
+        multimodal: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -50,6 +51,13 @@ class OpenAICompatibleAdapter(ModelAdapter):
         # 动态注册的 provider 传入真实名(错误信息/降级记录用, 默认类属性)
         if provider_name:
             self.provider_name = provider_name
+        # 多模态(provider 配置 multimodal=true): 覆盖 capability.vision=True,
+        # 使 FallbackChain.require_vision 跳转能命中此 adapter
+        if multimodal:
+            self.capability = ModelCapability(
+                streaming=True, function_calling=True,
+                vision=True, json_mode=False,
+            )
         # V1.5:推理模型(reasoning)复杂请求思考时间可能远超 httpx 默认 5s,
         # 放宽读超时至 120s,避免 ReadTimeout 误杀正常推理(连接 15s)
         self._timeout = httpx.Timeout(120.0, connect=15.0)

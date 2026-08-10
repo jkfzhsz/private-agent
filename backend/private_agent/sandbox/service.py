@@ -95,6 +95,7 @@ class SandboxService:
         timeout: int | None = None,
         session_id: str = "",
         on_output: OnOutput | None = None,
+        allow_network: bool = False,
     ) -> SandboxResult:
         """端到端执行代码(AC-8, AC-14)。
 
@@ -104,6 +105,9 @@ class SandboxService:
             timeout: 超时秒数(默认用 config 值)。
             session_id: 会话 ID(用于工作目录隔离和事件记录)。
             on_output: 流式输出回调(蓝图 §6.10),透传到 executor。
+            allow_network: 0.5.1 技能级联网放行 —— code_execution 工具
+                显式声明(LLM 置 network=true)时绕过沙箱代理隔离; 默认
+                False 保持禁网(disable_network 注入死代理)。
 
         Returns:
             SandboxResult 包含执行结果和元数据。
@@ -127,10 +131,15 @@ class SandboxService:
         warnings = self._code_scanner.scan(code, language) if self._code_scanner else []
 
         # 4. 环境变量脱敏 + 网络隔离(阶段二批次 3: 接线 disable_network;
-        #    默认禁网, config limits.network_enabled=true 才放行)
+        #    默认禁网, config limits.network_enabled=true 或 工具显式
+        #    allow_network=true 才放行)
         safe_env = self._env_sanitizer.sanitize(dict(os.environ))
-        if not self._network_enabled:
+        if not self._network_enabled and not allow_network:
             safe_env = disable_network(safe_env)
+        # 0.5.1 GBK 治本: 沙箱内所有 Python 子进程(含用户脚本内部 subprocess)
+        # 强制 UTF-8 模式 —— Windows 默认 GBK 解码 UTF-8 输出会 UnicodeDecodeError
+        safe_env.setdefault("PYTHONUTF8", "1")
+        safe_env.setdefault("PYTHONIOENCODING", "utf-8")
 
         # 5. 执行
         try:

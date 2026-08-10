@@ -133,6 +133,10 @@ class MCPClient:
         # 自动协商状态
         self._negotiated: str | None = None   # 协商后的协议版本(进程内)
         self._session_id: str | None = None   # 旧协议 Mcp-Session-Id
+        # 2026-08-07: discover_tools 缓存的 serverInfo(name/version),
+        # 供 test API 返回有意义的 server 标识(避免误显示协议版本号"2026-07-28"
+        # 被误读为"连接时间")
+        self._server_info: dict[str, Any] = {}
 
     # --------------------------------------------------------------------------
     # Properties
@@ -272,16 +276,19 @@ class MCPClient:
     # --------------------------------------------------------------------------
 
     async def discover_tools(self) -> list[dict]:
-        """调用 MCP tools/list 发现服务器工具列表。"""
+        """调用 MCP tools/list 发现服务器工具列表(同步缓存 serverInfo 到 self._server_info)。"""
         if not self._connected:
             raise RuntimeError(f"MCP server '{self._config.server_id}' not connected")
 
         if self._config.server_type == "http":
             result = await self._http_post("tools/list")
+            self._server_info = result.get("serverInfo") or {}
             return result.get("tools", [])
 
         response = await self._send_request({"method": "tools/list"})
-        return response.get("result", {}).get("tools", [])
+        result = response.get("result", {}) or {}
+        self._server_info = result.get("serverInfo") or {}
+        return result.get("tools", [])
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict:
         """调用 MCP tools/call 执行工具(自动协商协议版本)。
@@ -549,17 +556,26 @@ class MCPClient:
     async def _send_request(self, msg: dict) -> dict:
         """发送 JSON-RPC 请求并等待响应(stdio, body 注入 _meta)。"""
         self._request_id += 1
+        # 2026-08-07(根治): rid 必须在函数入口快照为局部变量 —— 并发时
+        # 第二个请求会把共享的 self._request_id 改成自己的 id, 若请求
+        # 构造/注册/finally-pop 全程用 self._request_id, 第一个请求完成后
+        # finally: pop(self._request_id) 会误删第二个请求的 pending future
+        # → 第二个响应到达时无处分发 → 永远等待 → TimeoutError → LLM 看到
+        # "空结果"。这正是"并发调 2 个 mempalace 工具, 第二个必超时"根因
+        # (串行正常/裸 spawn 正常, 因为无并发竞争; write_lock 只修了写入
+        # 交错, 没修这个共享可变状态竞态)。
+        rid = self._request_id
         if "params" in msg and isinstance(msg["params"], dict):
             msg = {**msg, "params": self._inject_meta(dict(msg["params"]))}
         elif msg.get("method") in {"tools/list", "tools/call", "ping"}:
             msg = {**msg, "params": self._inject_meta({})}
         request = {
             "jsonrpc": "2.0",
-            "id": self._request_id,
+            "id": rid,
             **msg,
         }
         future: asyncio.Future[dict] = asyncio.Future()
-        self._pending[self._request_id] = future
+        self._pending[rid] = future
 
         try:
             assert self._process is not None and self._process.stdin is not None
@@ -571,7 +587,7 @@ class MCPClient:
 
             return await asyncio.wait_for(future, timeout=self._config.timeout_sec)
         finally:
-            self._pending.pop(self._request_id, None)
+            self._pending.pop(rid, None)
 
     async def _read_loop(self) -> None:
         """后台读取子进程 stdout 的 JSON-RPC 响应并分发到对应的 Future。"""

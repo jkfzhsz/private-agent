@@ -85,10 +85,27 @@ class SkillManifest(BaseModel):
     author: str = ""
     created_at: str = ""
     enabled: bool = True
+    # 2026-08-08: reasonix-skills 转换技能限定模型(空=通用)。匹配规则:
+    # 会话模型名大小写不敏感包含任一 scope 项即命中(如 "deepseek-v4-flash"
+    # 命中 ["deepseek"]); 前端技能面板按会话模型过滤/分组展示。
+    model_scope: list[str] = Field(default_factory=list)
     # V1.1-3.6 智能体基础配置: 可视化元数据(头像/标签/对话参数覆盖)
     avatar: str = ""
     tags: list[str] = Field(default_factory=list)
     model_params: dict = Field(default_factory=dict)  # {temperature, top_p, max_tokens}
+    # V1.1-3.6 改名: 用户可改的显示名(空=回退 name)。不改标识符 name,
+    # 0 破坏 skill_binding / sessions.locked_skill_name / 文件目录引用。
+    display_name: str = ""
+    # 0.5.0 M1(2026-08-08): 场景专属名字(子瞻/白圭/清和, 与 display_name
+    # 同步语义更明确; 前端展示一律 scene_name 回退 display_name → name)。
+    scene_name: str = ""
+    # 0.5.0 M1: 场景职责画像(角色/人格/价值观/工作流/规则, 结构化版本,
+    # 供前端配置界面与注入模板复用; system_prompt 保持人读主版本)。
+    scene_profile: dict = Field(default_factory=dict)
+    # 0.5.0 M1: 场景专属 skill 挂载列表(空=通用, 所有场景均挂载)。
+    # 用户 2026-08-08 确认: reasonix 15 技能本轮全部留空(三场景通用),
+    # 机制保留供后续确有需要时按场景分流。
+    scene_scope: list[str] = Field(default_factory=list)
     dependencies: SkillDependencies = Field(default_factory=SkillDependencies)
     permissions: SkillPermissions = Field(default_factory=SkillPermissions)
     prompt_vars: list[str] = Field(default_factory=list)

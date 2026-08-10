@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import struct
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +18,19 @@ import asyncpg
 from private_agent.knowledge.models import Chunk, Document
 
 __all__ = ["KnowledgeBaseRepo", "rrf_fusion"]
+
+logger = logging.getLogger(__name__)
+
+
+def _embedding_bytes_to_text(embedding: bytes) -> str:
+    """float32 打包 bytes → pgvector 文本 "[a,b,...]"。
+
+    asyncpg 未注册 pgvector 类型码, vector 列绑定需文本 + ::vector cast。
+    服务端解析数值, 无 SQL 注入面; 维度由服务端 vector 类型校验。
+    """
+    n = len(embedding) // 4
+    values = struct.unpack(f"{n}f", embedding)
+    return "[" + ",".join(f"{v:.6f}" for v in values) + "]"
 
 
 def rrf_fusion(
@@ -236,6 +251,27 @@ class KnowledgeBaseRepo:
         """
         if chunk.doc_id is None:
             raise ValueError("chunk.doc_id is required")
+        if chunk.embedding is not None:
+            # 0.5.1: 真实向量入库(chunk.embedding = float32 打包 bytes
+            # → pgvector 文本 "[a,b,...]" + ::vector cast; asyncpg 未注册
+            # pgvector 类型码, 无法直接绑定 bytes)。维度由服务端 vector 校验。
+            vec_text = _embedding_bytes_to_text(chunk.embedding)
+            return await self._conn.fetchval(
+                """
+                INSERT INTO kb_chunks (doc_id, scenario, source, chunk_text,
+                                       metadata, embedding)
+                VALUES ($1, $2, $3, $4, $5, $6::vector)
+                RETURNING id
+                """,
+                chunk.doc_id,
+                chunk.scenario,
+                chunk.source,
+                chunk.text,
+                json.dumps(chunk.metadata),
+                vec_text,
+            )
+        # embedding 不可用(异常/兼容路径): 全 0 占位(NOT NULL 约束满足,
+        # 检索时被 vector_search 零向量检测拦截 → keyword-only 降级)
         return await self._conn.fetchval(
             """
             INSERT INTO kb_chunks (doc_id, scenario, source, chunk_text, metadata, embedding)
@@ -381,8 +417,9 @@ class KnowledgeBaseRepo:
     ) -> list[Chunk]:
         """向量检索:cosine 相似度 top-k(蓝图 §4.11/§4.13)。
 
-        MVP 简化:使用 cosine 相似度直接计算(embedding 字段为 BYTEA 占位时返回空)。
-        V2 启用 pgvector HNSW 索引。
+        V2(B6 P0-5 后):embedding 已 ALTER 为 vector(1024) + HNSW 索引,
+        启用真实向量检索 —— `<=>` cosine 距离 + hnsw ef_search 运行时调参。
+        0.5.0 M2: 落地真实检索(此前为 MVP 占位返回空, 导致 KB 检索/auto_retrieve 不可用)。
 
         Args:
             query_vector: 查询向量。
@@ -391,13 +428,52 @@ class KnowledgeBaseRepo:
             filters: 过滤条件({scenario, source})。
 
         Returns:
-            Chunk 列表(含 score)。
+            Chunk 列表(含 score, 0~1 cosine 相似度)。
         """
-        # MVP:embedding 字段为 BYTEA 占位,返回空
-        # V2:ALTER 为 vector(1024) 后启用 HNSW 索引
-        _ = ef_search  # V2 使用
-        _ = query_vector  # V2 使用
-        return []
+        # asyncpg 不支持 list → vector 直接绑定, 需序列化为 pgvector 字面量
+        # ("[0.1,0.2,...]" 文本 + ::vector 转换); 注入量(embedding 维度)由
+        # 查询向量长度决定, 服务端仅解析数值, 无 SQL 注入面。
+        # 0.5.0 M2 健壮性: embedding Worker 未配置时 query 向量为 mock 全 0
+        # (EmbeddingService._embed_query_cached 占位), 与真实向量求 cosine
+        # 恒 NaN → 污染 RRF 排序。检测到全 0 向量时返回空, 使 hybrid_search
+        # 自动降级为纯 keyword 检索(规避 NaN, 检索仍可用)。
+        if all(abs(float(v)) < 1e-9 for v in query_vector):
+            logger.warning(
+                "vector_search: query vector is zero (embedding worker "
+                "unavailable), falling back to keyword-only hybrid"
+            )
+            return []
+        vec_text = "[" + ",".join(f"{float(v):.6f}" for v in query_vector) + "]"
+        sql = """
+            SELECT id, doc_id, scenario, source, chunk_text, metadata,
+                   created_at, is_active,
+                   1 - (embedding <=> $1::vector) AS sim
+            FROM kb_chunks
+            WHERE is_active = TRUE
+        """
+        params: list[Any] = [vec_text]
+        if filters:
+            if filters.get("scenario"):
+                sql += f" AND scenario = ${len(params) + 1}"
+                params.append(filters["scenario"])
+            if filters.get("source"):
+                sql += f" AND source = ${len(params) + 1}"
+                params.append(filters["source"])
+        sql += (
+            f" ORDER BY embedding <=> $1::vector "
+            f"LIMIT {limit}"
+        )
+        # HNSW ef_search 运行时调参(默认 64; 仅影响近似检索召回率)
+        try:
+            await self._conn.execute(f"SET LOCAL hnsw.ef_search = {int(ef_search)}")
+        except Exception:  # noqa: BLE001 - 参数设置失败不影响检索
+            pass
+        rows = await self._conn.fetch(sql, *params)
+        chunks = [self._row_to_chunk(r) for r in rows]
+        for c, r in zip(chunks, rows):
+            # sim 为 1 - cosine_distance, 已归一化到 (0,1]
+            c.score = float(r["sim"]) if r["sim"] is not None else 0.0
+        return chunks
 
     async def keyword_search(
         self,
@@ -418,14 +494,23 @@ class KnowledgeBaseRepo:
         Returns:
             Chunk 列表(含 score)。
         """
+        # 0.5.0 M2: 分词 OR 匹配 —— 按空白拆分查询词, 任一命中即候选
+        # (原整串 ILIKE 对多词查询"估值 PE PB"过严返回空; 单词查询行为不变)。
+        # 中文无空格分词不做(保持简单, 靠向量检索兜底语义召回)。
+        tokens = [t for t in query.split() if t.strip()]
         sql = """
             SELECT id, doc_id, scenario, source, chunk_text, metadata,
                    created_at, is_active
             FROM kb_chunks
             WHERE is_active = TRUE
-              AND chunk_text ILIKE $1
         """
-        params: list[Any] = [f"%{query}%"]
+        params: list[Any] = []
+        conditions: list[str] = []
+        for tok in tokens:
+            conditions.append(f"chunk_text ILIKE ${len(params) + 1}")
+            params.append(f"%{tok}%")
+        if conditions:
+            sql += " AND (" + " OR ".join(conditions) + ")"
 
         if filters:
             if filters.get("scenario"):
@@ -467,12 +552,14 @@ class KnowledgeBaseRepo:
         Returns:
             RRF 融合后的 Chunk 列表。
         """
-        # 并行执行向量检索与关键词检索
-        vector_results, keyword_results = await asyncio.gather(
-            self.vector_search(
-                query_vector, limit=limit, ef_search=ef_search, filters=filters
-            ),
-            self.keyword_search(query, limit=limit, filters=filters),
+        # 顺序执行向量检索与关键词检索(asyncpg 单连接不支持并行查询;
+        # 原 MVP vector_search 无 DB 操作故 gather 未暴露冲突, 0.5.0 M2
+        # 落地真实向量检索后必须串行, 否则 "another operation is in progress")
+        vector_results = await self.vector_search(
+            query_vector, limit=limit, ef_search=ef_search, filters=filters
+        )
+        keyword_results = await self.keyword_search(
+            query, limit=limit, filters=filters
         )
         # RRF 融合
         return rrf_fusion(

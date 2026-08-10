@@ -1,4 +1,4 @@
-"""蓝图 §5.x / spec m2-tools-lifecycle - 9 类内置工具注册。
+"""蓝图 §5.x / spec m2-tools-lifecycle - 内置工具注册。
 
 注册所有内置工具到 ToolRegistry, 供 ReAct 循环调用。
 """
@@ -10,6 +10,9 @@ from private_agent.tools.builtins.datetime import DATETIME_TOOL
 from private_agent.tools.builtins.file_read import FILE_READ_TOOL
 from private_agent.tools.builtins.file_write import FILE_WRITE_TOOL
 from private_agent.tools.builtins.http_request import HTTP_REQUEST_TOOL
+from private_agent.tools.builtins.memory_search import MEMORY_SEARCH_TOOL
+from private_agent.tools.builtins.memory_save import MEMORY_SAVE_TOOL
+from private_agent.tools.builtins.monitor_tools import MONITOR_TOOLS
 from private_agent.tools.builtins.read_artifact import READ_ARTIFACT_TOOL
 from private_agent.tools.builtins.search_knowledge import SEARCH_KNOWLEDGE_TOOL
 from private_agent.tools.builtins.web_search import WEB_SEARCH_TOOL
@@ -17,15 +20,19 @@ from private_agent.tools.registry import ToolRegistry
 
 __all__ = [
     "register_all_builtins",
+    "register_monitor_tools",
     "CALCULATOR_TOOL",
     "CODE_EXECUTION_TOOL",
     "DATETIME_TOOL",
     "FILE_READ_TOOL",
     "FILE_WRITE_TOOL",
     "HTTP_REQUEST_TOOL",
+    "MEMORY_SEARCH_TOOL",
+    "MEMORY_SAVE_TOOL",
     "SEARCH_KNOWLEDGE_TOOL",
     "WEB_SEARCH_TOOL",
     "READ_ARTIFACT_TOOL",
+    "MONITOR_TOOLS",
 ]
 
 
@@ -55,6 +62,13 @@ def register_all_builtins(registry: ToolRegistry) -> None:
     # 场景相关工具: 下沉为 Skill 可选(office/data_analysis 声明依赖时启用)
     SEARCH_KNOWLEDGE_TOOL.is_kernel = False
     READ_ARTIFACT_TOOL.is_kernel = False
+    # 0.5.0 M1: memory_search 为记忆按需检索工具(非内核, 模型主动调用)
+    MEMORY_SEARCH_TOOL.is_kernel = False
+    # 0.5.1: memory_save 原生记忆主动写入 —— 设为内核(始终注入)。
+    # 蒋先生反馈(2026-08-10): 非内核工具靠 top-N 竞争, 新工具无历史评分
+    # 被筛掉 → 白圭"工具列表没有 memory_save"。记忆写入是跨场景基础能力,
+    # 用户要求"记住"时必须可用, 与 file_read/file_write 同级常驻。
+    MEMORY_SAVE_TOOL.is_kernel = True
     tools = [
         CALCULATOR_TOOL,
         CODE_EXECUTION_TOOL,
@@ -65,6 +79,19 @@ def register_all_builtins(registry: ToolRegistry) -> None:
         SEARCH_KNOWLEDGE_TOOL,
         WEB_SEARCH_TOOL,
         READ_ARTIFACT_TOOL,
+        MEMORY_SEARCH_TOOL,
+        MEMORY_SAVE_TOOL,
     ]
     for td in tools:
+        registry.register_builtin(td.name, td)
+
+
+def register_monitor_tools(registry: ToolRegistry) -> None:
+    """0.5.0 P1: 主智能体监控工具注册(monitor 会话专属白名单)。
+
+    与 register_all_builtins 独立: 不进入通用 10 内置计数,
+    仅由 P3 的 kind='monitor' 会话装配时追加, 保证场景会话
+    (子瞻/白圭/清和)不会暴露系统级工具。
+    """
+    for td in MONITOR_TOOLS:
         registry.register_builtin(td.name, td)

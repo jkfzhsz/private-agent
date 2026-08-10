@@ -26,7 +26,8 @@ async def code_execution_handler(args: dict) -> ToolResult:
 
     Args:
         args: 包含 code(代码), timeout(超时秒数,可选,默认 300),
-              session_id(会话 ID,可选), _on_output(流式输出回调,可选),
+              session_id(会话 ID,可选), network(联网执行,可选,默认 False),
+              _on_output(流式输出回调,可选),
               _sandbox_config(测试用配置注入)的 dict。
 
     Returns:
@@ -35,6 +36,10 @@ async def code_execution_handler(args: dict) -> ToolResult:
     code: str = args.get("code", "")
     timeout: int | None = args.get("timeout")
     session_id: str = args.get("session_id", "")
+    # 0.5.1: 显式联网放行(绕过沙箱代理隔离)。
+    # 安全边界: code_execution 为 elevated 工具, 联网执行同样经过权限确认,
+    # 用户在确认弹窗可见"联网"语义。仅 LLM 显式声明 network=true 才放行。
+    allow_network: bool = bool(args.get("network", False))
     # 流式输出回调(由 react_loop 注入): (stream_type, chunk) -> Awaitable[None]
     on_output = args.get("_on_output")
 
@@ -53,6 +58,7 @@ async def code_execution_handler(args: dict) -> ToolResult:
         result = await svc.execute(
             code=code, language="python", timeout=timeout,
             session_id=session_id, on_output=on_output,
+            allow_network=allow_network,
         )
         output = (
             f"Exit code: {result.exit_code}\n"
@@ -90,6 +96,15 @@ CODE_EXECUTION_TOOL = ToolDef(
             "session_id": {
                 "type": "string",
                 "description": "Session ID for workspace isolation.",
+            },
+            "network": {
+                "type": "boolean",
+                "description": (
+                    "Set true ONLY when the code must access the network "
+                    "(e.g. calling external APIs). Bypasses the sandbox "
+                    "proxy isolation; execution still requires user "
+                    "confirmation. Default false."
+                ),
             },
         },
         "required": ["code"],

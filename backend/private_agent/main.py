@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timedelta
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -250,6 +251,27 @@ def _build_session_adapter(cfg, model_id: str | None):
     return FallbackChain([adapter])
 
 
+def _build_contextual_adapter(cfg, model_id: str | None):
+    """0.5.1(2026-08-10 双链架构): 构建按语境路由的 (text, vision) 双链。
+
+    - 自动模式: text_chain(纯文本优先) / vision_chain(多模态优先),
+      均未配置时回退 fallback_chain(向后兼容)。
+    - 会话手动锁定: 锁定模型作为 text 链; 若锁定模型是多模态则同时作
+      vision 链, 否则 vision 用 vision_chain(发图语境自动切换, 不锁死)。
+    """
+    from private_agent.models.base import FallbackChain
+    from private_agent.models.registry import build_fallback_chain, get_adapter
+
+    text_chain = build_fallback_chain(cfg, "text_chain")
+    vision_chain = build_fallback_chain(cfg, "vision_chain")
+    if not model_id or model_id == "auto":
+        return text_chain, vision_chain
+    locked = get_adapter(model_id, cfg)
+    locked_vision = getattr(getattr(locked, "capability", None), "vision", False)
+    vision = locked if locked_vision else vision_chain
+    return FallbackChain([locked]), vision
+
+
 def _build_compress_adapter(cfg):
     """构造压缩模型适配器(蓝图 §4.2,spec AC-7),测试可 monkeypatch。"""
     from private_agent.models.registry import build_compress_adapter
@@ -362,6 +384,32 @@ def _identity_prompt(cfg: dict) -> str:
     return (configured or _DEFAULT_IDENTITY).strip()
 
 
+async def _monitor_system_prompt(cfg, session_id: int, conn):
+    """0.5.0 P3: 主智能体(monitor)专属系统提示词 + 实时指标摘要注入。
+
+    读取 skills/monitor/system_prompt.md, 末尾附加最近指标摘要
+    (collector.latest_summary), 让主智能体会话启动即感知系统状态。
+    """
+    from pathlib import Path
+
+    # monitor 提示词文件(内置, 非 skill.yaml 驱动)
+    prompt_path = Path(__file__).resolve().parents[2] / "skills" / "monitor" / "system_prompt.md"
+    try:
+        base = prompt_path.read_text(encoding="utf-8")
+    except OSError:
+        base = "你是系统监控与优化者(monitor)。"
+    # 追加实时指标摘要(注入上下文, 供模型分析)
+    try:
+        collector = getattr(app.state, "metrics_collector", None)
+        if collector is not None:
+            summary = await collector.latest_summary(conn, since_hours=1.0)
+            if summary:
+                base = f"{base}\n\n{summary}"
+    except Exception:  # noqa: BLE001 - 指标摘要注入失败不影响提示词
+        pass
+    return base
+
+
 async def _get_system_prompt(cfg, session_id: int, conn):
     """获取系统提示词(测试可 monkeypatch)。
 
@@ -383,7 +431,13 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         "SELECT locked_skill_name FROM sessions WHERE id = $1",
         session_id,
     )
-    if not locked_skill:
+    # 0.5.0 P3: monitor 会话(主智能体) → 专属监控提示词
+    session_kind = await conn.fetchval(
+        "SELECT kind FROM sessions WHERE id = $1", session_id
+    )
+    if session_kind == "monitor":
+        base_prompt = _monitor_system_prompt(cfg, session_id, conn)
+    elif not locked_skill:
         base_prompt = "You are a helpful assistant."
     else:
         loader = SkillLoader.from_cfg(cfg)
@@ -404,6 +458,60 @@ async def _get_system_prompt(cfg, session_id: int, conn):
     identity = _identity_prompt(cfg)
     if identity:
         base_prompt = f"{identity}\n\n{base_prompt}"
+    # 0.5.1 B+C(蒋先生反馈 2026-08-09): 文件落地约定 + 决策输出约束。
+    # 所有会话统一注入: ①LLM 明确"工作区/uploads/沙箱目录"约定, 不再猜路径;
+    # ②需要用户决策时选项必须写入可见回复(禁止只写推理中 → 用户看不到)。
+    # 注意: 文本变化改变 frozen_hash → 旧会话 replace_frozen_zone 自动重建。
+    try:
+        ws_root = os.path.expandvars(
+            str(cfg.get("system", {}).get("workspace_root", ""))
+        )
+        # 多模态能力声明(蒋先生反馈 2026-08-09): 链上存在 multimodal 模型时
+        # 告知 AI 具备图片识别, 避免主动否认"没有图片识别功能"。
+        vision_note = ""
+        try:
+            provs = (cfg.get("models") or {}).get("providers", {})
+            if any(
+                isinstance(p, dict) and p.get("multimodal")
+                for p in provs.values()
+            ):
+                vision_note = (
+                    "\n- 你具备图片识别能力(已配置多模态模型)。用户粘贴/上传图片时"
+                    "你会收到图片内容, 请直接识别并回答, 不要说'无法处理图片'。"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        runtime_guidelines = (
+            f"\n\n[运行时约定]\n"
+            f"- 工作区根目录: {ws_root or '(未配置)'}(所有会话共享)。"
+            f"沙箱代码执行目录: {ws_root}/.sandbox/{{session_id}};"
+            f"用户上传的文件统一存放: {ws_root}/uploads/。"
+            f"当用户说\"文件在工作区/已解压/上传了\"时, 先检查上述两个目录, "
+            f"找不到再请用户把文件放入 uploads/ 或 .sandbox/{{session_id}}, "
+            f"不要猜测其他任意路径。\n"
+            f"- 用户上传/粘贴了文件(图片/文档/压缩包)时, 必须读取其真实内容: "
+            f"图片直接识别(你会收到图像), 文档/代码用 file_read 读取(大文件分块), "
+            f"压缩包先解压再读; 禁止仅凭文件名/路径推测内容, 也禁止声称"
+            f"\"只能看到路径\"/\"无法读取文件\"。\n"
+            f"- 记忆与知识调用规则(2026-08-10 蒋先生确认):\n"
+            f"  写入: 用户说\"记住/记录/保存\"某事 → 用 memory_save 写入原生"
+            f"记忆(PG, scope 按当前场景, 全局偏好用 global), 用户明确要求时"
+            f"同步写入记忆宫殿; 用户说\"整理/归档/建立知识\" → 以记忆宫殿为主。\n"
+            f"  调取: ① 回忆习惯/偏好/概况(如\"我说过/我要求过/我习惯\") → "
+            f"原生记忆(自动注入 + memory_search); ② 精确历史分析/报告/复盘"
+            f"(含具体数字/日期/事件, 如投资复盘、持仓回顾) → 必须先主动检索"
+            f"记忆宫殿(mempalace), 写报告/复盘前必查, 防止遗漏关键历史; "
+            f"③ 领域知识/规则/框架(如\"什么是/规则/政策/理论\") → "
+            f"search_knowledge 场景知识库。\n"
+            f"  降级: memory_search 无结果时, 自动升级检索记忆宫殿; "
+            f"分析/报告类任务优先记忆宫殿(宁可多调, 不可漏关键历史)。\n"
+            f"- 需要用户决策(方案选择/确认/提问)时, 必须把选项与问题完整写入"
+            f"你的可见回复, 禁止只写在推理过程(reasoning)中; "
+            f"明确等待用户回答后再继续。{vision_note}"
+        )
+        base_prompt = f"{base_prompt}{runtime_guidelines}"
+    except Exception:  # noqa: BLE001
+        _logger.warning("runtime guidelines injection failed", exc_info=True)
     try:
         servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
         guide = build_tools_guide(_get_mcp_manager(), servers)
@@ -436,6 +544,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
     """
     await ws.accept()
     session_id = None
+    # 0.5.0 P1: 采集器 ws_conns 计数(WS 连接数)
+    collector = getattr(app.state, "metrics_collector", None)
+    if collector is not None:
+        collector.runtime_stats["ws_conns"] = (
+            collector.runtime_stats.get("ws_conns", 0) + 1
+        )
     try:
         while True:
             msg = await ws.receive_json()
@@ -451,12 +565,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid replay: session_id and last_turn must be int",
                     })
                     continue
                 if session_id <= 0 or last_turn < 0:
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid replay: session_id>0 and last_turn>=0 required",
                     })
                     continue
@@ -475,6 +591,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     # DB 异常不冒泡到 WS 循环外,发 error 后继续处理下一条消息
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "replay_failed",
                     })
             elif msg_type == "ack":
@@ -485,12 +602,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid ack: session_id and turn must be int",
                     })
                     continue
                 if session_id <= 0 or turn < 0:
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid ack: session_id>0 and turn>=0 required",
                     })
                     continue
@@ -511,6 +630,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     # DB 异常不冒泡,发 error 后继续处理下一条消息
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "ack_failed",
                     })
             elif msg_type == "user_message":
@@ -521,12 +641,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid user_message: session_id (int) and content required",
                     })
                     continue
                 if session_id <= 0:
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid user_message: session_id>0 required",
                     })
                     continue
@@ -551,6 +673,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid regenerate: session_id (int) and turn (int) required",
                     })
                     continue
@@ -574,6 +697,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if not content or not str(content).strip():
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "regenerate_failed: 未找到该轮可重放的 user 消息(可能已被删除/压缩)",
                     })
                     continue
@@ -605,12 +729,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid resume: session_id (int) required",
                     })
                     continue
                 if session_id <= 0:
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid resume: session_id>0 required",
                     })
                     continue
@@ -646,12 +772,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid pause: session_id (int) required",
                     })
                     continue
                 if session_id <= 0:
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid pause: session_id>0 required",
                     })
                     continue
@@ -683,6 +811,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid tool_confirmation: session_id/confirmation_id required",
                     })
                     continue
@@ -690,12 +819,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if pm is None:
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "no pending confirmation for session",
                     })
                     continue
                 if not pm.resolve(confirmation_id, approved):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "unknown confirmation_id",
                     })
             elif msg_type == "approval_defer":
@@ -707,6 +838,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "invalid approval_defer: session_id/confirmation_id required",
                     })
                     continue
@@ -714,15 +846,22 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if pm is None or not pm.defer(confirmation_id):
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "unknown confirmation_id for defer",
                     })
                     continue
                 await ws.send_json({
                     "type": "approval_deferred",
+                    "session_id": session_id,
                     "confirmation_id": confirmation_id,
                     "message": "已挂起, 可稍后决定(期间仍可同意/拒绝)",
                 })
     except WebSocketDisconnect:
+        # 0.5.0 P1: 释放 ws_conns 计数
+        if collector is not None:
+            collector.runtime_stats["ws_conns"] = max(
+                0, collector.runtime_stats.get("ws_conns", 1) - 1
+            )
         if session_id is not None:
             try:
                 conn = await db.connect()
@@ -834,6 +973,7 @@ async def _handle_user_message(
                 if ckpt is None:
                     await ws.send_json({
                         "type": "error",
+                        "session_id": session_id,
                         "message": "resume_failed: 该会话无 checkpoint, 无法断点恢复",
                     })
                     return
@@ -881,6 +1021,19 @@ async def _handle_user_message(
             # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
             frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
             tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
+            # 0.5.0 P3: monitor 会话(主智能体) → 追加监控工具白名单
+            # (system_metrics_query/system_status/optim_plan/apply_optim)。
+            # 仅 monitor 会话装配, 场景会话(子瞻/白圭/清和)不暴露系统级工具。
+            session_kind = await conn.fetchval(
+                "SELECT kind FROM sessions WHERE id = $1", session_id
+            )
+            if session_kind == "monitor":
+                from private_agent.tools.builtins import register_monitor_tools
+                from private_agent.tools.registry import ToolRegistry
+
+                _mreg = ToolRegistry()
+                register_monitor_tools(_mreg)
+                tools = tools + _mreg.list_tools()
             # V1.5 项-1(ADR-012 §3.5): 附加 delegate_subtask 工具。
             # - 闭包注入当轮上下文(conn/cfg/session_id/event_sink/tools),
             #   多会话并发无模块级全局串扰;
@@ -913,6 +1066,11 @@ async def _handle_user_message(
             memory_enabled = await conn.fetchval(
                 "SELECT memory_enabled FROM sessions WHERE id = $1", session_id
             )
+            # 0.5.0 M1: 会话场景(locked_skill_name → 记忆 scope)
+            session_scene = await conn.fetchval(
+                "SELECT locked_skill_name FROM sessions WHERE id = $1",
+                session_id,
+            )
             memory_mgr = None
             if memory_enabled is not False:
                 # 构造 MemoryManager(蓝图 §4.2-§4.5)
@@ -929,6 +1087,9 @@ async def _handle_user_message(
                         "extract_interval_turns", 8
                     ),
                     inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
+                    inject_global_n=cfg.get("memory", {}).get(
+                        "inject_ratio", {}
+                    ).get("global", 2),
                     eviction_max_active=cfg.get("memory", {}).get(
                         "eviction", {}
                     ).get("max_active_count", 200),
@@ -938,7 +1099,25 @@ async def _handle_user_message(
                     eviction_expire_days=cfg.get("memory", {}).get(
                         "eviction", {}
                     ).get("expire_days", 30),
+                    archive_before_evict=bool(
+                        cfg.get("memory", {}).get("archive_before_evict", True)
+                    ),
                 )
+            # 0.5.0 M2: 场景 KB 自动检索配置(从锁定 skill 的 knowledge_base 段读取)
+            kb_auto_retrieve = False
+            kb_scenario = None
+            if session_scene:
+                try:
+                    from private_agent.skills.loader import SkillLoader
+
+                    _sloader = SkillLoader.from_cfg(cfg)
+                    _skill = await _sloader.load(session_scene, conn)
+                    _kb = _skill.manifest.knowledge_base
+                    if _kb.enabled and _kb.auto_retrieve:
+                        kb_auto_retrieve = True
+                        kb_scenario = _kb.scenario or session_scene
+                except Exception:  # noqa: BLE001 - KB 配置读取失败不影响会话
+                    pass
             cm = ContextManager(
                 session_id=session_id,
                 system_prompt=await _get_system_prompt(
@@ -947,6 +1126,11 @@ async def _handle_user_message(
                 tools=frozen_tools,
                 memory_manager=memory_mgr,
                 cfg=cfg,  # 方向三: KB/记忆注入精简配置
+                # 0.5.0 M1: 会话场景(记忆注入按场景过滤/配额)
+                scene=session_scene,
+                # 0.5.0 M2: 场景 KB 自动检索(会话启动注入该场景知识库片段)
+                kb_auto_retrieve=kb_auto_retrieve,
+                kb_scenario=kb_scenario,
             )
             try:
                 await cm.ensure_initial(conn)
@@ -971,7 +1155,7 @@ async def _handle_user_message(
             model_id = await conn.fetchval(
                 "SELECT model_id FROM sessions WHERE id = $1", session_id
             )
-            adapter = _build_session_adapter(cfg, model_id)
+            adapter, vision_adapter = _build_contextual_adapter(cfg, model_id)
             # per-provider 对话参数上限: 取 session.model_id 或 fallback 首选
             from private_agent.config.loader import resolve_provider_limits
 
@@ -1010,6 +1194,7 @@ async def _handle_user_message(
                 session_id=session_id,
                 context_manager=cm,
                 adapter=adapter,
+                vision_adapter=vision_adapter,
                 tools=tools,
                 conn=conn,
                 cfg=cfg,
@@ -1067,6 +1252,7 @@ async def _handle_user_message(
                 if memory_mgr is not None:
                     await memory_mgr.maybe_extract(
                         session_id=session_id, current_turn=loop._turn,
+                        scope=session_scene,
                     )
                 # 断点恢复只续跑中断轮, 不触发 auto_execute 多轮
                 if resume:
@@ -1108,6 +1294,7 @@ async def _handle_user_message(
             try:
                 await ws.send_json({
                     "type": "error",
+                    "session_id": session_id,
                     "message": "user_message_failed",
                 })
             except Exception:
@@ -1115,6 +1302,31 @@ async def _handle_user_message(
         finally:
             if conn is not None:
                 await conn.close()
+
+
+def _migrate_user_data_from_workspace() -> None:
+    """2026-08-08: 打包版用户数据重定向(userData)后的首次启动迁移。
+
+    历史打包版 WORKSPACE=安装目录 resources/backend, 技能/壁纸(outputs)/
+    上传(uploads) 落在安装目录, 更新覆盖会丢。用户数据根改为 PA_USER_DATA
+    (%APPDATA%/Private Agent)后, 首次启动把旧位置已有目录复制到 userData;
+    dev 模式或同目录时跳过(零回归)。
+    """
+    import shutil as _shutil
+    from pathlib import Path as _P
+
+    ud = os.environ.get("PA_USER_DATA", "").strip()
+    ws = os.environ.get("WORKSPACE", "").strip()
+    if not ud or not ws or os.path.normpath(ud) == os.path.normpath(ws):
+        return
+    for sub in ("outputs", "skills", "uploads"):
+        src, dst = _P(ws) / sub, _P(ud) / sub
+        if src.is_dir() and not dst.exists():
+            try:
+                _shutil.copytree(src, dst)
+                _logger.info("user data migrated: %s -> %s", src, dst)
+            except Exception as e:  # noqa: BLE001
+                _logger.warning("user data migrate failed for %s: %s", sub, e)
 
 
 @app.on_event("startup")
@@ -1130,6 +1342,9 @@ async def _on_startup() -> None:
     cfg = loader.load_config()
     # B1 P1-2: 配置 file_path(展开环境变量)
     _configure_logger(cfg)
+    # 2026-08-08: 打包版用户数据重定向后, 首次启动把旧位置(安装目录)用户数据
+    # 迁移到 userData, 避免升级后技能/壁纸丢失(dev/同目录自动跳过)
+    _migrate_user_data_from_workspace()
     try:
         db._pool = await db.create_pool(cfg)
     except Exception as e:
@@ -1142,6 +1357,26 @@ async def _on_startup() -> None:
             async with db._pool.acquire() as conn:
                 await migrations.migrate_all(conn)
             _logger.info("DB schema migrated (idempotent)")
+            # 0.5.1: KB embedding 启动自检(防混存脏库/模型切换未重灌)。
+            # 默认 KB 模块 fail-fast(应用其余功能正常, KB 端点/检索返回明确错误);
+            # PA_KB_STRICT=1 时阻断进程启动。
+            try:
+                from private_agent.knowledge.factory import (
+                    KBEmbeddingInconsistencyError,
+                    set_kb_failfast,
+                    verify_embedding_consistency,
+                )
+
+                async with db._pool.acquire() as conn:
+                    await verify_embedding_consistency(conn, cfg)
+                _logger.info("KB embedding consistency verified")
+            except KBEmbeddingInconsistencyError as e:
+                set_kb_failfast(str(e))
+                if os.environ.get("PA_KB_STRICT") == "1":
+                    _logger.error("PA_KB_STRICT=1, aborting startup: %s", e)
+                    raise
+            except Exception:
+                _logger.exception("KB embedding consistency check failed")
             # 从 config_runtime 恢复 AES 加密的 API key → 环境变量(设置页录入后重启仍生效)
             await _restore_keys_from_runtime()
             # 2026-08-06: 启动即确保 AES 主密钥持久化到用户配置
@@ -1174,6 +1409,38 @@ async def _on_startup() -> None:
     from private_agent.storage.ttl_cleanup import schedule_ttl_cleanup
     _scheduler = AsyncIOScheduler()
     schedule_ttl_cleanup(_scheduler, cfg)
+    # 0.5.0 P1: 主智能体监控 —— 周期指标采集(60s 默认, config 可覆盖)
+    try:
+        from private_agent.core.metrics_collector import MetricsCollector
+
+        interval = float(
+            (cfg.get("system") or {}).get("metrics", {}).get(
+                "interval_sec", 60.0
+            )
+        )
+        collector = MetricsCollector(db=db, interval_sec=interval)
+        app.state.metrics_collector = collector
+
+        async def _collect_metrics_job() -> None:
+            if db._pool is None:
+                return
+            try:
+                async with db._pool.acquire() as conn:
+                    await collector.collect_once(conn)
+            except Exception:  # noqa: BLE001 - 采集失败不阻塞主流程
+                _logger.warning("metrics collect job failed", exc_info=True)
+
+        # 启动后 15s 首采(等 DB 池就绪), 之后按间隔
+        _scheduler.add_job(
+            _collect_metrics_job, "interval",
+            seconds=interval,
+            next_run_time=datetime.now() + timedelta(seconds=15),
+            id="system_metrics_collector",
+            max_instances=1,
+            coalesce=True,
+        )
+    except Exception:  # noqa: BLE001
+        _logger.warning("metrics collector init failed", exc_info=True)
     _scheduler.start()
 
 
@@ -1211,10 +1478,17 @@ async def _restore_keys_from_runtime() -> None:
         )
     for row in rows:
         key_path = row["key"]  # models.providers.deepseek.api_key_encrypted
-        parts = key_path.split(".")
-        if len(parts) < 4:
+        # 0.5.1 修复(2026-08-10 蒋先生反馈"kimi key 重打包后丢失"): 原实现
+        # parts[2] 只取第 3 段 —— 含点的 provider 名(kimi-k2.6)被截成
+        # kimi-k2 → 环境变量名错位 → key 读不到。改为取"providers." 后
+        # 最后一个点分割(与 loader._get_runtime_overrides 语义一致)。
+        prefix = "models.providers."
+        if not key_path.startswith(prefix):
             continue
-        prov_name = parts[2]
+        rest = key_path[len(prefix):]
+        prov_name, field = rest.rsplit(".", 1)
+        if field != "api_key_encrypted":
+            continue
         try:
             # asyncpg JSONB 返回 JSON 字符串, 需先解析为 dict(decrypt 期望 dict)
             import json as _json

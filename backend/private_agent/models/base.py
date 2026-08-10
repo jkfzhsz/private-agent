@@ -98,15 +98,34 @@ class FallbackChain:
     def __init__(self, adapters: list[ModelAdapter]):
         self._adapters = list(adapters)
 
+    @property
+    def has_vision(self) -> bool:
+        """链上是否存在多模态(视觉)模型(0.5.1: 发图前能力预检用)。"""
+        return any(
+            getattr(getattr(a, "capability", None), "vision", False)
+            for a in self._adapters
+        )
+
     async def chat(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        require_vision: bool = False,
     ) -> ChatResult:
+        # require_vision: 检测到图片内容时, 跳过纯文本模型, 从首个多模态模型开始
+        # 无多模态 adapter 时回退全链(优雅降级: 仍尝试而非直接失败)
+        adapters = self._adapters
+        if require_vision:
+            vision_adapters = [
+                a for a in self._adapters
+                if getattr(getattr(a, "capability", None), "vision", False)
+            ]
+            if vision_adapters:
+                adapters = vision_adapters
         failed: list[str] = []
         last_error: Exception | None = None
-        for adapter in self._adapters:
+        for adapter in adapters:
             attempts = 0
             while True:
                 attempts += 1
@@ -125,7 +144,7 @@ class FallbackChain:
                 return result
         detail = f" | last: {last_error}" if last_error else ""
         raise AllProvidersFailedError(
-            f"all {len(self._adapters)} providers failed: {failed}{detail}"
+            f"all {len(adapters)} providers failed: {failed}{detail}"
         ) from last_error
 
     async def chat_stream(
@@ -135,11 +154,21 @@ class FallbackChain:
         max_tokens: int | None = None,
         on_delta=None,
         on_reasoning=None,
+        require_vision: bool = False,
     ) -> ChatResult:
         """流式 chat 降级执行: 逐 adapter 尝试流式, 无流式能力则用非流式兜底。"""
+        # require_vision: 与 chat() 对齐, 跳过纯文本模型
+        adapters = self._adapters
+        if require_vision:
+            vision_adapters = [
+                a for a in self._adapters
+                if getattr(getattr(a, "capability", None), "vision", False)
+            ]
+            if vision_adapters:
+                adapters = vision_adapters
         failed: list[str] = []
         last_error: Exception | None = None
-        for adapter in self._adapters:
+        for adapter in adapters:
             capability = getattr(adapter, "capability", None)
             if capability is not None and getattr(capability, "streaming", False):
                 attempts = 0
@@ -170,5 +199,5 @@ class FallbackChain:
                 failed.append(adapter.provider_name)
         detail = f" | last: {last_error}" if last_error else ""
         raise AllProvidersFailedError(
-            f"all {len(self._adapters)} providers failed: {failed}{detail}"
+            f"all {len(adapters)} providers failed: {failed}{detail}"
         ) from last_error

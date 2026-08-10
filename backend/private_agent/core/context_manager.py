@@ -24,6 +24,14 @@ from typing import TYPE_CHECKING, Any
 from private_agent.errors import FrozenHashMismatchError
 from private_agent.tools.defs import ToolDef
 
+# 0.5.0 M2: 场景 KB 自动检索查询词映射(按场景领域关键词触发 keyword 命中;
+# 未列出的场景回退通用查询)。
+_KB_AUTO_RETRIEVE_QUERIES: dict[str, str] = {
+    "office": "办公 文档处理 数据分析 网页研究 学习辅导",
+    "data_analysis": "投资 估值 财务指标 宏观 资产配置 交易纪律",
+    "frontend_design": "设计系统 健康 饮食 作息 锻炼 前端 组件规范",
+}
+
 if TYPE_CHECKING:
     import asyncpg
 
@@ -60,11 +68,19 @@ class ContextManager:
         tools: list[ToolDef],
         memory_manager: Any | None = None,
         cfg: dict | None = None,
+        scene: str | None = None,
+        kb_auto_retrieve: bool = False,
+        kb_scenario: str | None = None,
     ) -> None:
         self.session_id = session_id
         self._system_prompt = system_prompt
         self._tools = list(tools)
         self._memory_manager = memory_manager
+        # 0.5.0 M1: 会话场景(locked_skill_name, 记忆注入 scope 用)
+        self.scene = scene
+        # 0.5.0 M2: 场景 KB 自动检索(auto_retrieve, 会话启动注入 top-N 片段)
+        self.kb_auto_retrieve = kb_auto_retrieve
+        self.kb_scenario = kb_scenario
         # 方向三: 注入精简配置(可选, 默认 None 兼容旧调用)
         self._cfg = cfg or {}
         self.frozen_zone = Zone(name="frozen")
@@ -121,19 +137,50 @@ class ContextManager:
 
         在 ensure_initial 调用 build_initial 后执行,将高重要性记忆注入
         Stable Zone 初始内容。
+
+        0.5.0 M3 B1: 会话启动先聚合并注入用户画像(全局偏好/工具/风格),
+        画像常驻头部(高频偏好不再逐条碎片注入);再注入记忆。
         """
         if self._memory_manager is None:
             return
-        memories = await self._memory_manager.load_user_memories()
-        if not memories:
+        # 0.5.0 M3 B1: 画像聚合注入(全局偏好常驻, 会话启动聚合一次)
+        try:
+            profile = await self._memory_manager.aggregate_profile()
+            profile_text = self._memory_manager.format_profile_for_stable(profile)
+        except Exception:  # noqa: BLE001 - 画像聚合失败不影响记忆注入
+            profile_text = None
+        # 0.5.0 M1: 按会话场景注入(场景会话 = 全局画像 + 场景记忆; 否则仅全局)
+        memories = await self._memory_manager.load_user_memories(
+            scope=self.scene
+        )
+        blocks: list[str] = []
+        if profile_text:
+            blocks.append(profile_text)
+        if memories:
+            # 方向三: 单条记忆截断(默认不截; config context.memory.max_item_chars)
+            max_item_chars = (
+                self._cfg.get("context", {}).get("memory", {}).get("max_item_chars")
+            )
+            blocks.append(
+                self._memory_manager.format_memories_for_stable(
+                    memories, max_item_chars=max_item_chars
+                )
+            )
+        if not blocks:
             return
-        # 方向三: 单条记忆截断(默认不截; config context.memory.max_item_chars)
-        max_item_chars = (
-            self._cfg.get("context", {}).get("memory", {}).get("max_item_chars")
-        )
-        memories_text = self._memory_manager.format_memories_for_stable(
-            memories, max_item_chars=max_item_chars
-        )
+        memories_text = "\n\n".join(blocks)
+        # 0.5.1(2026-08-10 注入预算): 记忆总注入上限(防画像+记忆膨胀抢
+        # 上下文; config context.memory.max_total_chars 默认 6000 ≈ 1.5K token)
+        try:
+            total_max = int(
+                self._cfg.get("context", {}).get("memory", {}).get(
+                    "max_total_chars", 6000
+                )
+            )
+            if total_max > 0 and len(memories_text) > total_max:
+                memories_text = memories_text[:total_max] + "\n…(记忆已按预算截断)"
+        except (TypeError, ValueError):
+            pass
         await conn.execute(
             """
             INSERT INTO messages (session_id, turn, role, content, zone)
@@ -256,6 +303,60 @@ class ContextManager:
             return
         await self.build_initial(conn)
         await self._inject_memories(conn)
+        # 0.5.0 M2: 场景 KB 自动检索(auto_retrieve 打开时, 会话启动注入
+        # 该场景知识库 top-N 片段, 供模型直接参考场景专业知识)
+        await self._inject_auto_retrieve_kb(conn)
+
+    async def _inject_auto_retrieve_kb(self, conn: "asyncpg.Connection") -> None:
+        """0.5.0 M2: 场景会话自动注入该场景 KB top-N 片段。
+
+        触发条件: kb_auto_retrieve=True 且 kb_scenario 非空, 且 Stable Zone
+        尚未注入过 KB 片段(幂等)。检索走 KnowledgeBaseService 混合检索
+        (向量+关键词+rerank), 失败静默降级(不影响会话启动)。
+        """
+        if not self.kb_auto_retrieve or not self.kb_scenario:
+            return
+        if self.kb_chunk_count() > 0:
+            return
+        try:
+            from private_agent.knowledge.factory import build_kb_service
+
+            svc = build_kb_service(conn, self._cfg, processor=None)
+            # 场景专业知识检索: 用场景映射查询词(0.5.0 M2 —— 直接查
+            # "场景专业知识"等词在语料中无命中, 需用场景领域关键词触发
+            # keyword 命中; 向量可用时按语义召回)
+            query = _KB_AUTO_RETRIEVE_QUERIES.get(
+                self.kb_scenario, f"场景专业知识与规范 {self.kb_scenario}"
+            )
+            chunks = await svc.search_with_rerank(
+                query=query,
+                scenario=self.kb_scenario,
+                top_k=5,
+                min_similarity=0.15,
+            )
+        except Exception:  # noqa: BLE001 - 自动检索失败不影响会话启动
+            return
+        if not chunks:
+            return
+        lines = ["[KB Context] 场景知识库自动检索(auto_retrieve):"]
+        for i, c in enumerate(chunks, 1):
+            text = c.text[:600] + "..." if len(c.text) > 600 else c.text
+            lines.append(f"{i}. [source: {c.source}] {text}")
+        kb_text = "\n".join(lines)
+        await conn.execute(
+            """
+            INSERT INTO messages (session_id, turn, role, content, zone)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            self.session_id,
+            0,
+            "user",
+            kb_text,
+            "stable",
+        )
+        self.stable_zone.messages.append(
+            {"role": "user", "content": kb_text, "zone": "stable"}
+        )
 
     async def verify_frozen_hash(self, conn: "asyncpg.Connection") -> None:
         """校验 Frozen Zone hash 与 sessions.frozen_hash 一致(B1 P1-4)。

@@ -9,6 +9,7 @@ AC-13:校验 sandbox 配置段合法性。
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,13 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    # 2026-08-08: 用户数据根(程序文件与用户数据彻底分离) —— 打包版由 Electron
+    # 注入 PA_USER_DATA=%APPDATA%/Private Agent(与 backend.env 同目录), 技能/
+    # 壁纸(outputs)/日志/上传/沙箱全部落 userData, 升级/重装不丢;
+    # dev 未设置时默认回退 WORKSPACE(历史行为, 零回归)。
+    if not os.environ.get("PA_USER_DATA"):
+        os.environ["PA_USER_DATA"] = os.environ.get("WORKSPACE", "")
+
     _validate_mvp_constraints(cfg)
     return cfg
 
@@ -81,17 +89,35 @@ async def _get_runtime_overrides(conn: asyncpg.Connection) -> dict[str, Any]:
     """查询 config_runtime 表,将点分 key 展开为嵌套 dict。
 
     例:{"system.sidecar.log_level": "DEBUG"} → {"system": {"sidecar": {"log_level": "DEBUG"}}}
+
+    特殊处理 models.providers.{name}.{field}: provider name 可含小数点
+    (如 "qwen-2.5"),用最后一个 "." 分割 name 与 field。
     """
     rows = await conn.fetch("SELECT key, value FROM config_runtime")
     result: dict[str, Any] = {}
     for row in rows:
-        keys = row["key"].split(".")
+        key = row["key"]
         # asyncpg 对 JSONB 返回 JSON 字符串,需 json.loads 解析为 Python 原生类型
         value = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
-        d = result
-        for k in keys[:-1]:
-            d = d.setdefault(k, {})
-        d[keys[-1]] = value
+        if key.startswith("models.providers."):
+            # provider name 可含小数点(如 qwen-2.5),取最后一个 "." 分割 name/field
+            rest = key[len("models.providers."):]
+            idx = rest.rfind(".")
+            if idx > 0:
+                prov_name = rest[:idx]
+                field = rest[idx + 1:]
+                provs = result.setdefault("models", {}).setdefault("providers", {})
+                provs.setdefault(prov_name, {})[field] = value
+            else:
+                # 无 field 后缀(整个 key = models.providers.{name})
+                provs = result.setdefault("models", {}).setdefault("providers", {})
+                provs[rest] = value
+        else:
+            keys = key.split(".")
+            d = result
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value
     return result
 
 

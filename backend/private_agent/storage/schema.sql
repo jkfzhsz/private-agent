@@ -44,8 +44,9 @@ CREATE TABLE sessions (
     -- V1.5 项-1 子代理(ADR-012 §3.1 决策 A): 会话类型。
     -- main=普通对话会话; sub=子代理独立会话(委派产生, 复用 ReactLoop 全部
     -- 上下文/压缩/checkpoint 机制, list_sessions 过滤 sub 防污染历史列表 R9)
+    -- 0.5.0 P3: monitor=主智能体监控会话(系统指标感知 + 优化闭环工具)
     kind                    VARCHAR(10) NOT NULL DEFAULT 'main'
-                            CHECK (kind IN ('main', 'sub'))
+                            CHECK (kind IN ('main', 'sub', 'monitor'))
 );
 
 CREATE INDEX idx_sessions_status ON sessions(status) WHERE archived_at IS NULL;
@@ -135,11 +136,89 @@ CREATE TABLE user_memories (
     created_at          TIMESTAMPTZ DEFAULT NOW(),
     last_accessed_at    TIMESTAMPTZ DEFAULT NOW(),
     access_count        INT DEFAULT 0,
-    is_active           BOOLEAN DEFAULT TRUE
+    is_active           BOOLEAN DEFAULT TRUE,
+    -- 0.5.0 M1 场景独立(2026-08-08): 记忆作用域。
+    -- global=全局记忆(用户偏好/项目概况/协作规则, 所有场景可见);
+    -- office/data_analysis/frontend_design=场景私有记忆(技术标识, 显示层映射子瞻/白圭/清和)。
+    -- 存量数据默认 global(不迁移旧记忆归属, 可选按 source_session_id 回填)。
+    scope               VARCHAR(20) NOT NULL DEFAULT 'global'
 );
 
 CREATE INDEX idx_memories_user_type ON user_memories(user_id, type) WHERE is_active = TRUE;
 CREATE INDEX idx_memories_importance ON user_memories(user_id, importance DESC);
+-- 0.5.0 M1: 场景记忆注入/隔离查询索引(全局/场景混合排序注入用)
+CREATE INDEX idx_memories_scope ON user_memories(user_id, scope, importance DESC)
+    WHERE is_active = TRUE;
+
+-- ==============================================================================
+-- 5b. user_memories_archive - 巩固归档(0.5.0 M3 B3, 驱逐前先归档再 deactivate)
+-- ==============================================================================
+CREATE TABLE user_memories_archive (
+    id              BIGSERIAL PRIMARY KEY,
+    user_id         BIGINT NOT NULL DEFAULT 1,
+    memory_id       BIGINT,                                 -- 原记忆 id(软删除前)
+    scope           VARCHAR(20) DEFAULT 'global',           -- 继承原记忆 scope
+    type            VARCHAR(20),                            -- 原记忆类型
+    content         TEXT,                                   -- 原内容(可选截断)
+    summary         TEXT,                                   -- 1 行摘要(模型压缩)
+    importance      FLOAT,
+    archived_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_memories_archive_user ON user_memories_archive(user_id, archived_at);
+CREATE INDEX idx_memories_archive_scope ON user_memories_archive(user_id, scope);
+
+-- ==============================================================================
+-- 5c. user_profile - 用户画像聚合(0.5.0 M3 B1, 全局偏好/项目概况聚合常驻)
+-- ==============================================================================
+CREATE TABLE user_profile (
+    id                      BIGSERIAL PRIMARY KEY,
+    user_id                 BIGINT NOT NULL DEFAULT 1,
+    name                    VARCHAR(100),                   -- 称呼
+    collaboration_prefs     TEXT,                           -- 协作偏好(聚合摘要)
+    common_tools            TEXT,                           -- 常用工具
+    communication_style     TEXT,                           -- 沟通风格
+    ongoing_projects        JSONB DEFAULT '[]'::jsonb,      -- 进行中项目: [{name, status, key_path}]
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX idx_user_profile_user ON user_profile(user_id);
+
+-- ==============================================================================
+-- 5d. system_metrics - 系统性能指标快照(四窗口架构 P1, 主智能体监控数据源)
+--     采集: apscheduler 后台任务(默认 60s); 写入: metrics_collector
+--     消费: system_metrics_query 工具(主智能体分析)
+-- ==============================================================================
+CREATE TABLE system_metrics (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    kind        VARCHAR(20) NOT NULL,            -- system/session/provider
+    session_id  BIGINT,                          -- kind=session 时归属会话
+    name        VARCHAR(100) NOT NULL,           -- cpu_usage/ram_mb/ws_conns/turn_latency_ms/...
+    value       DOUBLE PRECISION NOT NULL,
+    meta        JSONB DEFAULT '{}'::jsonb
+);
+CREATE INDEX idx_system_metrics_ts ON system_metrics(ts DESC);
+CREATE INDEX idx_system_metrics_name ON system_metrics(name, ts DESC);
+
+-- ==============================================================================
+-- 5e. optim_log - 主智能体优化建议与执行记录(四窗口架构 P1, 审批流)
+--     状态机: pending → approved/rejected → applied/failed
+-- ==============================================================================
+CREATE TABLE optim_log (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    proposal    TEXT NOT NULL,                   -- 优化建议(主智能体生成)
+    category    VARCHAR(30),                     -- context/tool/model/memory/performance
+    status      VARCHAR(20) NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','approved','rejected','applied','failed')),
+    plan_json   JSONB,                           -- 结构化执行步骤(工具调用序列)
+    result      TEXT,                            -- 执行结果/验证数据
+    session_id  BIGINT,                          -- 提出时的监控会话
+    reviewed_at TIMESTAMPTZ
+);
+CREATE INDEX idx_optim_log_status ON optim_log(status, ts DESC);
+
 
 -- ==============================================================================
 -- 6. kb_documents - 知识库文档元数据 (§2.10, §4.6, §9.14 无TTL, 软删除:is_active)

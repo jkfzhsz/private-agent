@@ -47,6 +47,114 @@ if TYPE_CHECKING:
 __all__ = ["ReactLoopState", "ReactLoop"]
 
 
+# 图片文件扩展名(检测文本引用中的图片)
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg")
+# 单张图片注入上限(8MB, 防 base64 撑爆上下文)
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _messages_contain_image(messages: list[dict]) -> bool:
+    """检测消息列表是否包含图片内容, 用于触发多模态模型降级跳转。
+
+    两类信号:
+    1. OpenAI 原生格式: content 为 list, 含 {"type": "image_url", ...}
+       —— 全量扫描(历史已注入的图片仍在上下文, 需保持 vision 模型)
+    2. 文本引用模式: "[用户粘贴图片:" / "[已上传文件: *.jpg]" —— 仅检查
+       最后一条 user 消息(本轮新输入)。2026-08-10 修复: 原实现扫全部历史,
+       上一轮图片引用残留在上下文 → 后续纯文本轮次误判 require_vision →
+       纯文本链上误触发"不支持图片识别"提示。
+    """
+    last_user_content: object = None
+    for msg in messages:
+        content = msg.get("content")
+        # OpenAI 多模态格式: content 是 list[dict]
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+        elif msg.get("role") == "user":
+            last_user_content = content
+    if isinstance(last_user_content, str):
+        if "[用户粘贴图片:" in last_user_content:
+            return True
+        if "[已上传文件:" in last_user_content:
+            lower = last_user_content.lower()
+            if any(ext in lower for ext in _IMAGE_EXTS):
+                return True
+    return False
+
+
+def _inject_image_urls(
+    messages: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """把消息中的图片文本引用转换为 OpenAI image_url(data URL)。
+
+    2026-08-09 修复(蒋先生反馈): 此前仅 _messages_contain_image 检测图片,
+    图片从未真正传给多模态模型(模型只看到"路径文本"→ 纠结/尝试 OCR)。
+    此函数在 require_vision 时调用: 读取图片 → base64 data URL → content
+    转为 OpenAI 多模态 list 格式(text + image_url)。
+
+    格式: "[用户粘贴图片: name 路径: D:\\...\\x.jpg]" 或
+          "[已上传文件: name 路径: D:\\...\\x.png]"
+
+    Returns:
+        (转换后的 messages, 未注入的图片名列表)。0.5.1(2026-08-10)起返回
+        skipped 列表供"错误零静默"暴露(图片超限/读取失败不再静默跳过)。
+    """
+    import base64
+    import os
+    import re
+
+    img_ref_re = re.compile(r"\[(用户粘贴图片|已上传文件): (.*?) 路径: ([^\]]+)\]")
+    mime_map = {
+        "jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif",
+        "webp": "webp", "bmp": "bmp", "svg": "svg+xml",
+    }
+    result: list[dict] = []
+    skipped: list[str] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, str) or "路径:" not in content:
+            result.append(msg)
+            continue
+        image_parts: list[dict] = []
+        found = False
+        for m in img_ref_re.finditer(content):
+            _kind, name, raw_path = m.group(1), m.group(2), m.group(3).strip()
+            path = raw_path
+            if not path.lower().endswith(_IMAGE_EXTS):
+                continue
+            found = True
+            try:
+                if not os.path.exists(path):
+                    skipped.append(f"{name}(文件不存在)")
+                    continue
+                data = open(path, "rb").read()
+                if len(data) > _MAX_IMAGE_BYTES:
+                    skipped.append(
+                        f"{name}({len(data) / 1024 / 1024:.1f}MB, 超上限 8MB)"
+                    )
+                    continue
+                ext = os.path.splitext(path)[1].lstrip(".").lower()
+                mime = mime_map.get(ext, ext)
+                b64 = base64.b64encode(data).decode("ascii")
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/{mime};base64,{b64}"},
+                })
+            except OSError:
+                skipped.append(f"{name}(读取失败)")
+                continue
+        if found and image_parts:
+            text = img_ref_re.sub("", content).strip()
+            if not text:
+                text = f"用户上传了图片(共 {len(image_parts)} 张), 请识别图片内容。"
+            result.append({**msg, "content": [{"type": "text", "text": text}, *image_parts]})
+        else:
+            result.append(msg)
+    return result, skipped
+
+
 class ReactLoopState(Enum):
     IDLE = "idle"
     THINKING = "thinking"
@@ -77,8 +185,12 @@ class ReactLoop:
         hook_runner: Any | None = None,
         resume_from_turn: int | None = None,
         pause_controller: Any | None = None,
+        vision_adapter: ModelAdapter | None = None,
     ) -> None:
         self._session_id = session_id
+        # 0.5.1(2026-08-10 双链架构): vision_adapter 为多模态链, 发图语境
+        # 自动切换; None 时保持旧行为(adapter 单链 + 全链兜底)。
+        self._vision_adapter = vision_adapter
         self._context_manager = context_manager
         self._adapter = adapter
         self._tools = tools
@@ -186,6 +298,22 @@ class ReactLoop:
     # ──────────────────────────────────────────────────────────────────────────
     # State machine
     # ──────────────────────────────────────────────────────────────────────────
+
+    async def _emit_error_msg(self, category: str, text: str) -> None:
+        """错误零静默(2026-08-10 蒋先生要求): 分类自然语言暴露错误。
+
+        Args:
+            category: 设定问题 / 程序异常 / 能力边界。
+            text: 具体说明(自然语言, 含操作建议)。
+        """
+        await self._emit_event(
+            "error",
+            payload={
+                "message": f"【{category}】{text}",
+                "category": category,
+                "stage": "resilience",
+            },
+        )
 
     async def _emit_event(
         self,
@@ -368,6 +496,10 @@ class ReactLoop:
 
             # 构建消息列表
             messages = await self._context_manager.build_messages()
+            # 0.5.1(P2-A 工具结果摘要化): 超长工具结果在 API 侧截断
+            # (保留首尾 + 中段截断标注; DB 原文保留可追溯), 治长工具链
+            # 上下文膨胀。事实型(表格/数字密集)不截断。
+            messages = self._trim_tool_results(messages)
 
             # 协议兜底: 修复 tool_calls 配对完整性(压缩/恢复/并行执行边界
             # 可能让 assistant.tool_calls 缺少对应 tool 消息 → 上游 400
@@ -415,6 +547,57 @@ class ReactLoop:
             # 调用模型(流式优先: adapter 支持 chat_stream 时使用)
             # 工具 schema: 本轮求值的注入子集(方向一动态 top-N), 兜底全量
             round_schemas = self._round_tool_schemas or self._tool_schemas
+            # 多模态检测: 消息含图片内容时, FallbackChain 跳过纯文本模型,
+            # 从首个多模态模型开始调用(避免逐个试纯文本模型 400 后才降级)
+            require_vision = _messages_contain_image(messages)
+            # 0.5.1(2026-08-09): 图片文本引用 → image_url(data URL)注入,
+            # 让多模态模型真正"看到"图片(此前模型只收到路径文本)。
+            if require_vision:
+                messages, skipped_images = _inject_image_urls(messages)
+                # 0.5.1(2026-08-10 蒋先生要求"错误零静默"): 图片超限/读取
+                # 失败 → 明确暴露(能力边界), 不静默跳过让模型瞎答。
+                if skipped_images:
+                    await self._emit_event(
+                        "error",
+                        payload={
+                            "message": (
+                                "【能力边界】以下图片未注入识别: "
+                                + "、".join(skipped_images)
+                                + "。请压缩后重发或确认文件存在。"
+                            ),
+                            "stage": "image_inject",
+                        },
+                    )
+                # 0.5.1(2026-08-10 双链架构): 发图语境 → 自动切换多模态链
+                if self._vision_adapter is not None:
+                    self._adapter = self._vision_adapter
+                else:
+                    # 兼容旧构造(无 vision_adapter): 会话锁定纯文本时发图,
+                    # 自动改用全 fallback 链的 vision 子集(不报错、不锁死,
+                    # 按任务语境选模型); 仅当全链也无多模态才提示。
+                    chain_has_vision = getattr(self._adapter, "has_vision", None)
+                    if chain_has_vision is False:
+                        full_chain = None
+                        try:
+                            from private_agent.models.registry import build_fallback_chain
+
+                            full_chain = build_fallback_chain(self._cfg)
+                        except Exception:  # noqa: BLE001
+                            full_chain = None
+                        if full_chain is not None and full_chain.has_vision:
+                            self._adapter = full_chain
+                        else:
+                            msg_text = (
+                                "当前模型链不支持图片识别(未配置多模态模型)。"
+                                "请先在设置页配置并启用多模态模型。"
+                            )
+                            await self._emit_event(
+                                "final",
+                                payload={"turn": self._turn, "content": msg_text},
+                            )
+                            self._transition(ReactLoopState.IDLE)
+                            await self._maybe_compress()
+                            return
             try:
                 if hasattr(self._adapter, "chat_stream"):
                     result = await self._adapter.chat_stream(
@@ -423,12 +606,14 @@ class ReactLoop:
                         max_tokens=self._max_output_tokens,
                         on_delta=self._emit_delta,
                         on_reasoning=_emit_reasoning,
+                        require_vision=require_vision,
                     )
                 else:
                     result = await self._adapter.chat(
                         messages,
                         round_schemas,
                         max_tokens=self._max_output_tokens,
+                        require_vision=require_vision,
                     )
             except AllProvidersFailedError as e:
                 # 保险箱: 工具调用配对类 400(压缩/恢复/转换边界未覆盖场景) →
@@ -458,12 +643,10 @@ class ReactLoop:
                     rolled_back = await self._rollback_last_tool_round()
                     if rolled_back:
                         continue  # 重试(下一迭代)
-                await self._emit_event(
-                    "error",
-                    payload={
-                        "message": str(e),
-                        "stage": "model_chat",
-                    },
+                await self._emit_error_msg(
+                    "程序异常",
+                    f"所有模型调用失败({', '.join(e.failed) if getattr(e, 'failed', None) else '全部'})。"
+                    f"最后错误: {err_text[:200]}。请重试; 若持续可检查模型配置/网络。",
                 )
                 self._transition(ReactLoopState.ERROR)
                 await self._save_checkpoint()
@@ -520,7 +703,15 @@ class ReactLoop:
                 }
                 # V2 P2: 同轮多 tool_call 并行执行(蓝图 L612-616 + L4948)
                 # Phase A(串行): 解析 + emit tool_call + 权限确认 + 构造执行计划
+                # 2026-08-08 修复: Phase A 中权限超时/拒绝/dangerous/未知工具
+                # 不再直接 append_tool_message 写 DB —— 那会导致 tool 消息 id
+                # 小于 Phase C 事务写入的 assistant 消息 id, get_messages 按
+                # (turn, id) 排序后 tool 出现在 assistant 之前 → 上游 400
+                # "Messages with role 'tool' must be a response to a preceding
+                # message with 'tool_calls'"。改为收集到 early_tool_msgs,
+                # Phase C 事务中 assistant 之后统一写入。
                 plans: list[dict] = []
+                early_tool_msgs: list[dict] = []
                 for tc in result.tool_calls:
                     # OpenAI 格式: tc.function.name / tc.function.arguments
                     func = tc.get("function", tc)
@@ -614,14 +805,12 @@ class ReactLoop:
                                 "error": reason,
                             },
                         )
-                        await self._context_manager.append_tool_message(
-                            self._conn,
-                            turn=self._turn,
-                            tool_call_id=tool_call_id,
-                            content="",
-                            name=tool_name,
-                            error=reason,
-                        )
+                        early_tool_msgs.append({
+                            "tool_call_id": tool_call_id,
+                            "content": "",
+                            "name": tool_name,
+                            "error": reason,
+                        })
                         continue
 
                     # ── V2 P1: 权限确认(蓝图 §5.12) ──
@@ -663,14 +852,12 @@ class ReactLoop:
                                         "error": reason,
                                     },
                                 )
-                                await self._context_manager.append_tool_message(
-                                    self._conn,
-                                    turn=self._turn,
-                                    tool_call_id=tool_call_id,
-                                    content="",
-                                    name=tool_name,
-                                    error=reason,
-                                )
+                                early_tool_msgs.append({
+                                    "tool_call_id": tool_call_id,
+                                    "content": "",
+                                    "name": tool_name,
+                                    "error": reason,
+                                })
                                 continue
                         except Exception:
                             self._logger.exception(
@@ -715,14 +902,12 @@ class ReactLoop:
                                         "error": reason,
                                     },
                                 )
-                                await self._context_manager.append_tool_message(
-                                    self._conn,
-                                    turn=self._turn,
-                                    tool_call_id=tool_call_id,
-                                    content="",
-                                    name=tool_name,
-                                    error=reason,
-                                )
+                                early_tool_msgs.append({
+                                    "tool_call_id": tool_call_id,
+                                    "content": "",
+                                    "name": tool_name,
+                                    "error": reason,
+                                })
                                 continue
                         elif level == "dangerous":
                             reason = f"Dangerous tool blocked: {tool_name}"
@@ -735,14 +920,12 @@ class ReactLoop:
                                     "error": reason,
                                 },
                             )
-                            await self._context_manager.append_tool_message(
-                                self._conn,
-                                turn=self._turn,
-                                tool_call_id=tool_call_id,
-                                content="",
-                                name=tool_name,
-                                error=reason,
-                            )
+                            early_tool_msgs.append({
+                                "tool_call_id": tool_call_id,
+                                "content": "",
+                                "name": tool_name,
+                                "error": reason,
+                            })
                             continue
 
                     # ── V2 P1: 沙箱流式输出注入(code_execution) ──
@@ -788,6 +971,14 @@ class ReactLoop:
                             # T-1(架构修订 A.1.4): 路径校验由服务端强制 ——
                             # 覆盖 LLM 提供的 data_dir/workspace 为会话工作区,
                             # 防止模型省略该字段跳过 file_read/write 路径校验。
+                            # 2026-08-08 修复: 仅对内置文件工具(file_read/
+                            # file_write)注入 —— 此前对所有工具(含 MCP 工具)
+                            # 无条件注入, MCP server(inputSchema 严格校验)
+                            # 收到未知参数 data_dir/workspace → 参数校验失败
+                            # → isError → output 空 → LLM 看到"空结果"
+                            # (mempalace/searchpin 工具调用"返回空"的终极根因;
+                            # 设置页 test 不走 ReactLoop 无注入 → 一直正常,
+                            # 故此前每次修复都绕过了这一层)。
                             args = dict(plan["args"])
                             ws_root = os.path.expandvars(
                                 str(
@@ -796,7 +987,11 @@ class ReactLoop:
                                     .get("workspace_root", "")
                                 )
                             )
-                            if ws_root:
+                            if ws_root and plan["tool_name"] in (
+                                "file_read",
+                                "file_write",
+                                "read_artifact",
+                            ):
                                 args["data_dir"] = ws_root
                                 args["workspace"] = ws_root
                             # T-2(架构修订 A.2.5): 工具执行超时按类别分级
@@ -822,8 +1017,8 @@ class ReactLoop:
                             result = ToolResult(
                                 output="",
                                 error=(
-                                    f"tool timeout after {timeout_sec}s: "
-                                    f"{plan['tool_name']}"
+                                    f"【程序异常】工具 {plan['tool_name']} 执行超时"
+                                    f"({int(timeout_sec)}s)。请重试或换一种方式。"
                                 ),
                             )
                         except Exception as e:  # noqa: BLE001
@@ -833,7 +1028,8 @@ class ReactLoop:
                             result = ToolResult(
                                 output="",
                                 error=(
-                                    f"tool handler error: {type(e).__name__}: {e}"
+                                    f"【程序异常】工具 {plan['tool_name']} 执行失败: "
+                                    f"{type(e).__name__}: {e}。"
                                 ),
                             )
                         result.metadata["duration_ms"] = int(
@@ -863,6 +1059,8 @@ class ReactLoop:
                 # 工具执行(Phase B)在事务外; 仅落库在一个事务内 —— 任一
                 # INSERT 失败整体回滚, DB 不留"assistant(tool_calls) 无配对
                 # tool 消息"的半残状态(400 根治)。emit 事件在事务内无碍(非 DB)。
+                # 2026-08-08: early_tool_msgs(权限超时/拒绝/dangerous/未知工具)
+                # 也在此事务内 assistant 之后写入, 保证 DB id 顺序正确。
                 async with self._conn.transaction():
                     # 先写 assistant(含 tool_calls + reasoning_content)
                     await self._context_manager.append_assistant_message(
@@ -982,6 +1180,20 @@ class ReactLoop:
                                     "inject_kb_chunks failed (turn=%s)", self._turn,
                                 )
 
+                    # Phase C 补充: 写入 early-exit tool 消息(权限超时/拒绝/
+                    # dangerous/未知工具)。必须在 assistant 之后写入, 保证
+                    # DB id 顺序 = assistant < tool, 避免 get_messages 排序后
+                    # tool 出现在 assistant 之前导致上游 400 配对错误。
+                    for em in early_tool_msgs:
+                        await self._context_manager.append_tool_message(
+                            self._conn,
+                            turn=self._turn,
+                            tool_call_id=em["tool_call_id"],
+                            content=em["content"],
+                            name=em["name"],
+                            error=em.get("error"),
+                        )
+
                 # OBSERVING → 继续循环
                 self._transition(ReactLoopState.OBSERVING)
             else:
@@ -992,6 +1204,13 @@ class ReactLoop:
                         getattr(result, "reasoning_content", None) or None
                     ),
                 )
+                if not result.content and not (result.tool_calls or []):
+                    # 2026-08-10 错误零静默: 模型返回空内容不再静默
+                    await self._emit_error_msg(
+                        "能力边界",
+                        "模型返回了空内容(无文本也无工具调用)。请重试; "
+                        "若持续出现可切换其他模型。",
+                    )
                 await self._emit_event(
                     "final",
                     payload={
@@ -1004,13 +1223,11 @@ class ReactLoop:
                 await self._maybe_compress()
                 return
 
-        # 超出 max_iterations
-        await self._emit_event(
-            "error",
-            payload={
-                "message": f"max_iterations ({self._max_iterations}) reached",
-                "stage": "iteration_limit",
-            },
+        # 超出 max_iterations(2026-08-10: 错误零静默 —— 不再输出英文技术文案)
+        await self._emit_error_msg(
+            "能力边界",
+            f"本轮执行已达步数上限({self._max_iterations} 步), 已停止。"
+            f"建议拆分任务、简化操作或换一种思路重试。",
         )
         self._transition(ReactLoopState.ERROR)
         await self._save_checkpoint()
@@ -1337,6 +1554,30 @@ class ReactLoop:
             summary["msg_id"] = summary_id
             summary["turn"] = self._turn
             cm.active_zone.messages.insert(0, summary)
+        # 0.5.1(2026-08-10 事实型压缩保护): 事实快照同样落库 + 插入 active
+        # 头部(原文保留, 不摘要化 —— 数字/表格/路径/代码不丢)。
+        factual = result.get("factual_snapshot")
+        if factual is not None:
+            f_compressed_from = [
+                m.get("msg_id") for m in compressed_msgs if m.get("msg_id")
+            ]
+            factual_id = await self._conn.fetchval(
+                """
+                INSERT INTO messages
+                    (session_id, turn, role, content, compressed_from, zone)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+                RETURNING id
+                """,
+                self._session_id,
+                self._turn,
+                factual.get("role", "user"),
+                factual.get("content", ""),
+                json.dumps(f_compressed_from, ensure_ascii=False),
+                "active",
+            )
+            factual["msg_id"] = factual_id
+            factual["turn"] = self._turn
+            cm.active_zone.messages.insert(0, factual)
 
     async def _archive_compressed(self, compressed_msgs: list[dict]) -> None:
         """§3.10 [MVP] 压缩存档: 被压缩消息原文写入 messages_archive。
@@ -1407,12 +1648,21 @@ class ReactLoop:
             and len(set(recent)) == 1
         ):
             return "same_args"
-        # 模式 2: 同工具高频(最近 8 次中 ≥ threshold 次且无其他工具)
+        # 模式 2: 同工具高频(最近 8 次中 ≥ threshold 次)且参数种类少
+        # 0.5.1(2026-08-10 蒋先生反馈"批量记忆被判死循环"): 原实现只看
+        # 工具名不看参数 —— 批量记忆多只股票(同工具不同参数)被误判。
+        # 加"参数种类 < 3"条件: 参数各异的高频调用视为合法的批量/遍历操作,
+        # 参数高度重复才判死循环(真正无进展)。
         window = self._tool_call_trace[-8:]
         if len(window) >= self._loop_same_tool_threshold:
             tool_names = [k.split(":")[0] for k in window]
             if tool_names.count(tool_name) >= self._loop_same_tool_threshold:
-                return "same_tool"
+                same_tool_keys = [
+                    k.split(":", 1)[1] for k in window
+                    if k.split(":")[0] == tool_name
+                ]
+                if len(set(same_tool_keys)) < 3:
+                    return "same_tool"
         return None
 
     def _loop_note_message(self, loop_type: str, tool_name: str) -> str:
@@ -1474,14 +1724,63 @@ class ReactLoop:
             self._logger.exception("rollback tool round failed")
             return False
 
+    def _trim_tool_results(self, messages: list[dict]) -> list[dict]:
+        """0.5.1(P2-A): 超长工具结果 API 侧摘要化, 治上下文膨胀。
+
+        规则:
+        - 仅处理 role=tool 消息; content 超 _TRIM_TOOL_CHARS(12000) 截断:
+          保留前 1500 + 后 800, 中段标注"已截断(完整见会话记录)"。
+        - 事实型内容(表格/数字密集/路径/代码)不截断 —— 复用
+          compressor.Compressor._is_factual, 避免丢失数据。
+        - DB 原文保留(仅内存态修改, 不写库), 可追溯。
+
+        Args:
+            messages: build_messages 输出的消息列表(内存态)。
+
+        Returns:
+            截断后的消息列表(未修改原列表结构)。
+        """
+        try:
+            from private_agent.core.compressor import Compressor
+
+            is_factual = Compressor._is_factual
+        except Exception:  # noqa: BLE001
+            is_factual = lambda _c: False  # noqa: E731
+        limit = 12000
+        head = 1500
+        tail = 800
+        out: list[dict] = []
+        for msg in messages:
+            if msg.get("role") == "tool":
+                content = msg.get("content")
+                if isinstance(content, str) and len(content) > limit:
+                    if not is_factual(content):
+                        msg = {
+                            **msg,
+                            "content": (
+                                content[:head]
+                                + f"\n…[工具结果过长({len(content)} 字符), "
+                                f"中段已截断, 完整内容见会话记录]\n"
+                                + content[-tail:]
+                            ),
+                        }
+            out.append(msg)
+        return out
+
     def _repair_tool_pairing(self, messages: list[dict]) -> list[dict]:
         """修复 tool_calls 配对完整性(只读, 返回新列表)。
 
-        场景: 上下文压缩/DB 恢复/并行执行边界可能导致某条 assistant
-        消息带 tool_calls 但缺少对应 role=tool 的响应消息 → 模型 API
-        400 "assistant message with tool_calls must be followed by tool
-        messages"。这里扫描所有 assistant.tool_calls, 对缺失的
-        tool_call_id 补一条占位 tool 消息(不重复追加已存在的)。
+        双向修复:
+        1. 正向: assistant 带 tool_calls 但缺少对应 role=tool 响应 →
+           补占位 tool 消息(防 "tool_calls must be followed by tool messages")
+        2. 反向: role=tool 消息缺少**前置** assistant.tool_calls →
+           移除孤儿 tool 消息(防 "tool must be a response to preceding
+           message with tool_calls")。根因场景: Phase A 时序 bug(已修复) /
+           上下文压缩打破配对 / DB 恢复残留。
+
+        注意: 反向检查只看**已遍历过的** assistant 消息(seen_call_ids),
+        不看后续 assistant —— 否则 tool 先于 assistant 落库的时序 bug
+        无法被检测(tool_call_id 存在于后面的 assistant 中但不是"前置")。
 
         Args:
             messages: build_messages 输出(可能是内部引用, 不改原列表)。
@@ -1490,15 +1789,27 @@ class ReactLoop:
             修复后的消息列表(新列表, 原列表不变)。
         """
         pending_ids: list[str] = []
+        seen_call_ids: set[str] = set()  # 到目前为止出现过的 assistant tool_call ID
         fixed: list[dict] = []
         for msg in messages:
-            fixed.append(msg)
             role = msg.get("role")
+            # 反向修复: 孤儿 tool 消息(tool_call_id 不在已见 assistant 中)
+            if role == "tool" and msg.get("tool_call_id"):
+                if msg["tool_call_id"] not in seen_call_ids:
+                    self._logger.warning(
+                        "repair_tool_pairing: dropping orphan tool message "
+                        "(tool_call_id=%s has no preceding assistant "
+                        "tool_calls)",
+                        msg["tool_call_id"],
+                    )
+                    continue
+            fixed.append(msg)
             if role == "assistant":
                 for tc in msg.get("tool_calls") or []:
                     cid = tc.get("id") if isinstance(tc, dict) else None
                     if cid:
                         pending_ids.append(cid)
+                        seen_call_ids.add(cid)
             elif role == "tool" and msg.get("tool_call_id"):
                 if msg["tool_call_id"] in pending_ids:
                     pending_ids.remove(msg["tool_call_id"])

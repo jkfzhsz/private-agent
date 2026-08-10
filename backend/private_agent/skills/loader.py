@@ -30,10 +30,20 @@ class SkillLoader:
 
     @classmethod
     def from_cfg(cls, cfg: dict) -> "SkillLoader":
-        """从 cfg dict 构造(读 skills.storage.dev_dir / runtime_source)。"""
+        """从 cfg dict 构造(读 skills.storage.dev_dir / runtime_source)。
+
+        2026-08-08 修复: config.yaml 的 dev_dir 可能是 "${PA_USER_DATA}/skills"
+        占位符(config loader 不负责展开, 见 sandbox/service.py 注释), 此处必须
+        expandvars, 否则打包版技能目录解析为字面量 ${PA_USER_DATA}/skills →
+        永远不存在 → 技能全丢(0.4.4 引入 PA_USER_DATA 后技能丢失的根因)。
+        """
+        import os as _os
+
         storage = cfg.get("skills", {}).get("storage", {})
+        dev_dir = storage.get("dev_dir", "./skills")
+        dev_dir = _os.path.expandvars(str(dev_dir)) if isinstance(dev_dir, str) else dev_dir
         return cls(
-            dev_dir=storage.get("dev_dir", "./skills"),
+            dev_dir=dev_dir,
             runtime_source=storage.get("runtime_source", "db_first"),
         )
 

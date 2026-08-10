@@ -172,6 +172,10 @@ async def build_replay_messages(
         conn, session_id=session_id, last_turn=effective_offset,
     )
     # 包装为 WS react_event 消息(原始 events 无 type 字段)
+    # 2026-08-10 22:00: ① 过滤 tool_confirmation_required —— 历史会话的权限确认
+    #   事件在 replay 重放时不应再次触发前端确认弹窗(历史工具调用已执行完毕,
+    #   恢复会话只读回放, 不重新执行/确认); ② 所有重放消息带 replayed: True
+    #   标记, 供前端区分实时事件与回放(前端据此跳过确认弹窗等实时副作用)。
     event_msgs: list[dict[str, Any]] = [
         {
             "type": "react_event",
@@ -179,8 +183,10 @@ async def build_replay_messages(
             "turn": e["turn"],
             "event_type": e["event_type"],
             "payload": e["payload"],
+            "replayed": True,
         }
         for e in events
+        if e["event_type"] != "tool_confirmation_required"
     ]
     # 补 user 事件(messages 表 user 消息, turn > offset) —— react_events 不存 user
     # C-5(架构修订 P2-6): zone 过滤 —— 仅 active 用户消息重放为气泡,

@@ -184,6 +184,138 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     )
     # V1.5 项-1 子代理: subagents 表(ADR-012 §3.1 完整 DDL, 幂等)
     await _migrate_subagents_table(conn)
+    # 0.5.0 M1(2026-08-08): 场景独立记忆 —— user_memories.scope 列 + 索引、
+    # user_memories_archive / user_profile 表(老部署补丁, 新部署 schema.sql 已含)
+    await _migrate_memory_scope(conn)
+    # 0.5.0 P1(2026-08-08): 四窗口架构 —— system_metrics / optim_log 表
+    await _migrate_monitor_tables(conn)
+    # 0.5.0 P3: sessions.kind 扩容(monitor 主智能体会话)
+    await _migrate_sessions_kind_monitor(conn)
+
+
+async def _migrate_sessions_kind_monitor(conn: asyncpg.Connection) -> None:
+    """0.5.0 P3: sessions.kind 枚举扩容, 支持 monitor(主智能体监控会话)。
+
+    老部署 CHECK 约束仅含 ('main','sub'), 需重建约束加入 'monitor'。
+    """
+    constraint = await conn.fetchval(
+        "SELECT conname FROM pg_constraint "
+        "WHERE conrelid = 'sessions'::regclass "
+        "AND contype = 'c' AND pg_get_constraintdef(oid) ILIKE '%kind%'"
+    )
+    if constraint:
+        await conn.execute(f"ALTER TABLE sessions DROP CONSTRAINT {constraint}")
+    await conn.execute(
+        "ALTER TABLE sessions ADD CONSTRAINT sessions_kind_check "
+        "CHECK (kind IN ('main', 'sub', 'monitor'))"
+    )
+
+
+async def _migrate_monitor_tables(conn: asyncpg.Connection) -> None:
+    """0.5.0 P1: 主智能体监控数据链路表(system_metrics / optim_log)。
+
+    老部署补表(幂等), 新部署 schema.sql 已含。
+    """
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_metrics (
+            id          BIGSERIAL PRIMARY KEY,
+            ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            kind        VARCHAR(20) NOT NULL,
+            session_id  BIGINT,
+            name        VARCHAR(100) NOT NULL,
+            value       DOUBLE PRECISION NOT NULL,
+            meta        JSONB DEFAULT '{}'::jsonb
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_system_metrics_ts "
+        "ON system_metrics(ts DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_system_metrics_name "
+        "ON system_metrics(name, ts DESC)"
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS optim_log (
+            id          BIGSERIAL PRIMARY KEY,
+            ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            proposal    TEXT NOT NULL,
+            category    VARCHAR(30),
+            status      VARCHAR(20) NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','approved','rejected','applied','failed')),
+            plan_json   JSONB,
+            result      TEXT,
+            session_id  BIGINT,
+            reviewed_at TIMESTAMPTZ
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_optim_log_status "
+        "ON optim_log(status, ts DESC)"
+    )
+
+
+async def _migrate_memory_scope(conn: asyncpg.Connection) -> None:
+    """0.5.0 M1: user_memories.scope 列 + 部分索引 + 归档/画像表(幂等)。
+
+    - scope VARCHAR(20) NOT NULL DEFAULT 'global'(存量数据默认 global, 不阻断);
+    - idx_memories_scope(user_id, scope, importance DESC) WHERE is_active(注入/隔离);
+    - user_memories_archive(巩固归档 B3) / user_profile(画像聚合 B1) 表补建。
+    """
+    await conn.execute(
+        "ALTER TABLE user_memories ADD COLUMN IF NOT EXISTS "
+        "scope VARCHAR(20) NOT NULL DEFAULT 'global'"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_scope "
+        "ON user_memories(user_id, scope, importance DESC) "
+        "WHERE is_active = TRUE"
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_memories_archive (
+            id              BIGSERIAL PRIMARY KEY,
+            user_id         BIGINT NOT NULL DEFAULT 1,
+            memory_id       BIGINT,
+            scope           VARCHAR(20) DEFAULT 'global',
+            type            VARCHAR(20),
+            content         TEXT,
+            summary         TEXT,
+            importance      FLOAT,
+            archived_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_archive_user "
+        "ON user_memories_archive(user_id, archived_at)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_archive_scope "
+        "ON user_memories_archive(user_id, scope)"
+    )
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_profile (
+            id                      BIGSERIAL PRIMARY KEY,
+            user_id                 BIGINT NOT NULL DEFAULT 1,
+            name                    VARCHAR(100),
+            collaboration_prefs     TEXT,
+            common_tools            TEXT,
+            communication_style     TEXT,
+            ongoing_projects        JSONB DEFAULT '[]'::jsonb,
+            updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profile_user "
+        "ON user_profile(user_id)"
+    )
 
 
 async def _migrate_subagents_table(conn: asyncpg.Connection) -> None:

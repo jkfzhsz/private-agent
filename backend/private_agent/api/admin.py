@@ -11,6 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import json
 import os
 import yaml
 
@@ -147,7 +148,7 @@ async def extract_memory(session_id: int):
         try:
             # 验证会话存在
             row = await conn.fetchrow(
-                "SELECT id FROM sessions WHERE id = $1", session_id,
+                "SELECT id, locked_skill_name FROM sessions WHERE id = $1", session_id,
             )
             if row is None:
                 raise HTTPException(
@@ -166,6 +167,10 @@ async def extract_memory(session_id: int):
                 extract_interval_turns=cfg.get("memory", {}).get(
                     "extract_interval_turns", 8
                 ),
+                inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
+                inject_global_n=cfg.get("memory", {}).get(
+                    "inject_ratio", {}
+                ).get("global", 2),
                 eviction_max_active=cfg.get("memory", {}).get(
                     "eviction", {}
                 ).get("max_active_count", 200),
@@ -175,14 +180,19 @@ async def extract_memory(session_id: int):
                 eviction_expire_days=cfg.get("memory", {}).get(
                     "eviction", {}
                 ).get("expire_days", 30),
+                archive_before_evict=bool(
+                    cfg.get("memory", {}).get("archive_before_evict", True)
+                ),
             )
             # 获取会话最后轮次
             last_turn = await conn.fetchval(
                 "SELECT COALESCE(MAX(turn), 0) FROM messages WHERE session_id = $1",
                 session_id,
             )
+            # 0.5.0 M1: 提取按会话场景打标(locked_skill_name)
             memories = await mgr.manual_extract(
                 session_id=session_id, current_turn=last_turn,
+                scope=row["locked_skill_name"],
             )
             types = [m.type for m in memories]
             return {"count": len(memories), "types": types}
@@ -223,8 +233,16 @@ async def extract_correction(session_id: int, body: CorrectionExtractRequest):
                 memories_repo=repo,
                 compress_adapter=_build_compress_adapter(await _load_cfg()),
             )
+            # 0.5.0 M1: correction 记忆继承会话场景
+            session_scope = None
+            if session_id:
+                session_scope = await conn.fetchval(
+                    "SELECT locked_skill_name FROM sessions WHERE id = $1",
+                    session_id,
+                )
             memories = await mgr.maybe_extract_from_correction(
                 original=body.original, corrected=body.corrected,
+                scope=session_scope,
             )
             return {
                 "count": len(memories),
@@ -290,14 +308,11 @@ async def knowledge_upload(
     try:
         conn = await db.connect()
         try:
-            from private_agent.knowledge.kb_service import KnowledgeBaseService
-            from private_agent.knowledge.document_processor import DocumentProcessor
+            from private_agent.knowledge.factory import build_kb_service
 
+            cfg = await _load_cfg()
             repo = KnowledgeBaseRepo(conn)
-            svc = KnowledgeBaseService(
-                kb_repo=repo,
-                processor=_build_kb_processor(cfg),
-            )
+            svc = build_kb_service(conn, cfg, processor=_build_kb_processor(cfg))
             doc_id, chunks = await svc.process_document(
                 content=content,
                 filename=filename,
@@ -503,7 +518,7 @@ async def reindex_knowledge(body: KnowledgeReindexRequest):
     try:
         conn = await db.connect()
         try:
-            from private_agent.knowledge.kb_service import KnowledgeBaseService
+            from private_agent.knowledge.factory import build_kb_service
 
             cfg = await _load_cfg()
             processor = _build_kb_processor(cfg)
@@ -535,9 +550,7 @@ async def reindex_knowledge(body: KnowledgeReindexRequest):
             await conn.execute(
                 "DELETE FROM kb_chunks WHERE scenario = $1", scenario
             )
-            svc = KnowledgeBaseService(
-                kb_repo=repo, processor=processor,
-            )
+            svc = build_kb_service(conn, cfg, processor=processor)
             total_chunks = 0
             for d in docs:
                 if not d.content:
@@ -581,15 +594,11 @@ async def knowledge_search_test(body: KnowledgeSearchTestRequest):
     try:
         conn = await db.connect()
         try:
-            from private_agent.knowledge.kb_service import KnowledgeBaseService
+            from private_agent.knowledge.factory import build_kb_service
 
             cfg = await _load_cfg()
             repo = KnowledgeBaseRepo(conn)
-            svc = KnowledgeBaseService(
-                kb_repo=repo,
-                processor=_build_kb_processor(cfg),
-                config=cfg.get("knowledge", {}),
-            )
+            svc = build_kb_service(conn, cfg, processor=_build_kb_processor(cfg))
             chunks = await svc.search_with_rerank(
                 query=query,
                 scenario=body.scenario or None,
@@ -662,15 +671,11 @@ async def knowledge_upload_file(body: KnowledgeFileUploadRequest):
     try:
         conn = await db.connect()
         try:
-            from private_agent.knowledge.kb_service import KnowledgeBaseService
+            from private_agent.knowledge.factory import build_kb_service
 
             cfg = await _load_cfg()
             repo = KnowledgeBaseRepo(conn)
-            svc = KnowledgeBaseService(
-                kb_repo=repo,
-                processor=_build_kb_processor(cfg),
-                config=cfg.get("knowledge", {}),
-            )
+            svc = build_kb_service(conn, cfg, processor=_build_kb_processor(cfg))
             doc_id, chunks = await svc.process_document(
                 content=text,
                 filename=safe_name,
@@ -850,6 +855,15 @@ async def list_skills():
                     # V1.1-3.6: getattr 防御(兼容 mock/旧 manifest 无新字段)
                     "avatar": getattr(s.manifest, "avatar", ""),
                     "tags": list(getattr(s.manifest, "tags", None) or []),
+                    # V1.1-3.6 改名: display_name 供前端展示(空回退 name)
+                    "display_name": getattr(s.manifest, "display_name", "") or "",
+                    # 0.5.0 M1: 场景名(子瞻/白圭/清和, 前端显示层统一用 scene_name
+                    # 回退 display_name → name; 空 = 通用技能/非场景)
+                    "scene_name": getattr(s.manifest, "scene_name", "") or "",
+                    "scene_profile": getattr(s.manifest, "scene_profile", None) or {},
+                    "scene_scope": list(getattr(s.manifest, "scene_scope", None) or []),
+                    # 2026-08-08: 模型限定(空=通用, 非空=仅匹配模型会话展示)
+                    "model_scope": list(getattr(s.manifest, "model_scope", None) or []),
                     "permissions": _skill_permissions_summary(s.manifest),
                 }
                 for s in skills
@@ -914,6 +928,12 @@ async def get_skill_detail(skill_name: str):
                 # V1.1-3.6: getattr 防御(兼容 mock/旧 manifest 无新字段)
                 "avatar": getattr(skill.manifest, "avatar", ""),
                 "tags": list(getattr(skill.manifest, "tags", None) or []),
+                # V1.1-3.6 改名: display_name 供前端展示(空回退 name)
+                "display_name": getattr(skill.manifest, "display_name", "") or "",
+                # 0.5.0 M1: 场景名/画像/挂载范围(详情页展示 scene_profile)
+                "scene_name": getattr(skill.manifest, "scene_name", "") or "",
+                "scene_profile": getattr(skill.manifest, "scene_profile", None) or {},
+                "scene_scope": list(getattr(skill.manifest, "scene_scope", None) or []),
                 "model_params": dict(getattr(skill.manifest, "model_params", None) or {}),
                 "system_prompt_preview": skill.system_prompt[:500],
                 "tools": [
@@ -939,22 +959,99 @@ async def get_skill_detail(skill_name: str):
 
 
 def _skill_dev_dir() -> Path:
-    """skill 开发目录(config skills.storage.dev_dir, 默认 ./skills)。"""
+    """skill 开发目录(config skills.storage.dev_dir, 默认 ./skills)。
+
+    2026-08-08: dev_dir 可能是 "${PA_USER_DATA}/skills" 占位符(config loader
+    不负责展开), 必须 expandvars 否则字面量路径永远不存在(技能丢失根因)。
+    """
+    import os as _os
     from pathlib import Path
 
     cfg = loader.load_config()
-    dev_dir = Path(cfg.get("skills", {}).get("storage", {}).get("dev_dir", "./skills"))
+    dev_dir = cfg.get("skills", {}).get("storage", {}).get("dev_dir", "./skills")
+    dev_dir = _os.path.expandvars(str(dev_dir)) if isinstance(dev_dir, str) else dev_dir
+    dev_dir = Path(dev_dir)
     if not dev_dir.is_absolute():
         dev_dir = Path.cwd() / dev_dir
     return dev_dir
 
 
+def _agent_profile_path() -> Path:
+    """智能体资料文件(显示名等)路径: ${PA_USER_DATA}/agent-profile.json。
+
+    放用户数据根(与技能/壁纸同源) → 升级/重装不丢; dev 时 PA_USER_DATA
+    未设置 → 回退 WORKSPACE(backend 目录), 与 config loader 语义一致。
+    """
+    import os as _os
+    from pathlib import Path
+
+    root = _os.path.expandvars(_os.environ.get("PA_USER_DATA", "")).strip()
+    if not root:
+        root = _os.path.expandvars(_os.environ.get("WORKSPACE", "")).strip()
+    return Path(root) / "agent-profile.json"
+
+
+class AgentProfileRequest(BaseModel):
+    """PUT /admin/agent-profile 请求体: 智能体显示名(首页/对话区展示)。"""
+
+    display_name: str | None = None
+
+
+@router.get("/agent-profile", response_model=None)
+async def get_agent_profile():
+    """读取智能体显示名(首页/对话区展示)。
+
+    Returns:
+        200: {"display_name": "..."} —— 未设置返回空串, 前端回退默认"私人智能体"。
+        500: {"error": "agent_profile_read_failed"}
+    """
+    try:
+        p = _agent_profile_path()
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return {"display_name": (data.get("display_name") or "").strip()}
+            except Exception:
+                pass
+        return {"display_name": ""}
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "agent_profile_read_failed"})
+
+
+@router.put("/agent-profile", response_model=None)
+async def put_agent_profile(body: AgentProfileRequest):
+    """保存智能体显示名(首页/对话区展示, 持久化到 agent-profile.json)。
+
+    display_name 传 None 不更新; 空串 = 清除回退默认。
+    """
+    try:
+        p = _agent_profile_path()
+        data = {}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if body.display_name is not None:
+            data["display_name"] = body.display_name.strip()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return {"ok": True, "display_name": (data.get("display_name") or "").strip()}
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "agent_profile_save_failed"})
+
+
 class SkillMetaRequest(BaseModel):
     """PUT /admin/skills/{name}/meta 请求体(V1.1-3.6): 智能体元数据。
 
-    description/avatar/enabled/model_params 传 None 不更新; tags 传 None 不更新,
-    传 [] 清空。model_params 支持 {temperature, top_p, max_tokens}(仅存元数据,
-    运行时 max_tokens 注入, temperature/top_p 视 provider 能力)。
+    description/avatar/display_name/enabled/model_params 传 None 不更新;
+    tags 传 None 不更新, 传 [] 清空。model_params 支持
+    {temperature, top_p, max_tokens}(仅存元数据, 运行时 max_tokens 注入,
+    temperature/top_p 视 provider 能力)。display_name 为空字符串表示
+    "清除显示名回退 name"(与 description/avatar 同语义)。
     """
 
     description: str | None = None
@@ -962,6 +1059,8 @@ class SkillMetaRequest(BaseModel):
     tags: list[str] | None = None
     enabled: bool | None = None
     model_params: dict | None = None
+    # V1.1-3.6 改名: 用户可改的显示名(空串=清除回退 name, 不影响标识符)
+    display_name: str | None = None
 
 
 @router.put("/skills/{skill_name}/meta", response_model=None)
@@ -1000,6 +1099,9 @@ async def update_skill_meta(skill_name: str, body: SkillMetaRequest):
                 if body.model_params.get(k) is not None:
                     mp[k] = body.model_params[k]
             data["model_params"] = mp
+        # V1.1-3.6 改名: display_name 写入 skill.yaml(空串表示清除回退 name)
+        if body.display_name is not None:
+            data["display_name"] = body.display_name.strip()
         if body.enabled is not None:
             data["enabled"] = bool(body.enabled)
         yaml_path.write_text(
@@ -1255,17 +1357,23 @@ async def update_skill_prompt(skill_name: str, body: SkillPromptRequest):
 
 
 @router.get("/memories", response_model=None)
-async def list_memories(type: str | None = None, limit: int = 100, q: str | None = None):
+async def list_memories(
+    type: str | None = None,
+    limit: int = 100,
+    q: str | None = None,
+    scope: str | None = None,
+):
     """查询活跃用户记忆列表(蓝图 §4.3)。
 
     Args:
         type: 记忆类型过滤(preference/fact/todo/decision,可选)。
         limit: 返回条数上限(默认 100)。
         q: 内容关键字检索(V1.3-7.1, ILIKE 匹配, 可选)。
+        scope: 0.5.0 M1 场景过滤(global/office/data_analysis/frontend_design,可选)。
 
     Returns:
         200: [{id, type, content, importance, source_session_id, created_at,
-               last_accessed_at, access_count}]
+               last_accessed_at, access_count, scope}]
         503: {"error": "memories_list_failed"}
     """
     try:
@@ -1274,17 +1382,19 @@ async def list_memories(type: str | None = None, limit: int = 100, q: str | None
             rows = await conn.fetch(
                 """
                 SELECT id, type, content, importance, source_session_id,
-                       created_at, last_accessed_at, access_count
+                       created_at, last_accessed_at, access_count, scope
                 FROM user_memories
                 WHERE is_active = TRUE
                   AND ($1::text IS NULL OR type = $1)
                   AND ($2::text IS NULL OR content ILIKE '%' || $2 || '%')
+                  AND ($4::text IS NULL OR scope = $4)
                 ORDER BY importance DESC, created_at DESC
                 LIMIT $3
                 """,
                 type,
                 (q or "").strip() or None,
                 min(max(int(limit), 1), 500),
+                scope,
             )
             return [
                 {
@@ -1301,6 +1411,7 @@ async def list_memories(type: str | None = None, limit: int = 100, q: str | None
                         if r["last_accessed_at"] else None
                     ),
                     "access_count": r["access_count"],
+                    "scope": r["scope"],
                 }
                 for r in rows
             ]
@@ -1319,11 +1430,13 @@ class MemoryCreateRequest(BaseModel):
     content: 记忆内容(必填非空)。
     type: 记忆类型(preference/fact/todo/decision/correction, 默认 fact)。
     importance: 重要性 0~1(默认 0.5)。
+    scope: 0.5.0 M1 场景归属(global/office/data_analysis/frontend_design, 默认 global)。
     """
 
     content: str
     type: str = "fact"
     importance: float = 0.5
+    scope: str = "global"
 
 
 @router.post("/memories", response_model=None)
@@ -1344,16 +1457,19 @@ async def create_memory(body: MemoryCreateRequest):
         "preference", "fact", "todo", "decision", "correction"
     ) else "fact"
     importance = min(max(float(body.importance), 0.0), 1.0)
+    scope = body.scope if body.scope in (
+        "global", "office", "data_analysis", "frontend_design"
+    ) else "global"
     try:
         conn = await db.connect()
         try:
             mid = await conn.fetchval(
                 """
-                INSERT INTO user_memories (user_id, type, content, importance)
-                VALUES (1, $1, $2, $3)
+                INSERT INTO user_memories (user_id, type, content, importance, scope)
+                VALUES (1, $1, $2, $3, $4)
                 RETURNING id
                 """,
-                mtype, content, importance,
+                mtype, content, importance, scope,
             )
         finally:
             await conn.close()
@@ -1361,6 +1477,180 @@ async def create_memory(body: MemoryCreateRequest):
     except Exception:
         return JSONResponse(
             status_code=503, content={"error": "memory_create_failed"}
+        )
+
+
+@router.get("/memories/stats", response_model=None)
+async def memory_stats():
+    """0.5.0 M3 B5: 记忆命中统计(评估工具)。
+
+    Returns:
+        200: {active, archived, by_scope, by_type, low_access_candidates,
+              profile_exists}
+        503: {"error": "memories_stats_failed"}
+    """
+    try:
+        conn = await db.connect()
+        try:
+            repo = MemoriesRepo(conn)
+            stats = await repo.memory_stats()
+            return stats
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "memories_stats_failed"}
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 0.5.0 P1(2026-08-08): 四窗口架构 —— 主智能体优化审批流(optim_log)
+# 状态机: pending → approved/rejected → applied/failed
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@router.get("/metrics/summary", response_model=None)
+async def get_metrics_summary(since_hours: float = 1.0):
+    """0.5.0 P3: 系统指标摘要(监控窗口面板展示)。
+
+    Returns:
+        200: {summary: str, sample_ts: str|None}
+        503: {"error": "metrics_summary_failed"}
+    """
+    try:
+        from private_agent.main import app as _main_app
+
+        collector = getattr(_main_app.state, "metrics_collector", None)
+        if collector is None:
+            return {"summary": "(指标采集器未启动)", "sample_ts": None}
+        conn = await db.connect()
+        try:
+            summary = await collector.latest_summary(
+                conn, since_hours=since_hours
+            )
+            return {
+                "summary": summary or "(近1小时无指标数据, 稍后自动采集)",
+                "sample_ts": (
+                    collector._last_run.isoformat()
+                    if collector._last_run else None
+                ),
+            }
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "metrics_summary_failed"}
+        )
+
+
+@router.get("/optim-log", response_model=None)
+async def list_optim_log(status: str | None = None, limit: int = 50):
+    """列出优化建议记录(可按状态过滤)。
+
+    Returns:
+        200: [{id, ts, proposal, category, status, result, session_id}]
+        503: {"error": "optim_log_list_failed"}
+    """
+    try:
+        conn = await db.connect()
+        try:
+            where = ""
+            params: list = []
+            if status:
+                where = " WHERE status = $1"
+                params.append(status)
+            rows = await conn.fetch(
+                f"""
+                SELECT id, ts, proposal, category, status, plan_json,
+                       result, session_id, reviewed_at
+                FROM optim_log
+                {where}
+                ORDER BY ts DESC LIMIT $%d
+                """ % (len(params) + 1),
+                *params,
+                int(limit),
+            )
+            return [
+                {
+                    "id": r["id"],
+                    "ts": r["ts"].isoformat() if r["ts"] else None,
+                    "proposal": r["proposal"],
+                    "category": r["category"],
+                    "status": r["status"],
+                    "plan": r["plan_json"] if isinstance(r["plan_json"], list) else [],
+                    "result": r["result"],
+                    "session_id": r["session_id"],
+                    "reviewed_at": (
+                        r["reviewed_at"].isoformat() if r["reviewed_at"] else None
+                    ),
+                }
+                for r in rows
+            ]
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "optim_log_list_failed"}
+        )
+
+
+class OptimReviewRequest(BaseModel):
+    """PUT /admin/optim-log/{id} 请求体: 审批优化建议。
+
+    status: approved / rejected(仅这两态可由用户设置)
+    """
+
+    status: str
+    result: str | None = None
+
+
+@router.put("/optim-log/{optim_id}", response_model=None)
+async def review_optim_log(optim_id: int, body: OptimReviewRequest):
+    """审批优化建议(pending → approved/rejected)。
+
+    Returns:
+        200: {"ok": true, "status": str}
+        400: {"error": "invalid_status"}
+        404: {"error": "optim_log_not_found"}
+    """
+    if body.status not in ("approved", "rejected"):
+        return JSONResponse(
+            status_code=400, content={"error": "invalid_status"}
+        )
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                """
+                UPDATE optim_log
+                SET status = $2, reviewed_at = now(),
+                    result = COALESCE($3, result)
+                WHERE id = $1 AND status = 'pending'
+                RETURNING id, status
+                """,
+                optim_id,
+                body.status,
+                body.result,
+            )
+            if row is None:
+                # 可能已审批或不存在
+                exists = await conn.fetchval(
+                    "SELECT status FROM optim_log WHERE id = $1", optim_id
+                )
+                if exists is None:
+                    return JSONResponse(
+                        status_code=404, content={"error": "optim_log_not_found"}
+                    )
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"already {exists}"},
+                )
+            return {"ok": True, "status": row["status"]}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "optim_log_review_failed"}
         )
 
 
@@ -1414,9 +1704,11 @@ async def get_providers():
     cfg = await _load_cfg()
     providers = cfg.get("models", {}).get("providers", {})
     result = []
+    live_names: set[str] = set()
     for name, prov in providers.items():
         if prov.get("deleted"):
             continue  # 已删除的 provider 不展示
+        live_names.add(name)
         env_var = f"PA_{name.upper()}_API_KEY"
         key_val = os.environ.get(env_var, "")
         result.append({
@@ -1424,6 +1716,7 @@ async def get_providers():
             "enabled": prov.get("enabled", True),
             "model_name": prov.get("model_name"),
             "base_url": prov.get("base_url"),
+            "multimodal": prov.get("multimodal", False),
             # V1.4-8.2: 分组元数据(前端分组展示)
             "group": prov.get("group"),
             "sort_order": prov.get("sort_order", 0),
@@ -1433,11 +1726,12 @@ async def get_providers():
             # per-provider 对话参数上限(已解析: provider 级 > 全局默认)
             "limits": resolve_provider_limits(cfg, name),
         })
+    # 降级链只暴露仍存在(未删除)的 provider: 历史脏数据可能残留已删除项,
+    # 若原样返回会在设置页出现"幽灵条目"且保存时被校验拒绝(400)。
+    raw_chain = cfg.get("models", {}).get("router", {}).get("fallback_chain", [])
     return {
         "providers": result,
-        "fallback_chain": cfg.get("models", {}).get("router", {}).get(
-            "fallback_chain", []
-        ),
+        "fallback_chain": [n for n in raw_chain if n in live_names],
     }
 
 
@@ -1485,6 +1779,11 @@ def _ensure_master_key() -> bytes:
             hex_key = _read_env_map(os.path.join(workspace, ".env")).get(
                 "PA_MASTER_KEY", ""
             )
+            if hex_key:
+                # 0.5.1 修复(基线 3 失败): 继承后同样持久化到 user_env,
+                # 与生成分支一致 —— 避免 user_env 缺失时每次启动仅靠
+                # backend/.env 继承, user_env 视角 key 不稳定。
+                _write_env_updates(_user_env_path(), {"PA_MASTER_KEY": hex_key})
         except Exception:  # noqa: BLE001
             pass
     if not hex_key:
@@ -1762,6 +2061,7 @@ class ProviderUpdateRequest(BaseModel):
     group: str | None = None
     sort_order: int | None = None
     kind: str | None = None  # cloud | local
+    multimodal: bool | None = None  # 是否多模态(支持图片输入)
 
 
 @router.put("/settings/providers/{name}", response_model=None)
@@ -1773,10 +2073,10 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
     """
     import os
 
-    # 校验 provider 存在
+    # 校验 provider 存在且未被软删(已删除的应走 POST 重新创建)
     cfg = await _load_cfg()
     providers = cfg.get("models", {}).get("providers", {})
-    if name not in providers:
+    if name not in providers or providers[name].get("deleted"):
         raise HTTPException(status_code=404, detail=f"provider '{name}' not found")
     _validate_provider_name(name)
 
@@ -1806,6 +2106,8 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
             k = (body.kind or "").strip()
             if k in ("cloud", "local"):
                 await _set_runtime(conn, f"{prefix}.kind", k)
+        if body.multimodal is not None:
+            await _set_runtime(conn, f"{prefix}.multimodal", bool(body.multimodal))
 
         # per-provider 对话参数上限(0 表示删除覆盖回退全局默认, 空表示不更新)
         for key, field in (
@@ -1843,19 +2145,20 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
 
 
 def _validate_provider_name(name: str) -> None:
-    """校验 provider 名称为合法标识符(字母/数字/下划线/连字符)。
+    """校验 provider 名称为合法标识符(字母/数字/下划线/连字符/小数点)。
 
     provider 名会映射为环境变量 PA_{NAME}_API_KEY 与 config_runtime 点分 key,
     含空格/中文等非法字符会导致 API key 无法生效、配置错乱。
+    小数点允许(如 qwen-2.5、deepseek-v4.1),但不能以小数点开头或结尾。
     """
     import re
 
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+    if not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?", name):
         raise HTTPException(
             status_code=400,
             detail=(
-                f"模型名称 '{name}' 不合法: 只能包含字母/数字/下划线/连字符, "
-                "且不能以数字或符号开头(如 deepseek-flash, glm-4)"
+                f"模型名称 '{name}' 不合法: 只能包含字母/数字/下划线/连字符/小数点, "
+                "且不能以符号开头或结尾(如 deepseek-flash, qwen-2.5, glm-4)"
             ),
         )
 
@@ -1871,6 +2174,7 @@ class ProviderCreateRequest(BaseModel):
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
     max_turns: int | None = None
+    multimodal: bool = False  # 是否多模态(支持图片输入)
 
 
 @router.post("/settings/providers", response_model=None)
@@ -1889,16 +2193,19 @@ async def create_provider(body: ProviderCreateRequest):
     _validate_provider_name(name)
     import json as _json
 
+    # 存在性/删除标记判定必须走 loader 解析后的 cfg:
+    # asyncpg 对 JSONB 列返回 JSON 字符串("true"/"false"), 直接 `is True/is False`
+    # 恒为 False —— 曾导致重建已删除 provider 时 deleted 标记残留(provider 写入成功
+    # 却不在列表中显示, 且被加回 fallback_chain 引发保存校验 400)。
+    cfg = await _load_cfg()
+    existing_prov = cfg.get("models", {}).get("providers", {}).get(name)
+    was_deleted = bool(existing_prov.get("deleted")) if existing_prov else False
+    if existing_prov is not None and not was_deleted:
+        raise HTTPException(status_code=409, detail=f"provider '{name}' 已存在")
+
     conn = await db.connect()
     try:
-        # 已存在且未删除 → 拒绝(避免误覆盖)
-        existing = await conn.fetchval(
-            "SELECT value FROM config_runtime WHERE key = $1",
-            f"models.providers.{name}.deleted",
-        )
-        if existing is not None and existing is False:
-            raise HTTPException(status_code=409, detail=f"provider '{name}' 已存在")
-        if existing is True:
+        if was_deleted:
             # 重新启用: 清除删除标记
             await conn.execute(
                 "DELETE FROM config_runtime WHERE key = $1",
@@ -1924,6 +2231,14 @@ async def create_provider(body: ProviderCreateRequest):
         ):
             if field and field > 0:
                 await _set_runtime(conn, f"{prefix}.{key}", int(field))
+        # 新建语义: multimodal 完整覆盖(重建已删除 provider 时清掉旧残留)
+        if body.multimodal:
+            await _set_runtime(conn, f"{prefix}.multimodal", True)
+        else:
+            await conn.execute(
+                "DELETE FROM config_runtime WHERE key = $1",
+                f"{prefix}.multimodal",
+            )
 
         # 加入 fallback_chain(整体列表存 runtime, 避免写 yaml)
         if body.enabled:
@@ -1933,7 +2248,6 @@ async def create_provider(body: ProviderCreateRequest):
             if row:
                 chain = _json.loads(row) if isinstance(row, str) else row
             else:
-                cfg = await _load_cfg()
                 chain = list(
                     cfg.get("models", {}).get("router", {}).get("fallback_chain", [])
                 )
@@ -1980,6 +2294,58 @@ async def delete_provider(name: str):
     finally:
         await conn.close()
     return {"ok": True, "name": name}
+
+
+class FallbackChainUpdateRequest(BaseModel):
+    """PUT /settings/fallback-chain 请求体: 更新降级链顺序。"""
+    chain: list[str]
+
+
+@router.put("/settings/fallback-chain", response_model=None)
+async def update_fallback_chain(body: FallbackChainUpdateRequest):
+    """更新模型降级链顺序(蓝图 §2.7, config_runtime 整体列表存储)。
+
+    - 不存在/已删除的 name 静默剔除(自愈), 通过响应 dropped 字段回报
+    - 已存在但不在 chain 中的 enabled provider 会被追加到尾部
+    - 重复项自动去重(保留首次出现)
+    """
+    import json as _json
+
+    cfg = await _load_cfg()
+    providers = cfg.get("models", {}).get("providers", {})
+    valid_names = {
+        n for n, p in providers.items()
+        if not p.get("deleted")
+    }
+
+    # 幽灵项自愈: 历史脏数据(如软删残留)可能让链中出现已不存在的 provider。
+    # 直接 400 会导致用户永远无法保存顺序, 因此改为剔除并回报。
+    dropped = [n for n in body.chain if n not in valid_names]
+
+    # 去重(保留首次出现)
+    seen: set[str] = set()
+    chain: list[str] = []
+    for n in body.chain:
+        if n not in valid_names or n in seen:
+            continue
+        seen.add(n)
+        chain.append(n)
+
+    # 补充已启用但未在 chain 中的 provider
+    for n, p in providers.items():
+        if n in seen:
+            continue
+        if p.get("deleted"):
+            continue
+        if p.get("enabled", True):
+            chain.append(n)
+
+    conn = await db.connect()
+    try:
+        await _set_runtime(conn, "models.router.fallback_chain", chain)
+    finally:
+        await conn.close()
+    return {"ok": True, "chain": chain, "dropped": dropped}
 
 
 @router.post("/settings/providers/{name}/test", response_model=None)
@@ -2116,11 +2482,15 @@ class MemoryConfigUpdateRequest(BaseModel):
     """PUT /settings/memory 请求体(V1.3-7.1): 记忆注入强度/开关配置。
 
     全部可选, 传 None 不更新。写入 config_runtime, 下一轮生效。
+    0.5.0 M1: 新增 inject_global_n(全局常驻画像条数, 默认 2)与
+    archive_before_evict(驱逐前巩固归档开关)。
     """
 
     enabled: bool | None = None
     inject_limit: int | None = None
+    inject_global_n: int | None = None
     extract_interval_turns: int | None = None
+    archive_before_evict: bool | None = None
     eviction_max_active_count: int | None = None
     eviction_min_importance_threshold: float | None = None
     eviction_expire_days: int | None = None
@@ -2135,7 +2505,10 @@ async def get_memory_config():
     return {
         "enabled": mem.get("enabled", True),
         "inject_limit": mem.get("inject_limit", 10),
+        # 0.5.0 M1: 注入配额(全局常驻画像条数, 其余给场景记忆)
+        "inject_global_n": mem.get("inject_ratio", {}).get("global", 2),
         "extract_interval_turns": mem.get("extract_interval_turns", 8),
+        "archive_before_evict": bool(mem.get("archive_before_evict", True)),
         "eviction": {
             "max_active_count": eviction.get("max_active_count", 200),
             "min_importance_threshold": eviction.get(
@@ -2165,6 +2538,16 @@ async def update_memory_config(body: MemoryConfigUpdateRequest):
             await _set_runtime(
                 conn, "memory.extract_interval_turns",
                 min(max(int(body.extract_interval_turns), 1), 100),
+            )
+        if body.inject_global_n is not None:
+            await _set_runtime(
+                conn, "memory.inject_ratio.global",
+                min(max(int(body.inject_global_n), 0), 10),
+            )
+        if body.archive_before_evict is not None:
+            await _set_runtime(
+                conn, "memory.archive_before_evict",
+                bool(body.archive_before_evict),
             )
         if body.eviction_max_active_count is not None:
             await _set_runtime(
@@ -2536,7 +2919,7 @@ async def list_sessions(
                 """
                 SELECT s.id, s.title, s.status, s.model_id, s.summary, s.folder,
                        s.locked_skill_name, s.locked_skill_version,
-                       s.created_at, s.updated_at,
+                       s.kind, s.created_at, s.updated_at,
                        COALESCE(
                            (SELECT MAX(turn) FROM messages WHERE session_id = s.id),
                            0
@@ -2549,8 +2932,11 @@ async def list_sessions(
                            ) t), 0
                        ) AS user_msg_count,
                        (
+                           -- 0.5.1: 排除系统注入的用户画像(User Profile 以
+                           -- role='user' 写入, 不作为会话首条真实消息/标题兜底)
                            SELECT content FROM messages m
                            WHERE m.session_id = s.id AND m.role = 'user'
+                             AND m.content NOT LIKE '[User Profile]%'
                            ORDER BY m.id ASC LIMIT 1
                        ) AS first_user_content
                 FROM sessions s
@@ -2583,6 +2969,16 @@ async def list_sessions(
                 ):
                     first = r["first_user_content"] or ""
                     title = first[:30].replace("\n", " ") if first else f"#{r['id']}"
+                # 0.5.1: monitor(主智能体)会话固定标题"系统监控"无法识别对话主题
+                # —— 有真实用户对话时用首条消息做标题(历史树可见"无涯"对话内容)
+                elif (
+                    r["kind"] == "monitor"
+                    and title == "系统监控"
+                    and r["first_user_content"]
+                ):
+                    title = (r["first_user_content"] or "")[:30].replace(
+                        "\n", " "
+                    )
                 result.append({
                     "id": r["id"],
                     "title": title,
@@ -2592,6 +2988,7 @@ async def list_sessions(
                     "folder": r["folder"],
                     "locked_skill_name": r["locked_skill_name"],
                     "locked_skill_version": r["locked_skill_version"],
+                    "kind": r["kind"],
                     "user_msg_count": r["user_msg_count"],
                     "created_at": (
                         r["created_at"].isoformat() if r["created_at"] else None
@@ -2795,11 +3192,13 @@ class SessionCreateRequest(BaseModel):
     """POST /admin/sessions 请求体(V1.1-3.1 会话管理闭环)。
 
     全部可选: 前端新建会话时通常只传空的 {}。
+    kind: 会话类型(main/sub/monitor, 0.5.0 P3 支持 monitor 主智能体)。
     """
 
     title: str | None = None
     folder: str | None = None
     skill_name: str | None = None
+    kind: str | None = None
 
 
 class SessionUpdateRequest(BaseModel):
@@ -2830,25 +3229,32 @@ async def create_session(body: SessionCreateRequest | None = None):
     """新建会话(V1.1-3.1 会话管理闭环)。
 
     前端"新建会话"入口: 创建一条空会话并返回 id, 前端切换过去。
+    kind=monitor(0.5.0 P3): 主智能体监控会话, 强制 locked_skill_name=NULL。
     """
     body = body or SessionCreateRequest()
     title = (body.title or "").strip() or None
     folder = (body.folder or "").strip() or None
     skill_name = (body.skill_name or "").strip() or None
+    kind = (body.kind or "main").strip() or "main"
+    if kind not in ("main", "sub", "monitor"):
+        kind = "main"
+    if kind == "monitor":
+        skill_name = None  # 主智能体无场景 skill
     try:
         conn = await db.connect()
         try:
             row = await conn.fetchrow(
                 """
-                INSERT INTO sessions (title, folder, locked_skill_name, status)
-                VALUES ($1, $2, $3, 'active')
+                INSERT INTO sessions (title, folder, locked_skill_name, status, kind)
+                VALUES ($1, $2, $3, 'active', $4)
                 RETURNING id, created_at
                 """,
                 title,
                 folder,
                 skill_name,
+                kind,
             )
-            return {"ok": True, "id": row["id"], "created_at": row["created_at"].isoformat()}
+            return {"ok": True, "id": row["id"], "created_at": row["created_at"].isoformat(), "kind": kind}
         finally:
             await conn.close()
     except Exception:
@@ -4592,19 +4998,32 @@ async def set_session_model(id: int, body: SessionModelRequest):
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _wallpaper_path() -> str | None:
-    """返回当前壁纸/视频背景文件路径(不存在返回 None)。
+_WALLPAPER_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm")
+
+
+def _wallpaper_path(theme: str | None = None) -> str | None:
+    """返回指定主题的壁纸/视频背景文件路径(不存在返回 None)。
 
     按修改时间取最新(而非固定扩展名顺序),避免残留旧扩展名文件
     (如 .png 测试图)覆盖用户最新上传的 .jpeg/.mp4。
     支持图片(.png/.jpg/.jpeg/.webp) + 视频(.mp4/.webm, V2 首页动态背景)。
+
+    Args:
+        theme: None=旧版单背景(wallpaper.*); "light"/"dark"=主题专属
+            (wallpaper-{theme}.*)。亮色主题在无专属文件时兜底旧版单背景
+            (2026-08-08 前上传的背景迁移为亮色)。
     """
     outputs_dir = _get_outputs_dir()
     candidates: list = []
-    for ext in (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"):
-        p = outputs_dir / f"wallpaper{ext}"
-        if p.exists() and p.is_file():
-            candidates.append(p)
+    prefixes = [f"wallpaper-{theme}"] if theme else ["wallpaper"]
+    if theme == "light":
+        # 旧版单背景迁移兜底: 亮色主题可读取 wallpaper.*
+        prefixes.append("wallpaper")
+    for prefix in prefixes:
+        for ext in _WALLPAPER_EXTS:
+            p = outputs_dir / f"{prefix}{ext}"
+            if p.exists() and p.is_file():
+                candidates.append(p)
     if not candidates:
         return None
     newest = max(candidates, key=lambda p: p.stat().st_mtime)
@@ -4616,51 +5035,76 @@ def _wallpaper_type(name: str) -> str:
     return "video" if name.lower().endswith((".mp4", ".webm")) else "image"
 
 
-def _wallpaper_style() -> dict:
-    """读取壁纸显示样式(不存在返回默认)。"""
+def _wallpaper_style(theme: str | None = None) -> dict:
+    """读取指定主题的壁纸显示样式(不存在返回默认)。
+
+    主题化后样式文件为 wallpaper-style-{theme}.json; 旧版单一文件
+    wallpaper-style.json 仅作为无 theme 查询(兼容旧前端)或亮色主题兜底。
+    """
     import json as _json
 
-    try:
-        p = _get_outputs_dir() / "wallpaper-style.json"
-        if p.exists():
-            data = _json.loads(p.read_text(encoding="utf-8"))
-            return {
-                "position_x": float(data.get("position_x", 50)),
-                "position_y": float(data.get("position_y", 50)),
-                "fit": data.get("fit", "cover"),
-                "scale": float(data.get("scale", 100)),
-                "rotate": float(data.get("rotate", 0)),
-            }
-    except Exception:  # noqa: BLE001
-        pass
+    fname = (
+        "wallpaper-style.json"
+        if not theme
+        else f"wallpaper-style-{theme}.json"
+    )
+    candidates = [_get_outputs_dir() / fname]
+    if theme == "light":
+        # 旧版单一样式迁移: 亮色主题兜底 wallpaper-style.json
+        candidates.append(_get_outputs_dir() / "wallpaper-style.json")
+    for p in candidates:
+        try:
+            if p.exists():
+                data = _json.loads(p.read_text(encoding="utf-8"))
+                return {
+                    "position_x": float(data.get("position_x", 50)),
+                    "position_y": float(data.get("position_y", 50)),
+                    "fit": data.get("fit", "contain"),
+                    "scale": float(data.get("scale", 100)),
+                    "rotate": float(data.get("rotate", 0)),
+                }
+        except Exception:  # noqa: BLE001
+            continue
     return {
         "position_x": 50.0,
         "position_y": 50.0,
-        "fit": "cover",
+        "fit": "contain",
         "scale": 100.0,
         "rotate": 0.0,
     }
 
 
 class WallpaperUploadRequest(BaseModel):
-    """POST /admin/wallpaper 请求体: data URL(base64 图片)。"""
+    """POST /admin/wallpaper 请求体: data URL(base64 图片)。
+
+    theme 可选: None=旧版单背景; "light"/"dark"=主题专属背景
+    (2026-08-08 起前端总是传 theme, 暗色/亮色各自独立保存)。
+    """
 
     data_url: str
+    theme: str | None = None
 
 
 class WallpaperStyleRequest(BaseModel):
-    """PUT /admin/wallpaper/style 请求体: 显示位置/填充/缩放/旋转。"""
+    """PUT /admin/wallpaper/style 请求体: 显示位置/填充/缩放/旋转。
+
+    theme 可选(语义同 WallpaperUploadRequest)。
+    """
 
     position_x: float = 50.0
     position_y: float = 50.0
-    fit: str = "cover"  # cover | contain
-    scale: float = 100.0  # 50-200(%)
-    rotate: float = 0.0  # -45~45(度)
+    fit: str = "contain"  # cover | contain(前端固定 contain, 仅缩放+移动)
+    scale: float = 100.0  # 100-300(%)
+    rotate: float = 0.0  # 0/90/180/270(度)
+    theme: str | None = None
 
 
 @router.get("/wallpaper", response_model=None)
-async def get_wallpaper():
-    """返回当前壁纸/视频背景可访问路径、类型与显示样式。
+async def get_wallpaper(theme: str | None = None):
+    """返回指定主题的壁纸/视频背景可访问路径、类型与显示样式。
+
+    Args:
+        theme: None=旧版单背景; "light"/"dark"=主题专属背景(前端总是传)。
 
     Returns:
         200: {
@@ -4669,34 +5113,41 @@ async def get_wallpaper():
             "style": {"position_x": float, "position_y": float, "fit": str},
         }
     """
-    name = _wallpaper_path()
+    name = _wallpaper_path(theme)
     return {
         "wallpaper": f"/files/outputs/{name}" if name else None,
         "type": _wallpaper_type(name) if name else "image",
-        "style": _wallpaper_style(),
+        "style": _wallpaper_style(theme),
     }
 
 
 @router.put("/wallpaper/style", response_model=None)
 async def update_wallpaper_style(body: WallpaperStyleRequest):
-    """保存壁纸显示样式(首页背景位置/填充方式)。
+    """保存指定主题的壁纸显示样式(首页背景位置/缩放/旋转)。
 
     Returns:
         200: {"style": {"position_x", "position_y", "fit"}}
     """
     import json as _json
 
+    theme = (body.theme or "").strip().lower()
+    theme = theme if theme in ("light", "dark") else None
     style = {
         "position_x": min(max(float(body.position_x), 0.0), 100.0),
         "position_y": min(max(float(body.position_y), 0.0), 100.0),
-        "fit": body.fit if body.fit in ("cover", "contain") else "cover",
-        "scale": min(max(float(body.scale), 50.0), 200.0),
+        "fit": body.fit if body.fit in ("cover", "contain") else "contain",
+        "scale": min(max(float(body.scale), 100.0), 300.0),
         "rotate": min(max(float(body.rotate), -360.0), 360.0),
     }
     try:
         outputs_dir = _get_outputs_dir()
         outputs_dir.mkdir(parents=True, exist_ok=True)
-        (outputs_dir / "wallpaper-style.json").write_text(
+        fname = (
+            "wallpaper-style.json"
+            if not theme
+            else f"wallpaper-style-{theme}.json"
+        )
+        (outputs_dir / fname).write_text(
             _json.dumps(style), encoding="utf-8"
         )
         return {"style": style}
@@ -4740,8 +5191,9 @@ async def upload_chat_file(body: ChatFileUploadRequest):
     if len(decoded) > 15 * 1024 * 1024:  # ≤15MB
         return JSONResponse(status_code=400, content={"error": "file_too_large"})
     try:
-        ws = os.environ.get("WORKSPACE", "")
-        uploads_dir = Path(ws) / "uploads" if ws else Path(_get_outputs_dir()).parent / "uploads"
+        # 2026-08-08: uploads 与 logs 一致, 从 config workspace_root(PA_USER_DATA)派生,
+        # 不再直读 WORKSPACE 环境变量(打包版用户数据已重定向到 userData)
+        uploads_dir = Path(_get_outputs_dir()).parent / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
         target = uploads_dir / safe_name
         target.write_bytes(decoded)
@@ -5021,13 +5473,14 @@ def _posix_norm(name: str) -> str:
 
 @router.post("/wallpaper", response_model=None)
 async def upload_wallpaper(body: WallpaperUploadRequest):
-    """上传首页壁纸/视频背景(存 outputs/wallpaper.*)。
+    """上传指定主题的首页壁纸/视频背景(存 outputs/wallpaper-{theme}.*)。
 
     支持图片(data:image/png|jpeg|webp, ≤6MB) + 视频
     (data:video/mp4|webm, ≤50MB, V2 首页动态背景)。
+    theme 缺省时保持旧版单背景文件(wallpaper.*, 兼容旧调用)。
 
     Args:
-        body: {"data_url": "data:image/png;base64,..." 或 "data:video/mp4;base64,..."}
+        body: {"data_url": "...", "theme": "light"|"dark"|None}
 
     Returns:
         200: {"wallpaper": "/files/outputs/wallpaper.mp4", "type": "video"}
@@ -5036,6 +5489,10 @@ async def upload_wallpaper(body: WallpaperUploadRequest):
     """
     import base64 as _b64
     import re as _re
+
+    theme = (body.theme or "").strip().lower()
+    theme = theme if theme in ("light", "dark") else None
+    prefix = f"wallpaper-{theme}" if theme else "wallpaper"
 
     # 图片 + 视频(video 上限 50MB)
     m = _re.match(
@@ -5061,18 +5518,18 @@ async def upload_wallpaper(body: WallpaperUploadRequest):
     try:
         outputs_dir = _get_outputs_dir()
         outputs_dir.mkdir(parents=True, exist_ok=True)
-        # 先清理旧壁纸/旧视频(unlink 失败不阻断写入, 沙箱环境可能拦截删除)
-        for ext_old in (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"):
-            old = outputs_dir / f"wallpaper{ext_old}"
+        # 先清理该主题的旧壁纸/旧视频(unlink 失败不阻断写入, 沙箱环境可能拦截删除)
+        for ext_old in _WALLPAPER_EXTS:
+            old = outputs_dir / f"{prefix}{ext_old}"
             if old.exists():
                 try:
                     old.unlink()
                 except Exception:  # noqa: BLE001
                     pass
-        target = outputs_dir / f"wallpaper.{ext}"
+        target = outputs_dir / f"{prefix}.{ext}"
         target.write_bytes(decoded)
         return {
-            "wallpaper": f"/files/outputs/wallpaper.{ext}",
+            "wallpaper": f"/files/outputs/{target.name}",
             "type": "video" if is_video else "image",
         }
     except Exception:
@@ -5083,8 +5540,11 @@ async def upload_wallpaper(body: WallpaperUploadRequest):
 
 
 @router.delete("/wallpaper", response_model=None)
-async def delete_wallpaper():
-    """移除壁纸, 恢复默认背景。
+async def delete_wallpaper(theme: str | None = None):
+    """移除指定主题的壁纸, 恢复默认背景。
+
+    Args:
+        theme: None=旧版单背景; "light"/"dark"=主题专属背景。
 
     Returns:
         200: {"wallpaper": None}
@@ -5092,7 +5552,7 @@ async def delete_wallpaper():
     import logging
 
     logger = logging.getLogger("private_agent.api.admin.wallpaper")
-    name = _wallpaper_path()
+    name = _wallpaper_path(theme)
     if name:
         try:
             (_get_outputs_dir() / name).unlink()
@@ -5685,6 +6145,10 @@ async def _test_mcp_http(
     """HTTP MCP 探活: 复用 MCPClient(自动协商协议 + SSE 流式 + Bearer 认证)。"""
     from private_agent.tools.mcp_client import MCPClient, MCPClientConfig
 
+    # 2026-08-07 修复 UI 误导: 协议版本号不再放主显示, 改返回 server_name/
+    # server_version/tools_count/latency_ms 供前端展示"服务器名 · N工具 · Xms"。
+    import time as _time
+
     client = MCPClient(
         MCPClientConfig(
             server_id=name,
@@ -5695,16 +6159,32 @@ async def _test_mcp_http(
             protocol_version=protocol_version,
         )
     )
-    async with client:
-        await client.connect()
-        tools = await client.discover_tools()
-        return {
-            "ok": True,
-            "server": name,
-            "protocol": client.negotiated_version or protocol_version,
-            "negotiated": client.negotiated_version,
-            "tools_count": len(tools),
-        }
+    t0 = _time.monotonic()
+    try:
+        async with client:
+            await client.connect()
+            tools = await client.discover_tools()
+            server_info = getattr(client, "_server_info", None) or {}
+            server_name = (
+                (server_info.get("name") if isinstance(server_info, dict) else None)
+                or name
+            )
+            server_version = (
+                server_info.get("version") if isinstance(server_info, dict) else ""
+            )
+            latency_ms = round((_time.monotonic() - t0) * 1000, 1)
+            return {
+                "ok": True,
+                "server": server_name,
+                "server_id": name,
+                "server_version": server_version,
+                "tools_count": len(tools),
+                "latency_ms": latency_ms,
+                "detail": f"HTTP MCP {client.negotiated_version or protocol_version}",
+                "negotiated": client.negotiated_version,
+            }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}
 
 
 async def _test_mcp_stdio(name: str, command: str, args: list[str], auth_token: str = "") -> dict:
@@ -5742,18 +6222,35 @@ async def _test_mcp_stdio(name: str, command: str, args: list[str], auth_token: 
         }
         import json as _json
 
+        # 2026-08-07 修复 UI 误导: 之前固定返回 "2026-07-28", 被前端 fallback
+        # 显示成类似"连接时间"的格式, 引发用户误解"为什么时间是 7 月 28 日"
+        # → 改为返回 server 真实名 + 工具数 + 耗时, 前端按"服务器名 · N 工具 · Xms"
+        # 显示, 协议版本号放 detail 字段(默认折叠, 不进主显示)。
+        import time as _time
+
+        t0 = _time.monotonic()
         proc.stdin.write((_json.dumps(payload) + "\n").encode("utf-8"))
         await proc.stdin.drain()
         line = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
+        latency_ms = round((_time.monotonic() - t0) * 1000, 1)
         data = _json.loads(line.decode("utf-8"))
         result = data.get("result", {})
         tools = result.get("tools", [])
+        server_info = result.get("serverInfo", {}) or {}
+        server_name = (
+            server_info.get("name")
+            or result.get("name")
+            or name  # 最后兜底用 server id
+        )
+        server_version = server_info.get("version", "")
         return {
             "ok": True,
-            "server": name,
-            "protocol": "2026-07-28",
-            "server_info": result.get("serverInfo", {}).get("name", ""),
+            "server": server_name,
+            "server_id": name,
+            "server_version": server_version,
             "tools_count": len(tools),
+            "latency_ms": latency_ms,
+            "detail": "stdio MCP 2026-07-28 无状态协议",
         }
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "server": name, "error": f"{type(e).__name__}: {e}"}
