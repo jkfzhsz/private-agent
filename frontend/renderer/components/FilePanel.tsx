@@ -207,8 +207,18 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
             {node.name || "/"}
           </span>
           {node.size != null && node.type === "file" && (
-            <span style={{ fontSize: 10, color: "var(--text-tertiary)", flexShrink: 0 }}>
-              {(node.size / 1024).toFixed(node.size > 10240 ? 0 : 1)}KB
+            <span
+              style={{
+                fontSize: 10,
+                color: "var(--text-tertiary)",
+                flexShrink: 0,
+                marginLeft: 4,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {node.size > 10 * 1024 * 1024
+                ? `${(node.size / 1024 / 1024).toFixed(1)}MB`
+                : `${Math.max(1, Math.round(node.size / 1024))}K`}
             </span>
           )}
         </div>
@@ -232,7 +242,7 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
               width: 300,
               flexShrink: 0,
               borderLeft: "1px solid var(--border)",
-              background: "rgba(255,255,255,0.45)",
+              background: "var(--panel-bg)",
               display: "flex",
               flexDirection: "column",
               minHeight: 0,
@@ -249,20 +259,22 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
           borderBottom: "1px solid var(--border)",
         }}
       >
-        <span style={{ fontSize: 13, fontWeight: 700 }}>📂 工作区文件</span>
-        <div style={{ display: "flex", gap: 4 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+          📂 工作区文件
+        </span>
+        <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
           <button
             onClick={() => void newFolder()}
             title="新建文件夹(到当前选中目录)"
             style={toolBtnStyle}
           >
-            ＋目录
+            ＋
           </button>
           <button onClick={() => void load()} title="刷新" style={toolBtnStyle}>
             ⟳
           </button>
           <button onClick={downloadAllZip} title="打包下载整个工作区(zip)" style={toolBtnStyle}>
-            ⬇zip
+            ⬇
           </button>
           <label title="上传文件(到 uploads/)" style={{ ...toolBtnStyle, cursor: "pointer" }}>
             ↑
@@ -305,31 +317,41 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
               borderBottom: "1px solid var(--border)",
             }}
           >
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {preview.path} {preview.type === "binary" ? `(二进制 ${preview.size ?? 0}B)` : ""}
             </span>
-            {preview.type === "text" && (
-              <button onClick={() => void navigator.clipboard.writeText(preview.content ?? "")} style={toolBtnStyle}>
-                复制
+            <span style={{ display: "flex", gap: 2, flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              {preview.type === "text" && (
+                <button
+                  onClick={() => void navigator.clipboard.writeText(preview.content ?? "")}
+                  style={toolBtnStyle}
+                  title="复制内容"
+                >
+                  ⧉
+                </button>
+              )}
+              <button onClick={() => download(preview.path)} style={toolBtnStyle} title="下载">
+                ⬇
               </button>
-            )}
-            <button onClick={() => download(preview.path)} style={toolBtnStyle}>
-              下载
-            </button>
-            {/\.(zip|tar\.gz|tgz)$/i.test(preview.path) && (
-              <button onClick={() => void extractArchive(preview.path)} style={toolBtnStyle}>
-                解压
+              {/\.(zip|tar\.gz|tgz)$/i.test(preview.path) && (
+                <button onClick={() => void extractArchive(preview.path)} style={toolBtnStyle} title="解压">
+                  ⇪
+                </button>
+              )}
+              <button onClick={() => void rename(preview.path)} style={toolBtnStyle} title="改名">
+                ✎
               </button>
-            )}
-            <button onClick={() => void rename(preview.path)} style={toolBtnStyle}>
-              改名
-            </button>
-            <button onClick={() => void remove(preview.path)} style={{ ...toolBtnStyle, color: "var(--danger-text)" }}>
-              删
-            </button>
-            <button onClick={() => setPreview(null)} style={toolBtnStyle}>
-              ×
-            </button>
+              <button
+                onClick={() => void remove(preview.path)}
+                style={{ ...toolBtnStyle, color: "var(--danger-text)" }}
+                title="删除"
+              >
+                🗑
+              </button>
+              <button onClick={() => setPreview(null)} style={toolBtnStyle} title="关闭">
+                ×
+              </button>
+            </span>
           </div>
           {preview.type === "text" ? (
             <pre
@@ -360,7 +382,7 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
 
 const toolBtnStyle: React.CSSProperties = {
   border: "1px solid var(--border)",
-  background: "rgba(255,255,255,0.6)",
+  background: "var(--panel-bg)",
   color: "var(--text-secondary)",
   borderRadius: 6,
   fontSize: 11,

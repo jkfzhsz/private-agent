@@ -16,7 +16,13 @@ import { checkForUpdates, downloadUpdate, installUpdate } from "./updater";
 // 默认 userData = %APPDATA%\private-agent-frontend, 与后端 _user_env_path()
 // 的 %APPDATA%\Private Agent\backend.env 不一致 → 后端能找到 token, 前端
 // preload 取不到 → 401。setPath 必须在 app.ready 之前调用(此处在文件顶层)。
-if (!process.env.PA_USER_DATA_PATH_OVERRIDE) {
+// 2026-08-09 修复: PA_USER_DATA_PATH_OVERRIDE 语义改为"用它 setPath"而非
+// 跳过 —— 原实现仅跳过 setPath, 导致 userData 回落 Electron 默认
+// (private-agent-frontend), backend.env/日志/上传全部错位(工作区切 D 盘后
+// PG 密码丢失的根因)。
+if (process.env.PA_USER_DATA_PATH_OVERRIDE) {
+  app.setPath("userData", process.env.PA_USER_DATA_PATH_OVERRIDE);
+} else {
   app.setPath("userData", join(app.getPath("appData"), "Private Agent"));
 }
 // 2026-08-06: 注入真实应用版本(preload versions.app 用; 此前从未设置,
@@ -113,9 +119,15 @@ async function bootstrap(): Promise<void> {
     moduleName: config.moduleName,
     port: config.port,
     healthUrl: `http://127.0.0.1:${config.port}/health`,
-    // 注入 WORKSPACE: 后端 config.yaml 的 workspace_root=${WORKSPACE},
-    // 缺失会导致日志/产物目录错位、DB 连接异常
-    env: { WORKSPACE: backendDir },
+    // 注入 WORKSPACE: 后端 config.yaml 的 workspace_root=${PA_USER_DATA}(2026-08-08
+    // 用户数据根), 缺失会导致日志/产物目录错位、DB 连接异常;
+    // 2026-08-08: 打包版 PA_USER_DATA=%APPDATA%/Private Agent(与 backend.env 同目录)
+    // → 技能/壁纸/日志/上传/沙箱落 userData, 程序文件与用户数据彻底分离, 升级不丢;
+    // dev 不设置 PA_USER_DATA → 后端 loader 自动回退 WORKSPACE(历史行为零回归)
+    env: {
+      WORKSPACE: backendDir,
+      ...(app.isPackaged ? { PA_USER_DATA: app.getPath("userData") } : {}),
+    },
     // 工作目录 = backend 目录(相对路径 ./skills ./outputs 据此解析)
     cwd: backendDir,
   });
@@ -189,6 +201,22 @@ app.whenReady().then(() => {
       return { ok: true };
     } catch (e) {
       return { ok: false, error: String(e) };
+    }
+  });
+
+  // 2026-08-08: 工作区目录选择(画地为牢) —— 渲染进程调起原生目录选择器,
+  // 返回选中目录绝对路径(取消返回 null)
+  ipcMain.handle("app:pick-directory", async () => {
+    try {
+      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+      const result = await dialog.showOpenDialog(win ?? undefined!, {
+        title: "选择工作区目录",
+        properties: ["openDirectory", "createDirectory"],
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      return result.filePaths[0];
+    } catch {
+      return null;
     }
   });
 

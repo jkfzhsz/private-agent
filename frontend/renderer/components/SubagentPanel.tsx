@@ -154,7 +154,7 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
         margin: "10px 4px 14px",
         padding: "10px 12px",
         borderRadius: 14,
-        background: "rgba(255,255,255,0.7)",
+        background: "var(--panel-bg)",
         border: "1px solid rgba(148,163,184,0.25)",
         boxShadow: "0 4px 16px rgba(148,163,184,0.12)",
       }}
@@ -180,7 +180,7 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
             onClick={onClearFinished}
             style={{
               fontSize: 11, padding: "2px 8px", borderRadius: 6,
-              border: "1px solid #cbd5e1", background: "#fff", cursor: "pointer",
+              border: "1px solid #cbd5e1", background: "var(--panel-bg-solid)", cursor: "pointer",
               color: "#64748b",
             }}
             title="清除已完成的子任务卡片"
@@ -212,7 +212,7 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
               border: s.stalled
                 ? "1px solid #fbbf24"
                 : "1px solid rgba(148,163,184,0.3)",
-              background: s.stalled ? "#fffbeb" : "#f8fafc",
+              background: s.stalled ? "var(--confirmation-bg)" : "var(--code-bg)",
               padding: "8px 10px",
               marginBottom: 6,
             }}
@@ -276,10 +276,10 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
                     style={{
                       maxHeight: 160,
                       overflowY: "auto",
-                      border: "1px solid #e2e8f0",
+                      border: "1px solid var(--border-color)",
                       borderRadius: 8,
                       padding: 6,
-                      background: "#fff",
+                      background: "var(--panel-bg-solid)",
                       marginBottom: 6,
                       fontFamily:
                         'ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace',
@@ -313,7 +313,7 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
                 {s.status === "succeeded" && s.result && (
                   <div
                     style={{
-                      background: "#ecfdf5",
+                      background: "var(--tool-result-bg)",
                       border: "1px solid #a7f3d0",
                       borderRadius: 8,
                       padding: 6,
@@ -329,11 +329,11 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
                 {(s.status === "failed" || s.status === "cancelled") && s.error && (
                   <div
                     style={{
-                      background: "#fef2f2",
-                      border: "1px solid #fecaca",
+                      background: "var(--error-bg)",
+                      border: "1px solid var(--border-color)",
                       borderRadius: 8,
                       padding: 6,
-                      color: "#991b1b",
+                      color: "var(--danger-text)",
                     }}
                   >
                     {s.error}
@@ -381,10 +381,10 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
       style={{
         maxHeight: 320,
         overflowY: "auto",
-        border: "1px solid #e2e8f0",
+        border: "1px solid var(--border-color)",
         borderRadius: 8,
         padding: 6,
-        background: "#fff",
+        background: "var(--panel-bg-solid)",
         marginBottom: 6,
       }}
     >
@@ -415,7 +415,7 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
               <span
                 style={{
                   fontSize: 10, padding: "1px 6px", borderRadius: 6,
-                  background: "#eef2ff", color: "#4f46e5", fontWeight: 600,
+                  background: "var(--tool-call-bg)", color: "#4f46e5", fontWeight: 600,
                 }}
               >
                 第 {turn} 轮
@@ -425,8 +425,8 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
                   onClick={() => toggleThinking(turn)}
                   style={{
                     fontSize: 11, color: "#64748b", cursor: "pointer",
-                    padding: "1px 6px", borderRadius: 6, background: "#f8fafc",
-                    border: "1px solid #e2e8f0",
+                    padding: "1px 6px", borderRadius: 6, background: "var(--code-bg)",
+                    border: "1px solid var(--border-color)",
                   }}
                 >
                   💭 思考链 {isOpenT ? "▾" : "▸"}
@@ -441,8 +441,8 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
             {isOpenT && thinkingText && (
               <div
                 style={{
-                  fontSize: 11, color: "#64748b", background: "#f8fafc",
-                  border: "1px solid #e2e8f0", borderRadius: 6, padding: 6,
+                  fontSize: 11, color: "#64748b", background: "var(--code-bg)",
+                  border: "1px solid var(--border-color)", borderRadius: 6, padding: 6,
                   marginBottom: 4, whiteSpace: "pre-wrap", maxHeight: 160,
                   overflowY: "auto",
                 }}
@@ -458,7 +458,7 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
                 style={{
                   fontSize: 12, color: "#334155", whiteSpace: "pre-wrap",
                   padding: "4px 6px", borderLeft: "3px solid #6366f1",
-                  background: "#f5f3ff", borderRadius: 4, marginTop: 2,
+                  background: "var(--accent-soft-bg)", borderRadius: 4, marginTop: 2,
                 }}
               >
                 {finalText}
@@ -467,8 +467,8 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
             {errorEv && (
               <div
                 style={{
-                  fontSize: 11, color: "#b91c1c", background: "#fef2f2",
-                  border: "1px solid #fecaca", borderRadius: 6, padding: 6,
+                  fontSize: 11, color: "var(--danger-text)", background: "var(--error-bg)",
+                  border: "1px solid var(--border-color)", borderRadius: 6, padding: 6,
                   marginTop: 2,
                 }}
               >
@@ -497,16 +497,16 @@ function ToolFlowRow({ ev }: { ev: SubagentFlowEvent }): JSX.Element | null {
         onClick={() => setOpen(!open)}
         style={{
           fontSize: 11, padding: "3px 6px", cursor: "pointer",
-          borderLeft: "3px solid #3b82f6", background: "#eff6ff",
+          borderLeft: "3px solid #3b82f6", background: "var(--tool-call-bg)",
           borderRadius: 4, marginBottom: 2,
         }}
       >
-        <span style={{ color: "#1d4ed8", fontWeight: 600 }}>🔧 {String(p.tool_name ?? "")}</span>
+        <span style={{ color: "var(--accent-soft-text)", fontWeight: 600 }}>🔧 {String(p.tool_name ?? "")}</span>
         {open && argsText && (
           <pre
             style={{
               margin: "4px 0 0", fontSize: 10, color: "#475569",
-              background: "#fff", padding: 4, borderRadius: 4,
+              background: "var(--panel-bg-solid)", padding: 4, borderRadius: 4,
               whiteSpace: "pre-wrap", overflowX: "auto",
             }}
           >
@@ -523,12 +523,12 @@ function ToolFlowRow({ ev }: { ev: SubagentFlowEvent }): JSX.Element | null {
       <div
         style={{
           fontSize: 11, padding: "3px 6px",
-          borderLeft: "3px solid #10b981", background: "#f0fdf4",
+          borderLeft: "3px solid #10b981", background: "var(--success-bg)",
           borderRadius: 4, marginBottom: 2, whiteSpace: "pre-wrap",
         }}
       >
         {err ? (
-          <span style={{ color: "#b91c1c" }}>❌ {err.slice(0, 400)}</span>
+          <span style={{ color: "var(--danger-text)" }}>❌ {err.slice(0, 400)}</span>
         ) : (
           <span style={{ color: "#047857" }}>
             ✅ {out.length > 500 ? `${out.slice(0, 500)}…` : out}

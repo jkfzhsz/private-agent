@@ -11,6 +11,36 @@
   --glass-border: rgba(255, 255, 255, 0.7);
   --glass-shadow: 0 8px 32px rgba(148, 163, 184, 0.15);
 
+  /* 面板/卡片/输入区 surface 变量(2026-08-08): 统一硬编码背景, 便于暗色覆盖 */
+  --panel-bg: rgba(255, 255, 255, 0.55);
+  --panel-bg-hover: rgba(255, 255, 255, 0.8);
+  --panel-bg-solid: #ffffff;
+  --input-bg: rgba(255, 255, 255, 0.6);
+  --input-bg-focus: rgba(255, 255, 255, 0.85);
+  --button-ghost-bg: rgba(255, 255, 255, 0.5);
+  --button-ghost-bg-hover: rgba(255, 255, 255, 0.8);
+  --chip-bg: #f3f4f6;
+  --chat-user-bg: #dbeafe;
+  --chat-ai-bg: rgba(255, 255, 255, 0.85);
+  --chat-ai-border: rgba(148, 163, 184, 0.25);
+  --tool-call-bg: rgba(238, 242, 255, 0.8);
+  --tool-result-bg: rgba(236, 253, 245, 0.8);
+  --confirmation-bg: #fffbeb;
+  --error-bg: #ffebee;
+  --success-bg: #e8f5e9;
+  --warning-bg: #fff8e1;
+  --warning-border: #ffcc80;
+  --warning-text: #7a4f01;
+  --border-color: rgba(148, 163, 184, 0.25);
+  --border-strong: #ddd;
+  --surface-1: #f9fafb;
+  --surface-2: #f3f4f6;
+  --accent-soft-bg: #f5f3ff;
+  --accent-soft-text: #5b21b6;
+  --code-bg: #f8fafc;
+  /* 彩色按钮/渐变上的文字色(两种主题均为白) */
+  --on-accent: #ffffff;
+
   /* 圆角 */
   --radius-lg: 24px;
   --radius-md: 16px;
@@ -129,14 +159,17 @@
   font-family: var(--font-sans);
 }
 .nav-item:hover {
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--panel-bg-hover);
   color: var(--text-primary);
 }
 .nav-item.active {
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--panel-bg-hover);
   color: #7c3aed;
   font-weight: 600;
   box-shadow: 0 2px 8px rgba(139, 92, 246, 0.1);
+}
+[data-theme="dark"] .nav-item.active {
+  color: #a78bfa;
 }
 .nav-item.active::before {
   content: "";
@@ -152,8 +185,8 @@
 .flow-input {
   padding: 10px 16px;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--border-color);
+  background: var(--input-bg);
   font-family: var(--font-sans);
   font-size: 14px;
   color: var(--text-primary);
@@ -162,7 +195,7 @@
 }
 .flow-input:focus {
   border-color: #a78bfa;
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--input-bg-focus);
   box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.1);
 }
 
@@ -170,8 +203,8 @@
 .btn-ghost {
   padding: 8px 14px;
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid rgba(148, 163, 184, 0.15);
+  background: var(--button-ghost-bg);
+  border: 1px solid var(--border-color);
   color: var(--text-primary);
   font-size: 13px;
   font-weight: 500;
@@ -180,7 +213,7 @@
   transition: all 0.25s var(--transition-smooth);
 }
 .btn-ghost:hover {
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--button-ghost-bg-hover);
   border-color: rgba(148, 163, 184, 0.3);
 }
 .btn-primary {
@@ -268,16 +301,44 @@ body,
   --text-primary: #f1f5f9;
   --text-secondary: #cbd5e1;
   --text-tertiary: #94a3b8;
-  --glass-bg: rgba(51, 65, 85, 0.85);
-  --glass-border: rgba(203, 213, 225, 0.25);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --glass-bg: rgba(30, 41, 59, 0.72);
+  --glass-border: rgba(148, 163, 184, 0.18);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   --neutral-bg: rgba(51, 65, 85, 0.7);
   --neutral-text: #cbd5e1;
   --success-bg: rgba(5, 150, 105, 0.28);
   --success-text: #6ee7b7;
   --warning-bg: rgba(217, 119, 6, 0.28);
+  --warning-border: rgba(217, 119, 6, 0.6);
   --warning-text: #fcd34d;
   --danger-text: #fca5a5;
+
+  /* 2026-08-08: 暗色 surface 变量 */
+  --panel-bg: rgba(30, 41, 59, 0.65);
+  --panel-bg-hover: rgba(51, 65, 85, 0.85);
+  --panel-bg-solid: rgba(30, 41, 59, 0.95);
+  --input-bg: rgba(15, 23, 42, 0.6);
+  --input-bg-focus: rgba(15, 23, 42, 0.9);
+  --button-ghost-bg: rgba(30, 41, 59, 0.6);
+  --button-ghost-bg-hover: rgba(51, 65, 85, 0.9);
+  --chip-bg: rgba(51, 65, 85, 0.7);
+  --chat-user-bg: rgba(30, 64, 175, 0.45);
+  --chat-ai-bg: rgba(15, 23, 42, 0.55);
+  --chat-ai-border: rgba(148, 163, 184, 0.18);
+  --tool-call-bg: rgba(49, 46, 129, 0.45);
+  --tool-result-bg: rgba(6, 78, 59, 0.35);
+  --confirmation-bg: rgba(120, 53, 15, 0.45);
+  --error-bg: rgba(127, 29, 29, 0.35);
+  --border-color: rgba(148, 163, 184, 0.2);
+  --border-strong: rgba(148, 163, 184, 0.3);
+  --surface-1: rgba(30, 41, 59, 0.7);
+  --surface-2: rgba(51, 65, 85, 0.7);
+  --accent-soft-bg: rgba(91, 33, 182, 0.35);
+  --accent-soft-text: #c4b5fd;
+  --code-bg: rgba(15, 23, 42, 0.7);
+  --on-accent: #ffffff;
+  --info-bg: rgba(5, 150, 105, 0.28);
+  --info-text: #6ee7b7;
 }
 
 [data-theme="dark"] .glass-panel,
@@ -299,6 +360,7 @@ body,
 [data-theme="dark"] .flow-input {
   background: rgba(30, 41, 59, 0.6);
   border-color: rgba(148, 163, 184, 0.2);
+  color: var(--text-primary);
 }
 [data-theme="dark"] .flow-input:focus {
   background: rgba(30, 41, 59, 0.85);
@@ -306,10 +368,296 @@ body,
 [data-theme="dark"] .btn-ghost {
   background: rgba(51, 65, 85, 0.5);
   border-color: rgba(148, 163, 184, 0.2);
+  color: var(--text-primary);
 }
 [data-theme="dark"] .btn-ghost:hover {
   background: rgba(51, 65, 85, 0.8);
 }
 [data-theme="dark"] ::-webkit-scrollbar-thumb {
   background: rgba(100, 116, 139, 0.35);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-08 暗色兜底(仅元素级选择器)
+ *
+ * 重要: 不要用 [style*="#fff"] 之类的属性选择器覆盖 React 内联样式。
+ * React 通过 JS 赋值 element.style.*, 浏览器把 style 属性序列化为
+ * "background-color: rgb(255, 255, 255);", 与 JSX 源码里的 "#ffffff"
+ * 字面量完全不匹配 —— 这类选择器永远不会命中(曾误以为已修复)。
+ * 正确做法: 组件内联样式一律改用 var(--*) 语义变量。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* 输入框/textarea 统一 */
+[data-theme="dark"] input,
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+  background: var(--input-bg) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-color) !important;
+}
+[data-theme="dark"] input:focus,
+[data-theme="dark"] textarea:focus,
+[data-theme="dark"] select:focus {
+  background: var(--input-bg-focus) !important;
+}
+
+/* 设置页、记忆页、知识库页等玻璃面板内输入控件兜底 */
+[data-theme="dark"] .glass-panel input,
+[data-theme="dark"] .glass-panel textarea,
+[data-theme="dark"] .glass-panel select,
+[data-theme="dark"] .glass-sidebar input,
+[data-theme="dark"] .glass-sidebar textarea,
+[data-theme="dark"] .glass-sidebar select {
+  background: var(--input-bg) !important;
+}
+
+/* 图片/视频背景保持不受影响(首页壁纸、预览图) */
+[data-theme="dark"] img,
+[data-theme="dark"] video {
+  background: transparent !important;
+}
+
+/* 代码块/预格式文本: 暗色下保持深底浅字 */
+[data-theme="dark"] pre,
+[data-theme="dark"] code {
+  background: rgba(15, 23, 42, 0.7);
+  color: var(--text-primary);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-08 壁纸主题切换交叉淡化 keyframes
+ *
+ * 不用 transition 而用 animation 的原因: 本地图片加载极快时, opacity:0
+ * 的初始帧可能从未被浏览器绘制, transition 无起点 → 淡入不生效(曾现"切换
+ * 闪一下")。animation 在元素挂载时即播放, 不依赖绘制历史, 效果确定。
+ * 用法: 新背景 img/video 加 key={src} + animation: wp-fade-in;
+ *       旧背景层挂载时自动播 wp-fade-out, onAnimationEnd 后卸载。
+ * ══════════════════════════════════════════════════════════════════════ */
+@keyframes wp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes wp-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-10 设置中心重构: 左侧分组导航 + 顶部栏 + 内容区按页切换
+ * 旧版全部设置单页堆叠(3757 行), 新版按「偏好/AI 能力/安全与数据/系统」
+ * 分组导航。全部走 var(--*) 语义变量, 暗色主题自动生效。
+ * ══════════════════════════════════════════════════════════════════════ */
+.settings-layout {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  /* 2026-08-10: 水平空隙统一由 App 渲染容器中间区 margin:"0 12px" 提供
+     (与首页/对话/知识库等所有视图一致), 此处仅保留垂直 padding ——
+     避免 12(App margin)+12(本 padding) 叠加成 24px, 导致设置页左右
+     空隙与主界面不一致 */
+  padding: 12px 0;
+  overflow: hidden;
+}
+
+/* 侧边栏(毛玻璃, 同 glass-sidebar 质感) */
+.settings-sidebar {
+  width: 224px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: 16px 10px 10px;
+}
+
+/* 品牌区 */
+.settings-brand {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px 8px;
+}
+.settings-brand-logo {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--gradient-logo);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  box-shadow: 0 4px 14px rgba(139, 92, 246, 0.25);
+}
+.settings-version-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: rgba(129, 140, 248, 0.12);
+  color: #7c3aed;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 8px;
+}
+[data-theme="dark"] .settings-version-badge {
+  color: #a78bfa;
+  background: rgba(129, 140, 248, 0.18);
+}
+
+/* 导航分组标签 */
+.settings-nav-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  padding: 10px 12px 4px;
+}
+
+/* 导航滚动区 */
+.settings-nav-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 侧边栏底部状态卡 */
+.settings-sidebar-foot {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  border: 1px solid var(--glass-border);
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* 右侧内容列 */
+.settings-content-col {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 顶部栏(毛玻璃) */
+.settings-topbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: 16px 24px;
+}
+.settings-breadcrumb {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.settings-page-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  line-height: 26px;
+}
+.settings-search {
+  width: 200px;
+  flex-shrink: 0;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--input-bg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+  transition: all 0.25s var(--transition-smooth);
+}
+.settings-search:focus {
+  border-color: #a78bfa;
+  background: var(--input-bg-focus);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.1);
+}
+.settings-search::placeholder {
+  color: var(--text-tertiary);
+}
+
+/* 内容页滚动区(页面保留挂载, display 切换, 状态不丢) */
+.settings-pages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 暗色: 侧边栏/顶部栏阴影与玻璃统一 */
+[data-theme="dark"] .settings-sidebar,
+[data-theme="dark"] .settings-topbar {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 8px 32px rgba(0, 0, 0, 0.35);
+}
+[data-theme="dark"] .settings-sidebar-foot {
+  background: var(--panel-bg-hover);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-08 主题切换淡入淡出(整页 cross-fade)
+ *
+ * 用 View Transitions API(document.startViewTransition + flushSync)在
+ * data-theme 切换时对整个 root 做交叉淡化。默认 250ms, 这里调到 380ms
+ * 让亮↔暗过渡更柔和。缓动用 --transition-smooth 与其他动画一致。
+ *
+ * 不用为每个 var(--*) 加 transition 的原因: 内联样式无法被 CSS 选择器
+ * 覆盖(React JS 序列化为 rgb()); 改 transition 也无法覆盖内联色。
+ * View Transition 走浏览器截图层, 一次解决所有元素平滑过渡。
+ * ══════════════════════════════════════════════════════════════════════ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.38s;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
 }

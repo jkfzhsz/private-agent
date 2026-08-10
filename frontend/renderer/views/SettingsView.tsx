@@ -12,6 +12,7 @@ interface ProviderInfo {
   enabled: boolean;
   model_name: string | null;
   base_url: string | null;
+  multimodal: boolean;
   api_key_configured: boolean;
   // V1.4-8.2: 分组元数据
   group?: string | null;
@@ -34,12 +35,268 @@ interface McpServer {
   env?: Record<string, string>;
 }
 
-export default function SettingsView({ sessionId = 1 }: { sessionId?: number }): JSX.Element {
+// 2026-08-08: 设置页分区折叠(模型/MCP/技能内容多, 默认收起避免页面过长;
+// 标题栏显示统计数, 点击标题或按钮展开/收起)
+function CollapsibleSection({
+  title,
+  subtitle,
+  count,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  count?: number;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}): JSX.Element {
+  const [open, setOpen] = useState(defaultOpen);
+  const toggle = (): void => setOpen((o) => !o);
+  return (
+    <div className="glass-panel animate-in" style={{ padding: "20px 24px" }}>
+      <div
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          cursor: "pointer", gap: 12,
+        }}
+        onClick={toggle}
+      >
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+            {title}
+            {count !== undefined && (
+              <span style={{ fontSize: 12, color: "var(--text-tertiary)", marginLeft: 8 }}>({count})</span>
+            )}
+          </div>
+          {subtitle && (
+            <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{subtitle}</div>
+          )}
+        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            toggle();
+          }}
+          title={open ? "收起" : "展开"}
+          style={{
+            fontSize: 12, padding: "4px 10px", borderRadius: 10, cursor: "pointer", flexShrink: 0,
+            border: "1px solid var(--border-strong)", background: "var(--button-ghost-bg)",
+            color: "var(--text-primary)",
+          }}
+        >
+          {open ? "收起 ▲" : "展开 ▼"}
+        </button>
+      </div>
+      {open && <div style={{ marginTop: 16 }}>{children}</div>}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 0.5.0 P4: 智能体名称配置卡 —— 主智能体 + 三场景智能体名称统一管理
+// 主智能体: PUT /admin/agent-profile (display_name)
+// 场景智能体: PUT /admin/skills/{name}/meta (display_name, 标识符不变)
+// ──────────────────────────────────────────────────────────────────────────────
+
+const AGENT_NAME_ROWS = [
+  { key: "main", label: "主智能体", sub: "系统监控与全局对话" },
+  { key: "office", label: "场景 · 工作学习", sub: "office (子瞻)" },
+  { key: "data_analysis", label: "场景 · 投资理财", sub: "data_analysis (白圭)" },
+  { key: "frontend_design", label: "场景 · 生活美学", sub: "frontend_design (清和)" },
+];
+
+function AgentNameSection(): JSX.Element {
+  const [mainName, setMainName] = useState<string>("私人智能体");
+  const [sceneNames, setSceneNames] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    try {
+      const [profResp, skillsResp] = await Promise.all([
+        adminFetch(`${API_BASE}/agent-profile`),
+        adminFetch(`${API_BASE}/skills`),
+      ]);
+      if (profResp.ok) {
+        const p = await profResp.json();
+        if (typeof p.display_name === "string" && p.display_name.trim()) {
+          setMainName(p.display_name.trim());
+        }
+      }
+      if (skillsResp.ok) {
+        const list = await skillsResp.json();
+        const names: Record<string, string> = {};
+        for (const s of list ?? []) {
+          if (typeof s.name === "string" && s.display_name) {
+            names[s.name] = s.display_name;
+          }
+        }
+        setSceneNames(names);
+      }
+    } catch {
+      /* 读取失败保留默认 */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const saveMain = async (): Promise<void> => {
+    const trimmed = mainName.trim();
+    try {
+      const resp = await adminFetch(`${API_BASE}/agent-profile`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: trimmed }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setMsg("主智能体名称已保存(全局对话/问候生效)");
+    } catch (e) {
+      setMsg(`保存失败: ${String(e)}`);
+    }
+  };
+
+  const saveScene = async (name: string, value: string): Promise<void> => {
+    const trimmed = value.trim();
+    try {
+      const resp = await adminFetch(`${API_BASE}/skills/${name}/meta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: trimmed }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setSceneNames((prev) => ({ ...prev, [name]: trimmed }));
+      setMsg(`「${AGENT_NAME_ROWS.find((r) => r.key === name)?.label ?? name}」名称已保存`);
+    } catch (e) {
+      setMsg(`保存失败: ${String(e)}`);
+    }
+  };
+
+  return (
+    <CollapsibleSection
+      title="智能体名称配置"
+      subtitle="主智能体 + 三场景智能体名称统一管理(标识符不变, 仅显示名)"
+      count={4}
+    >
+      {loading ? (
+        <div style={{ fontSize: 13, color: "var(--text-tertiary)" }}>加载中…</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {AGENT_NAME_ROWS.map((row) => {
+            const isMain = row.key === "main";
+            const value = isMain ? mainName : (sceneNames[row.key] ?? row.sub.split(" (")[0]);
+            return (
+              <div key={row.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 130, flexShrink: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{row.label}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{row.sub}</div>
+                </div>
+                <input
+                  value={value}
+                  onChange={(e) => {
+                    if (isMain) setMainName(e.target.value);
+                    else setSceneNames((prev) => ({ ...prev, [row.key]: e.target.value }));
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: "1px solid rgba(148,163,184,0.3)",
+                    fontSize: 12,
+                    background: "var(--panel-bg)",
+                  }}
+                />
+                <button
+                  onClick={() => (isMain ? void saveMain() : void saveScene(row.key, value))}
+                  style={{
+                    fontSize: 12,
+                    padding: "6px 14px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border-strong)",
+                    background: "var(--button-ghost-bg)",
+                    color: "var(--text-primary)",
+                    cursor: "pointer",
+                  }}
+                >
+                  保存
+                </button>
+              </div>
+            );
+          })}
+          {msg && (
+            <div style={{ fontSize: 12, color: msg.startsWith("保存失败") ? "#dc2626" : "#059669" }}>
+              {msg}
+            </div>
+          )}
+        </div>
+      )}
+    </CollapsibleSection>
+  );
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 2026-08-10 设置中心重构: 左侧分组导航 + 顶部栏 + 内容区按页切换
+// 旧版全部设置单页堆叠; 新版按「偏好 / AI 能力 / 安全与数据 / 系统」分组。
+// 所有分区组件原样保留(独立状态), 页面全部挂载 + display 切换, 切换不丢状态。
+// 导航项只登记真实存在的分区(通知暂未实现故不列入)。
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface SettingsNavItem {
+  key: string;
+  label: string;
+  icon: string;
+}
+
+interface SettingsNavGroup {
+  label: string;
+  items: SettingsNavItem[];
+}
+
+const SETTINGS_NAV_GROUPS: SettingsNavGroup[] = [
+  {
+    label: "偏好",
+    items: [{ key: "general", label: "通用设置", icon: "🎨" }],
+  },
+  {
+    label: "AI 能力",
+    items: [
+      { key: "models", label: "模型服务", icon: "🧠" },
+      { key: "agents", label: "智能体与人格", icon: "🤖" },
+      { key: "mcp", label: "工具与 MCP", icon: "🔌" },
+      { key: "skills", label: "技能 Skills", icon: "🧩" },
+    ],
+  },
+  {
+    label: "安全与数据",
+    items: [
+      { key: "security", label: "权限与安全", icon: "🛡️" },
+      { key: "sandbox", label: "沙箱与钩子", icon: "🧪" },
+      { key: "data", label: "数据管理", icon: "🗄️" },
+    ],
+  },
+  {
+    label: "系统",
+    items: [
+      { key: "system", label: "系统设置", icon: "⚙️" },
+      { key: "about", label: "关于与更新", icon: "ℹ️" },
+    ],
+  },
+];
+
+export default function SettingsView({ sessionId = 1, theme }: { sessionId?: number; theme?: "light" | "dark" }): JSX.Element {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [fallbackChain, setFallbackChain] = useState<string[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [protocol, setProtocol] = useState("");
   const [error, setError] = useState("");
+  // 2026-08-10: 设置中心导航状态(当前页 + 顶部栏搜索词)
+  const [activeKey, setActiveKey] = useState<string>("models");
+  const [navQuery, setNavQuery] = useState("");
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -76,105 +333,261 @@ export default function SettingsView({ sessionId = 1 }: { sessionId?: number }):
     }
   };
 
-  return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
-      <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
-        <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
-          模型提供商
-        </div>
-        <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
-          可新增/编辑/删除模型(任意 OpenAI 兼容服务) · 编辑可配置参数上限(输入/输出/轮次) · 降级链: {fallbackChain.join(" → ") || "—"}
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {/* V1.4-8.2: 按 group 分组 + sort_order 排序渲染 */}
-          {(() => {
-            const groups = new Map<string, ProviderInfo[]>();
-            for (const p of [...providers].sort(
-              (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)
-            )) {
-              const g = (p.group || "").trim() || "未分组";
-              if (!groups.has(g)) groups.set(g, []);
-              groups.get(g)!.push(p);
-            }
-            return Array.from(groups.entries()).map(([gname, list]) => (
-              <div key={gname}>
-                <div
-                  style={{
-                    fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)",
-                    margin: "8px 0 6px", letterSpacing: "0.02em",
-                  }}
-                >
-                  {gname} ({list.length})
+  // 各导航页内容(全部保留挂载, 用 display 切换以保留表单状态)
+  const pages: Record<string, { title: string; subtitle: string; node: JSX.Element }> = {
+    general: {
+      title: "通用设置",
+      subtitle: "外观、主题与壁纸",
+      node: <WallpaperSection theme={theme} />,
+    },
+    models: {
+      title: "模型服务",
+      subtitle: "模型服务商管理、降级链与会话模型",
+      node: (
+        <CollapsibleSection
+          title="模型提供商"
+          subtitle="可新增/编辑/删除模型(任意 OpenAI 兼容服务) · 编辑可配置参数上限(输入/输出/轮次)"
+          count={providers.length}
+        >
+          {/* 降级链编辑器: 可拖拽排序 / 增删 */}
+          {providers.length > 0 && (
+            <FallbackChainEditor
+              providers={providers}
+              chain={fallbackChain}
+              onUpdated={load}
+            />
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* V1.4-8.2: 按 group 分组 + sort_order 排序渲染 */}
+            {(() => {
+              const groups = new Map<string, ProviderInfo[]>();
+              for (const p of [...providers].sort(
+                (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)
+              )) {
+                const g = (p.group || "").trim() || "未分组";
+                if (!groups.has(g)) groups.set(g, []);
+                groups.get(g)!.push(p);
+              }
+              return Array.from(groups.entries()).map(([gname, list]) => (
+                <div key={gname}>
+                  <div
+                    style={{
+                      fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)",
+                      margin: "8px 0 6px", letterSpacing: "0.02em",
+                    }}
+                  >
+                    {gname} ({list.length})
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {list.map((p) => (
+                      <ProviderRow key={p.name} provider={p} onSaved={load} onDelete={handleDeleteProvider} />
+                    ))}
+                  </div>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {list.map((p) => (
-                    <ProviderRow key={p.name} provider={p} onSaved={load} onDelete={handleDeleteProvider} />
-                  ))}
-                </div>
+              ));
+            })()}
+            {providers.length === 0 && (
+              <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
+                ⚠️ 尚未配置任何模型。<b>在下方向"添加模型"填入你的模型服务即可开始对话</b>
+                (任意 OpenAI 兼容服务: 名称 + Base URL + 模型名 + API Key)
               </div>
-            ));
-          })()}
-          {providers.length === 0 && (
-            <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
-              ⚠️ 尚未配置任何模型。<b>在下方向"添加模型"填入你的模型服务即可开始对话</b>
-              (任意 OpenAI 兼容服务: 名称 + Base URL + 模型名 + API Key)
+            )}
+            <ProviderAddForm onAdded={load} />
+          </div>
+        </CollapsibleSection>
+      ),
+    },
+    agents: {
+      title: "智能体与人格",
+      subtitle: "主智能体与三场景智能体命名统一管理",
+      node: <AgentNameSection />,
+    },
+    mcp: {
+      title: "工具与 MCP",
+      subtitle: `协议版本: ${protocol || "—"} · 可新增/删除/测试连通性(改动重启后端后生效)`,
+      node: (
+        <CollapsibleSection
+          title="MCP 服务"
+          subtitle={`协议版本: ${protocol || "—"} · 可新增/删除/测试连通性(改动重启后端后生效)`}
+          count={mcpServers.length}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {mcpServers.map((s) => (
+              <McpRow key={s.id} server={s} onChange={load} />
+            ))}
+            {mcpServers.length === 0 && (
+              <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
+                当前未配置 MCP server
+              </div>
+            )}
+            <McpAddForm onAdded={load} />
+          </div>
+        </CollapsibleSection>
+      ),
+    },
+    skills: {
+      title: "技能 Skills",
+      subtitle: "技能列表与上传新技能",
+      node: <SkillsSection />,
+    },
+    security: {
+      title: "权限与安全",
+      subtitle: "控制面鉴权 token 与会话权限模式",
+      node: (
+        <>
+          {/* 阶段二批次 1: admin 鉴权 token 管理 */}
+          <SecuritySection />
+          {/* 阶段三批次 1(T1.2): 会话级权限模式切换(使用当前会话 id) */}
+          <PermissionModeSection sessionId={sessionId} />
+        </>
+      ),
+    },
+    sandbox: {
+      title: "沙箱与钩子",
+      subtitle: "沙箱执行环境与工作流自动化钩子",
+      node: (
+        <>
+          {/* §6.14 [MVP] 沙箱配置管理 UI */}
+          <SandboxSection />
+          {/* V1.3-7.2 工作流自动化: Hooks 配置 */}
+          <HooksSection />
+        </>
+      ),
+    },
+    data: {
+      title: "数据管理",
+      subtitle: "数据库连接配置与备份/还原/导出",
+      node: (
+        <>
+          {/* 2026-08-06: 数据库连接配置(打包版首次使用必配; 密码仅存本地 .env) */}
+          <DatabaseSection />
+          {/* V1.4-8.1 数据管理: 备份/还原/批量导出 */}
+          <DataSection />
+        </>
+      ),
+    },
+    system: {
+      title: "系统设置",
+      subtitle: "日志、代理、缓存与 master key",
+      node: <SystemSection />,
+    },
+    about: {
+      title: "关于与更新",
+      subtitle: "版本信息与更新检查",
+      node: <UpdateSection />,
+    },
+  };
+
+  // 顶部栏搜索: 过滤侧边栏导航项(Enter 直达首个匹配页)
+  const q = navQuery.trim().toLowerCase();
+  const filteredGroups = q
+    ? SETTINGS_NAV_GROUPS.map((g) => ({
+        ...g,
+        items: g.items.filter((it) => it.label.toLowerCase().includes(q)),
+      })).filter((g) => g.items.length > 0)
+    : SETTINGS_NAV_GROUPS;
+  const firstMatch = filteredGroups[0]?.items[0];
+
+  const activePage = pages[activeKey] ?? pages.models;
+
+  return (
+    <div className="settings-layout">
+      {/* 左侧分组导航 */}
+      <div className="settings-sidebar">
+        <div className="settings-brand">
+          <div className="settings-brand-logo">PA</div>
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+            <div
+              style={{
+                fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em",
+                color: "var(--text-primary)", whiteSpace: "nowrap",
+                overflow: "hidden", textOverflow: "ellipsis",
+              }}
+            >
+              Private Agent
             </div>
-          )}
-          <ProviderAddForm onAdded={load} />
+            <div className="settings-version-badge" style={{ alignSelf: "flex-start" }}>
+              v{window.pa?.versions?.app || "0.5.1"}
+            </div>
+          </div>
         </div>
-      </div>
 
-      {/* 2026-08-06: 数据库连接配置(打包版首次使用必配; 密码仅存本地 .env) */}
-      <DatabaseSection />
-
-      <div className="glass-panel animate-in delay-2" style={{ padding: "20px 24px" }}>
-        <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
-          MCP 服务
-        </div>
-        <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
-          协议版本: {protocol || "—"} · 可新增/删除/测试连通性(改动重启后端后生效)
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {mcpServers.map((s) => (
-            <McpRow key={s.id} server={s} onChange={load} />
+        <div className="settings-nav-scroll">
+          {filteredGroups.map((group) => (
+            <div key={group.label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div className="settings-nav-group-label">{group.label}</div>
+              {group.items.map((item) => (
+                <button
+                  key={item.key}
+                  className={`nav-item${activeKey === item.key ? " active" : ""}`}
+                  onClick={() => setActiveKey(item.key)}
+                  title={item.label}
+                >
+                  <span style={{ width: 20, flexShrink: 0, textAlign: "center", fontSize: 14 }}>{item.icon}</span>
+                  <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {item.label}
+                  </span>
+                </button>
+              ))}
+            </div>
           ))}
-          {mcpServers.length === 0 && (
-            <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "16px 0", textAlign: "center" }}>
-              当前未配置 MCP server
+          {filteredGroups.length === 0 && (
+            <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: "10px 12px" }}>
+              无匹配设置项
             </div>
           )}
-          <McpAddForm onAdded={load} />
+        </div>
+
+        <div className="settings-sidebar-foot">
+          <span>🔌 后端 {API_BASE}</span>
+          <span>模式 · 本地运行</span>
         </div>
       </div>
 
-      {/* §6.14 [MVP] 沙箱配置管理 UI */}
-      <SandboxSection />
+      {/* 右侧: 顶部栏 + 内容区 */}
+      <div className="settings-content-col">
+        <div className="settings-topbar">
+          <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+            <div className="settings-breadcrumb">
+              <span>设置</span>
+              <span style={{ color: "var(--text-tertiary)" }}>/</span>
+              <span style={{ color: "var(--text-secondary)" }}>{activePage.title}</span>
+            </div>
+            <div className="settings-page-title">{activePage.title}</div>
+            <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{activePage.subtitle}</div>
+          </div>
+          <input
+            className="settings-search"
+            placeholder="搜索设置项…"
+            value={navQuery}
+            onChange={(e) => setNavQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && firstMatch) setActiveKey(firstMatch.key);
+            }}
+          />
+        </div>
 
-      {error && <div style={{ fontSize: 12, color: "var(--danger-text)" }}>加载失败: {error}</div>}
+        {error && (
+          <div style={{ fontSize: 12, color: "var(--danger-text)", padding: "0 4px" }}>
+            加载失败: {error}
+          </div>
+        )}
 
-      {/* 阶段二批次 1: admin 鉴权 token 管理 */}
-      <SecuritySection />
-
-      {/* 阶段三批次 1(T1.2): 会话级权限模式切换(使用当前会话 id) */}
-      <PermissionModeSection sessionId={sessionId} />
-
-      {/* 主题壁纸 */}
-      <WallpaperSection />
-
-      {/* 技能管理: 列表 + 上传新技能 */}
-      <SkillsSection />
-
-      {/* V1.3-7.2 工作流自动化: Hooks 配置 */}
-      <HooksSection />
-
-      {/* V1.4-8.1 数据管理: 备份/还原/批量导出 */}
-      <DataSection />
-
-      {/* V1.4-8.3 系统设置: 日志/代理/缓存/master key */}
-      <SystemSection />
-
-      {/* 关于与更新 */}
-      <UpdateSection />
+        <div className="settings-pages">
+          {Object.entries(pages).map(([key, page]) => (
+            <div
+              key={key}
+              style={{
+                display: activeKey === key ? "flex" : "none",
+                flexDirection: "column",
+                gap: 16,
+              }}
+            >
+              {page.node}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -281,7 +694,7 @@ function DatabaseSection(): JSX.Element {
               onChange={(e) => f.set(e.target.value)}
               style={{
                 fontSize: 13, padding: "6px 10px", borderRadius: 8,
-                border: "1px solid rgba(148,163,184,0.4)", background: "#fff",
+                border: "1px solid rgba(148,163,184,0.4)", background: "var(--panel-bg-solid)",
                 color: "var(--text-primary)", outline: "none",
               }}
             />
@@ -296,7 +709,7 @@ function DatabaseSection(): JSX.Element {
             <span
               style={{
                 fontSize: 10, padding: "1px 8px", borderRadius: 8,
-                background: passwordConfigured ? "#d1fae5" : "#fef3c7",
+                background: passwordConfigured ? "var(--success-bg)" : "var(--warning-bg)",
                 color: passwordConfigured ? "#047857" : "#b45309",
                 fontWeight: 600,
               }}
@@ -315,7 +728,7 @@ function DatabaseSection(): JSX.Element {
             onChange={(e) => setPassword(e.target.value)}
             style={{
               fontSize: 13, padding: "6px 10px", borderRadius: 8,
-              border: "1px solid rgba(148,163,184,0.4)", background: "#fff",
+              border: "1px solid rgba(148,163,184,0.4)", background: "var(--panel-bg-solid)",
               color: "var(--text-primary)", outline: "none",
             }}
           />
@@ -325,7 +738,7 @@ function DatabaseSection(): JSX.Element {
           disabled={busy}
           style={{
             marginTop: 20, fontSize: 13, padding: "6px 18px", borderRadius: 8,
-            border: "1px solid #6366f1", background: "#6366f1", color: "#fff",
+            border: "1px solid #6366f1", background: "#6366f1", color: "var(--on-accent)",
             cursor: busy ? "not-allowed" : "pointer", fontWeight: 600, opacity: busy ? 0.6 : 1,
           }}
         >
@@ -341,7 +754,7 @@ function DatabaseSection(): JSX.Element {
           onChange={(e) => setMasterKey(e.target.value)}
           style={{
             fontSize: 13, padding: "6px 10px", borderRadius: 8,
-            border: "1px solid rgba(148,163,184,0.4)", background: "#fff",
+            border: "1px solid rgba(148,163,184,0.4)", background: "var(--panel-bg-solid)",
             color: "var(--text-primary)", outline: "none", fontFamily: "var(--font-mono)",
           }}
         />
@@ -357,7 +770,7 @@ function DatabaseSection(): JSX.Element {
           <code
             style={{
               flex: 1, fontSize: 11, fontFamily: "var(--font-mono)",
-              background: "#f8fafc", border: "1px solid #e2e8f0",
+              background: "var(--code-bg)", border: "1px solid var(--border-color)",
               borderRadius: 6, padding: "4px 8px", overflow: "hidden",
               textOverflow: "ellipsis", whiteSpace: "nowrap",
             }}
@@ -372,7 +785,7 @@ function DatabaseSection(): JSX.Element {
             }}
             style={{
               fontSize: 11, padding: "4px 10px", borderRadius: 6,
-              border: "1px solid #cbd5e1", background: "#fff", cursor: "pointer",
+              border: "1px solid #cbd5e1", background: "var(--panel-bg-solid)", cursor: "pointer",
               color: "#475569", flexShrink: 0,
             }}
           >
@@ -572,6 +985,8 @@ interface SkillInfo {
   version: string;
   description: string;
   enabled: boolean;
+  // V1.1-3.6 改名: 显示名(空回退 name, 标识符不变)
+  display_name?: string;
 }
 
 function SkillsSection(): JSX.Element {
@@ -581,6 +996,8 @@ function SkillsSection(): JSX.Element {
   const [skillYaml, setSkillYaml] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+  // 2026-08-08: 技能区折叠(内容多, 默认收起)
+  const [collapsed, setCollapsed] = useState(false);
   // 2026-08-04: zip 一键上传
   const [zipBusy, setZipBusy] = useState(false);
   const [zipMsg, setZipMsg] = useState<string | null>(null);
@@ -594,6 +1011,11 @@ function SkillsSection(): JSX.Element {
   } | null>(null);
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [promptMsg, setPromptMsg] = useState<string | null>(null);
+  // V1.1-3.6 改名: 行内编辑显示名(标识符不变)
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [renameInput, setRenameInput] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameMsg, setRenameMsg] = useState<string | null>(null);
 
   // V1.2-6.1: 打开提示词编辑器(加载当前内容 + token 估算)
   const openPromptEditor = async (name: string): Promise<void> => {
@@ -632,6 +1054,34 @@ function SkillsSection(): JSX.Element {
       setPromptMsg(`保存失败: ${String(e)}`);
     } finally {
       setSavingPrompt(false);
+    }
+  };
+
+  // V1.1-3.6 改名: PUT /admin/skills/{name}/meta body.display_name
+  const submitRename = async (s: SkillInfo): Promise<void> => {
+    const trimmed = renameInput.trim();
+    if (!trimmed) {
+      setRenameMsg("显示名不能为空");
+      return;
+    }
+    setRenameBusy(true);
+    setRenameMsg(null);
+    try {
+      const resp = await adminFetch(`http://127.0.0.1:8765/admin/skills/${s.name}/meta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: trimmed }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail ?? data.error ?? `HTTP ${resp.status}`);
+      setRenameMsg(`已将 "${s.name}" 重命名为 "${trimmed}"`);
+      setRenameTarget(null);
+      setRenameInput("");
+      void load();
+    } catch (e) {
+      setRenameMsg(`改名失败: ${String(e)}`);
+    } finally {
+      setRenameBusy(false);
     }
   };
 
@@ -726,115 +1176,234 @@ function SkillsSection(): JSX.Element {
 
   return (
     <div className="glass-panel" style={{ padding: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <div style={{ fontSize: 15, fontWeight: 600 }}>技能管理</div>
-        <button className="btn-secondary" style={{ fontSize: 12, padding: "4px 12px" }} onClick={() => void load()}>
-          {loading ? "刷新中..." : "刷新"}
-        </button>
-      </div>
-
-      {/* 已安装技能 */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
-        {skills.map((s) => (
-          <span
-            key={s.name}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              fontSize: 12, padding: "4px 8px 4px 12px", borderRadius: 12,
-              border: s.enabled ? "1px solid #4caf50" : "1px solid #ccc",
-              color: s.enabled ? "#2e7d32" : "var(--text-tertiary)",
-              background: s.enabled ? "rgba(76,175,80,0.08)" : "transparent",
+      <div
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer" }}
+        onClick={() => setCollapsed((c) => !c)}
+      >
+        <div style={{ fontSize: 15, fontWeight: 600 }}>
+          技能管理
+          <span style={{ fontSize: 12, color: "var(--text-tertiary)", marginLeft: 8 }}>({skills.length})</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            className="btn-secondary"
+            style={{ fontSize: 12, padding: "4px 12px", cursor: "pointer" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              void load();
             }}
           >
-            {s.name} v{s.version} {s.enabled ? "· 已启用" : "· 未启用"}
-            {/* V1.2-6.1: 提示词编辑器入口 */}
-            <button
-              onClick={() => void openPromptEditor(s.name)}
-              title={`编辑 ${s.name} 的系统提示词`}
-              style={{
-                border: "none", background: "transparent", cursor: "pointer",
-                fontSize: 12, padding: "2px 4px", color: "#8b5cf6",
-              }}
-            >
-              ✏️
-            </button>
-          </span>
-        ))}
-        {skills.length === 0 && (
-          <div style={{ fontSize: 13, color: "var(--text-tertiary)" }}>暂无技能</div>
-        )}
-      </div>
-
-      {/* 2026-08-04: zip 一键上传(简单方式) */}
-      <div
-        style={{
-          display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
-          padding: "12px 14px", borderRadius: 10,
-          background: "rgba(129,140,248,0.06)", border: "1px dashed rgba(129,140,248,0.4)",
-          marginBottom: 14,
-        }}
-      >
-        <label
-          style={{
-            fontSize: 13, fontWeight: 600, cursor: zipBusy ? "not-allowed" : "pointer",
-            display: "inline-flex", alignItems: "center", gap: 6,
-            padding: "8px 16px", borderRadius: 8,
-            background: "var(--gradient-indigo)", color: "#fff",
-          }}
-        >
-          📦 上传技能压缩包(zip)
-          <input
-            ref={zipRef}
-            type="file"
-            accept=".zip"
-            style={{ display: "none" }}
-            disabled={zipBusy}
-            onChange={(e) => void uploadZip(e)}
-          />
-        </label>
-        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
-          选 zip 即自动解析安装(skill.yaml + system_prompt.md + references/ 等全部文件)
-        </span>
-        {zipMsg && (
-          <span style={{ fontSize: 12, color: zipMsg.startsWith("✅") ? "var(--success-text)" : zipMsg.startsWith("上传中") ? "var(--text-secondary)" : "#d32f2f" }}>
-            {zipMsg}
-          </span>
-        )}
-      </div>
-
-      {/* 上传新技能(高级: 手动填写) */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600 }}>高级: 手动填写 skill.yaml</div>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="技能名称(小写字母/数字/下划线, 如 my_skill)"
-          style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", fontSize: 13 }}
-        />
-        <textarea
-          value={skillYaml}
-          onChange={(e) => setSkillYaml(e.target.value)}
-          placeholder="skill.yaml 内容(需含 name 字段)"
-          rows={5}
-          style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", fontSize: 12, fontFamily: "monospace" }}
-        />
-        <textarea
-          value={systemPrompt}
-          onChange={(e) => setSystemPrompt(e.target.value)}
-          placeholder="system_prompt.md 内容(可选)"
-          rows={3}
-          style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #ddd", fontSize: 12 }}
-        />
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button className="btn-primary" style={{ padding: "8px 18px", fontSize: 13 }} onClick={() => void upload()}>
-            上传技能
+            {loading ? "刷新中..." : "刷新"}
           </button>
-          {msg && <span style={{ fontSize: 12, color: msg.startsWith("技能") ? "#4caf50" : "#d32f2f" }}>{msg}</span>}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setCollapsed((c) => !c);
+            }}
+            title={collapsed ? "展开" : "收起"}
+            style={{
+              fontSize: 12, padding: "4px 10px", borderRadius: 10, cursor: "pointer",
+              border: "1px solid var(--border-strong)", background: "var(--button-ghost-bg)",
+              color: "var(--text-primary)",
+            }}
+          >
+            {collapsed ? "展开 ▼" : "收起 ▲"}
+          </button>
         </div>
       </div>
+
+      {!collapsed && (
+        <>
+          {/* 已安装技能: 一行一个(2026-08-08 由 chip 流式改为行式, 与 MCP 列表一致) */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14, marginTop: 12 }}>
+            {skills.map((s) => (
+              <div
+                key={s.name}
+                style={{
+                  display: "flex", alignItems: "center", gap: 12,
+                  padding: "10px 14px", borderRadius: "var(--radius-sm)",
+                  background: "var(--panel-bg)",
+                }}
+              >
+                {renameTarget === s.name ? (
+                  <input
+                    autoFocus
+                    value={renameInput}
+                    onChange={(e) => setRenameInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void submitRename(s);
+                      else if (e.key === "Escape") {
+                        setRenameTarget(null);
+                        setRenameInput("");
+                      }
+                    }}
+                    disabled={renameBusy}
+                    style={{
+                      fontSize: 13, fontWeight: 600, flexShrink: 0, width: 160,
+                      padding: "2px 6px", borderRadius: 4,
+                      border: "1px solid var(--border-strong, #94a3b8)",
+                      background: "var(--input-bg)", color: "var(--text-primary)",
+                    }}
+                  />
+                ) : (
+                  <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>
+                    {s.display_name || s.name}
+                  </span>
+                )}
+                <span style={{ fontSize: 11, color: "var(--text-tertiary)", flexShrink: 0 }}>v{s.version}</span>
+                <span
+                  style={{
+                    fontSize: 11, padding: "1px 8px", borderRadius: 10, flexShrink: 0,
+                    background: s.enabled ? "var(--success-bg)" : "var(--surface-2)",
+                    color: s.enabled ? "var(--success-text)" : "var(--text-tertiary)",
+                  }}
+                >
+                  {s.enabled ? "已启用" : "未启用"}
+                </span>
+                <span
+                  style={{
+                    fontSize: 12, color: "var(--text-tertiary)", flex: 1, minWidth: 0,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}
+                >
+                  {s.description}
+                </span>
+                {/* V1.1-3.6 改名入口 */}
+                {renameTarget === s.name ? (
+                  <>
+                    <button
+                      onClick={() => void submitRename(s)}
+                      disabled={renameBusy}
+                      title="保存新显示名"
+                      style={{
+                        border: "none", background: "transparent", cursor: renameBusy ? "wait" : "pointer",
+                        fontSize: 14, padding: "2px 4px", color: "#15803d", flexShrink: 0,
+                      }}
+                    >
+                      ✓
+                    </button>
+                    <button
+                      onClick={() => {
+                        setRenameTarget(null);
+                        setRenameInput("");
+                      }}
+                      disabled={renameBusy}
+                      title="取消"
+                      style={{
+                        border: "none", background: "transparent", cursor: "pointer",
+                        fontSize: 14, padding: "2px 4px", color: "var(--text-tertiary)", flexShrink: 0,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setRenameTarget(s.name);
+                      setRenameInput(s.display_name || s.name);
+                      setRenameMsg(null);
+                    }}
+                    title={`重命名 ${s.name}(只改显示名, 标识符不变)`}
+                    style={{
+                      border: "none", background: "transparent", cursor: "pointer",
+                      fontSize: 12, padding: "2px 4px", color: "var(--accent-soft-text)", flexShrink: 0,
+                    }}
+                  >
+                    ✏️ 改名
+                  </button>
+                )}
+                {/* V1.2-6.1: 提示词编辑器入口 */}
+                <button
+                  onClick={() => void openPromptEditor(s.name)}
+                  title={`编辑 ${s.name} 的系统提示词`}
+                  style={{
+                    border: "none", background: "transparent", cursor: "pointer",
+                    fontSize: 14, padding: "2px 4px", color: "var(--accent-soft-text)", flexShrink: 0,
+                  }}
+                >
+                  📝
+                </button>
+              </div>
+            ))}
+            {renameMsg && (
+              <div style={{ fontSize: 12, color: "var(--success-text)", marginTop: 4 }}>{renameMsg}</div>
+            )}
+            {skills.length === 0 && (
+              <div style={{ fontSize: 13, color: "var(--text-tertiary)" }}>暂无技能</div>
+            )}
+          </div>
+
+          {/* 2026-08-04: zip 一键上传(简单方式) */}
+          <div
+            style={{
+              display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+              padding: "12px 14px", borderRadius: 10,
+              background: "rgba(129,140,248,0.06)", border: "1px dashed rgba(129,140,248,0.4)",
+              marginBottom: 14,
+            }}
+          >
+            <label
+              style={{
+                fontSize: 13, fontWeight: 600, cursor: zipBusy ? "not-allowed" : "pointer",
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "8px 16px", borderRadius: 8,
+                background: "var(--gradient-indigo)", color: "var(--on-accent)",
+              }}
+            >
+              📦 上传技能压缩包(zip)
+              <input
+                ref={zipRef}
+                type="file"
+                accept=".zip"
+                style={{ display: "none" }}
+                disabled={zipBusy}
+                onChange={(e) => void uploadZip(e)}
+              />
+            </label>
+            <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+              选 zip 即自动解析安装(skill.yaml + system_prompt.md + references/ 等全部文件)
+            </span>
+            {zipMsg && (
+              <span style={{ fontSize: 12, color: zipMsg.startsWith("✅") ? "var(--success-text)" : zipMsg.startsWith("上传中") ? "var(--text-secondary)" : "#d32f2f" }}>
+                {zipMsg}
+              </span>
+            )}
+          </div>
+
+          {/* 上传新技能(高级: 手动填写) */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>高级: 手动填写 skill.yaml</div>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="技能名称(小写字母/数字/下划线, 如 my_skill)"
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border-strong)", fontSize: 13 }}
+            />
+            <textarea
+              value={skillYaml}
+              onChange={(e) => setSkillYaml(e.target.value)}
+              placeholder="skill.yaml 内容(需含 name 字段)"
+              rows={5}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border-strong)", fontSize: 12, fontFamily: "monospace" }}
+            />
+            <textarea
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              placeholder="system_prompt.md 内容(可选)"
+              rows={3}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border-strong)", fontSize: 12 }}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button className="btn-primary" style={{ padding: "8px 18px", fontSize: 13 }} onClick={() => void upload()}>
+                上传技能
+              </button>
+              {msg && <span style={{ fontSize: 12, color: msg.startsWith("技能") ? "#4caf50" : "#d32f2f" }}>{msg}</span>}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* V1.2-6.1: 提示词编辑器弹窗 */}
       {promptEditor && (
@@ -851,7 +1420,7 @@ function SkillsSection(): JSX.Element {
             style={{
               width: 680, maxWidth: "92vw", maxHeight: "85vh",
               display: "flex", flexDirection: "column",
-              background: "#fff", borderRadius: 14,
+              background: "var(--panel-bg-solid)", borderRadius: 14,
               padding: "20px 24px",
               boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
             }}
@@ -879,8 +1448,8 @@ function SkillsSection(): JSX.Element {
               style={{
                 flex: 1, minHeight: 320, resize: "vertical",
                 fontFamily: "Consolas, monospace", fontSize: 13,
-                border: "1px solid #e2e8f0", borderRadius: 8, padding: 12,
-                color: "#334155", background: "#f8fafc",
+                border: "1px solid var(--border-color)", borderRadius: 8, padding: 12,
+                color: "#334155", background: "var(--code-bg)",
                 whiteSpace: "pre", lineHeight: 1.6,
               }}
             />
@@ -1042,7 +1611,7 @@ function UpdateSection(): JSX.Element {
           {downloading && (
             <div
               style={{
-                width: 200, height: 8, borderRadius: 4, background: "#e2e8f0",
+                width: 200, height: 8, borderRadius: 4, background: "var(--surface-2)",
                 overflow: "hidden",
               }}
             >
@@ -1104,6 +1673,7 @@ function ProviderRow({
   // V1.4-8.2: 分组元数据
   const [group, setGroup] = useState(provider.group ?? "");
   const [kind, setKind] = useState(provider.kind ?? "cloud");
+  const [multimodal, setMultimodal] = useState(provider.multimodal ?? false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -1117,6 +1687,7 @@ function ProviderRow({
     setMaxTurns(provider.limits?.max_turns ?? 20);
     setGroup(provider.group ?? "");
     setKind(provider.kind ?? "cloud");
+    setMultimodal(provider.multimodal ?? false);
     setMsg(null);
     setEditing(true);
   };
@@ -1135,6 +1706,7 @@ function ProviderRow({
       body.max_turns = maxTurns;
       body.group = group.trim() || "";
       body.kind = kind;
+      body.multimodal = multimodal;
       const resp = await adminFetch(`${API_BASE}/settings/providers/${provider.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1177,7 +1749,7 @@ function ProviderRow({
       style={{
         padding: "12px 14px",
         borderRadius: "var(--radius-sm)",
-        background: "rgba(255,255,255,0.5)",
+        background: "var(--panel-bg)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1191,21 +1763,26 @@ function ProviderRow({
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 14, fontWeight: 600 }}>{provider.name}</span>
             {provider.kind === "local" && (
-              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "#ede9fe", color: "#6d28d9" }}>
+              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--accent-soft-bg)", color: "var(--accent-soft-text)" }}>
                 本地
               </span>
             )}
             <span
               style={{
                 fontSize: 11, padding: "1px 8px", borderRadius: 10,
-                background: provider.api_key_configured ? "var(--success-bg)" : "#f1f5f9",
+                background: provider.api_key_configured ? "var(--success-bg)" : "var(--surface-2)",
                 color: provider.api_key_configured ? "var(--success-text)" : "var(--text-tertiary)",
               }}
             >
               {provider.api_key_configured ? "Key 已配置" : "Key 未配置"}
             </span>
+            {provider.multimodal && (
+              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "rgba(99,102,241,0.12)", color: "#4f46e5" }} title="支持图片输入, 看图任务自动跳转此模型">
+                多模态
+              </span>
+            )}
             {!provider.enabled && (
-              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "#fef3c7", color: "#d97706" }}>
+              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--warning-bg)", color: "#d97706" }}>
                 已禁用
               </span>
             )}
@@ -1263,7 +1840,7 @@ function ProviderRow({
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               placeholder="https://..."
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1272,7 +1849,7 @@ function ProviderRow({
               value={modelName}
               onChange={(e) => setModelName(e.target.value)}
               placeholder="model-name"
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1282,7 +1859,7 @@ function ProviderRow({
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={provider.api_key_configured ? "已配置(留空不修改)" : "输入新 Key"}
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1293,7 +1870,7 @@ function ProviderRow({
               value={maxInput}
               onChange={(e) => setMaxInput(Number(e.target.value))}
               title="最大输入 tokens"
-              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
             <input
               type="number"
@@ -1301,7 +1878,7 @@ function ProviderRow({
               value={maxOutput}
               onChange={(e) => setMaxOutput(Number(e.target.value))}
               title="最大输出 tokens"
-              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
             <input
               type="number"
@@ -1309,7 +1886,7 @@ function ProviderRow({
               value={maxTurns}
               onChange={(e) => setMaxTurns(Number(e.target.value))}
               title="最大轮次"
-              style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
             <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>输入/输出/轮次</span>
           </div>
@@ -1319,12 +1896,12 @@ function ProviderRow({
               value={group}
               onChange={(e) => setGroup(e.target.value)}
               placeholder="分组(如: 主力模型)"
-              style={{ width: 140, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ width: 140, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
             <select
               value={kind}
               onChange={(e) => setKind(e.target.value)}
-              style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             >
               <option value="cloud">云端模型</option>
               <option value="local">本地模型</option>
@@ -1332,6 +1909,10 @@ function ProviderRow({
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
               <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
               启用
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }} title="勾选后, 当用户发送图片时降级链将跳过纯文本模型, 直接从本模型开始调用">
+              <input type="checkbox" checked={multimodal} onChange={(e) => setMultimodal(e.target.checked)} />
+              多模态
             </label>
             <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void save()} disabled={busy}>
               保存
@@ -1350,6 +1931,203 @@ function ProviderRow({
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// 降级链编辑器: 拖拽排序 + 启用/禁用控制
+// ──────────────────────────────────────────────────────────────────────────────
+
+function FallbackChainEditor({
+  providers,
+  chain,
+  onUpdated,
+}: {
+  providers: ProviderInfo[];
+  chain: string[];
+  onUpdated: () => void;
+}): JSX.Element {
+  const [editing, setEditing] = useState(false);
+  const [localChain, setLocalChain] = useState<string[]>(chain);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  // 同步外部更新
+  useEffect(() => {
+    setLocalChain(chain);
+  }, [chain]);
+
+  // 未在 chain 中但已启用的 provider
+  const available = providers
+    .filter((p) => p.enabled && !localChain.includes(p.name))
+    .map((p) => p.name);
+
+  const moveUp = (idx: number): void => {
+    if (idx === 0) return;
+    const next = [...localChain];
+    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+    setLocalChain(next);
+  };
+
+  const moveDown = (idx: number): void => {
+    if (idx === localChain.length - 1) return;
+    const next = [...localChain];
+    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+    setLocalChain(next);
+  };
+
+  const remove = (name: string): void => {
+    setLocalChain(localChain.filter((n) => n !== name));
+  };
+
+  const add = (name: string): void => {
+    setLocalChain([...localChain, name]);
+  };
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    setError("");
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/fallback-chain`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chain: localChain }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+      setEditing(false);
+      onUpdated();
+    } catch (err) {
+      setError(`保存失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancel = (): void => {
+    setLocalChain(chain);
+    setEditing(false);
+    setError("");
+  };
+
+  if (!editing) {
+    return (
+      <div
+        style={{
+          display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
+          padding: "8px 12px", borderRadius: "var(--radius-sm)",
+          background: "var(--panel-bg)",
+        }}
+      >
+        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", flexShrink: 0 }}>
+          降级链
+        </span>
+        <div style={{ flex: 1, fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {chain.length > 0
+            ? chain.map((name, i) => (
+                <span key={name}>
+                  {i > 0 && <span style={{ color: "var(--text-tertiary)", margin: "0 4px" }}>→</span>}
+                  <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{name}</span>
+                </span>
+              ))
+            : "—（未配置）"}
+        </div>
+        <button
+          className="btn-ghost"
+          style={{ fontSize: 11, padding: "4px 10px", flexShrink: 0 }}
+          onClick={() => setEditing(true)}
+        >
+          编辑
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        marginBottom: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)",
+        background: "var(--panel-bg)", display: "flex", flexDirection: "column", gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
+        降级链顺序（失败时按此顺序逐个尝试）
+      </div>
+      {localChain.length === 0 && (
+        <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: "8px 0" }}>
+          降级链为空，请从下方可用模型中选择
+        </div>
+      )}
+      {localChain.map((name, idx) => (
+        <div
+          key={name}
+          style={{
+            display: "flex", alignItems: "center", gap: 8,
+            padding: "6px 10px", borderRadius: 6,
+            background: "var(--panel-bg)",
+            border: "1px solid rgba(148,163,184,0.2)",
+          }}
+        >
+          <span style={{ fontSize: 11, color: "var(--text-tertiary)", width: 20, flexShrink: 0 }}>
+            {idx + 1}.
+          </span>
+          <span style={{ flex: 1, fontSize: 12, fontWeight: 500, color: "var(--text-secondary)" }}>
+            {name}
+          </span>
+          <button
+            className="btn-ghost"
+            style={{ fontSize: 11, padding: "2px 8px", minWidth: 28 }}
+            onClick={() => moveUp(idx)}
+            disabled={idx === 0}
+          >
+            ↑
+          </button>
+          <button
+            className="btn-ghost"
+            style={{ fontSize: 11, padding: "2px 8px", minWidth: 28 }}
+            onClick={() => moveDown(idx)}
+            disabled={idx === localChain.length - 1}
+          >
+            ↓
+          </button>
+          <button
+            className="btn-ghost"
+            style={{ fontSize: 11, padding: "2px 8px", minWidth: 28, color: "var(--danger-text)" }}
+            onClick={() => remove(name)}
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      {available.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 6 }}>
+            可用但未在链中:
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {available.map((name) => (
+              <button
+                key={name}
+                className="btn-ghost"
+                style={{ fontSize: 11, padding: "3px 10px", borderStyle: "dashed" }}
+                onClick={() => add(name)}
+              >
+                + {name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
+        <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void save()} disabled={busy}>
+          保存
+        </button>
+        <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={cancel} disabled={busy}>
+          取消
+        </button>
+        {error && <span style={{ fontSize: 12, color: "var(--danger-text)" }}>{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // 新增 Provider 表单
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1360,6 +2138,7 @@ function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
   const [modelName, setModelName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [multimodal, setMultimodal] = useState(false);
   const [maxInput, setMaxInput] = useState(8192);
   const [maxOutput, setMaxOutput] = useState(2048);
   const [maxTurns, setMaxTurns] = useState(20);
@@ -1382,6 +2161,7 @@ function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
         max_input_tokens: maxInput,
         max_output_tokens: maxOutput,
         max_turns: maxTurns,
+        multimodal,
       };
       if (apiKey.trim()) body.api_key = apiKey.trim();
       const resp = await adminFetch(`${API_BASE}/settings/providers`, {
@@ -1418,14 +2198,14 @@ function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
 
   const inputStyle = {
     flex: 1, padding: "6px 10px", borderRadius: 6,
-    border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)",
+    border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)",
   } as const;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.4)" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "var(--panel-bg)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>名称</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如 deepseek-flash / glm-4（仅字母/数字/下划线/连字符）" style={inputStyle} />
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如 deepseek-flash / qwen-2.5（字母/数字/下划线/连字符/小数点）" style={inputStyle} />
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API 地址</span>
@@ -1441,15 +2221,19 @@ function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>参数上限</span>
-        <input type="number" min={256} value={maxInput} onChange={(e) => setMaxInput(Number(e.target.value))} title="最大输入 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }} />
-        <input type="number" min={64} value={maxOutput} onChange={(e) => setMaxOutput(Number(e.target.value))} title="最大输出 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }} />
-        <input type="number" min={1} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value))} title="最大轮次" style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }} />
+        <input type="number" min={256} value={maxInput} onChange={(e) => setMaxInput(Number(e.target.value))} title="最大输入 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }} />
+        <input type="number" min={64} value={maxOutput} onChange={(e) => setMaxOutput(Number(e.target.value))} title="最大输出 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }} />
+        <input type="number" min={1} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value))} title="最大轮次" style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }} />
         <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>输入/输出/轮次</span>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           启用并加入降级链
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }} title="勾选后, 当用户发送图片时降级链将跳过纯文本模型, 直接从本模型开始调用">
+          <input type="checkbox" checked={multimodal} onChange={(e) => setMultimodal(e.target.checked)} />
+          多模态
         </label>
         <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void submit()} disabled={busy}>
           添加
@@ -1485,11 +2269,18 @@ function McpRow({
         method: "POST",
       });
       const data = await resp.json();
-      setMsg(
-        data.ok
-          ? `✅ 连接正常 (${data.server_info || data.protocol || "ok"})`
-          : `❌ ${data.error ?? "测试失败"}`
-      );
+      if (data.ok) {
+        // 2026-08-07 修复 UI 误导: 之前 `data.server_info || data.protocol || "ok"`
+        // 把"2026-07-28"(MCP 协议版本号)显示出来, 被用户误读为"连接时间"。
+        // 现在按"服务器名 · N 工具 · Xms"显示, 协议版本号放 detail 字段。
+        const name = data.server || server.id;
+        const tools = data.tools_count ?? "—";
+        const lat = data.latency_ms != null ? `${data.latency_ms}ms` : "";
+        const detail = data.detail ? ` · ${data.detail}` : "";
+        setMsg(`✅ ${name} · ${tools} 工具 ${lat}${detail}`);
+      } else {
+        setMsg(`❌ ${data.error ?? "测试失败"}`);
+      }
     } catch (err) {
       setMsg(`测试失败: ${String(err)}`);
     } finally {
@@ -1562,7 +2353,7 @@ function McpRow({
   };
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.5)" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "var(--panel-bg)" }}>
       <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{server.id}</span>
       <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--info-bg)", color: "var(--info-text)", flexShrink: 0 }}>
         {server.type}
@@ -1789,7 +2580,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "rgba(255,255,255,0.4)" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "var(--panel-bg)" }}>
       {/* 模式切换: 表单 / JSON 导入 */}
       <div style={{ display: "flex", gap: 4, marginBottom: 2 }}>
         {(["form", "json"] as const).map((m) => (
@@ -1798,7 +2589,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
             className="btn-ghost"
             style={{
               fontSize: 11, padding: "4px 12px",
-              background: mode === m ? "var(--gradient-indigo)" : "rgba(255,255,255,0.5)",
+              background: mode === m ? "var(--gradient-indigo)" : "var(--panel-bg)",
               color: mode === m ? "#fff" : "var(--text-primary)",
               border: "none",
             }}
@@ -1819,7 +2610,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
             onChange={(e) => setJsonText(e.target.value)}
             placeholder={'{\n  "mcpServers": {\n    "my-server": {\n      "url": "http://127.0.0.1:3000/mcp",\n      "headers": { "Authorization": "Bearer xxx" }\n    }\n  }\n}'}
             spellCheck={false}
-            style={{ minHeight: 130, fontFamily: "monospace", fontSize: 11, padding: "8px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", background: "rgba(255,255,255,0.6)", resize: "vertical" }}
+            style={{ minHeight: 130, fontFamily: "monospace", fontSize: 11, padding: "8px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", background: "var(--panel-bg)", resize: "vertical" }}
           />
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void importJson()} disabled={busy}>
@@ -1842,7 +2633,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           style={{
             flex: 1, padding: "6px 10px", borderRadius: 6,
             border: "1px solid rgba(148,163,184,0.3)", fontSize: 12,
-            background: "rgba(255,255,255,0.6)", color: "var(--text-primary)",
+            background: "var(--panel-bg)", color: "var(--text-primary)",
           }}
           title="选择预置连接器模板, 自动填充下方字段"
         >
@@ -1855,7 +2646,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
       {templateNotes.length > 0 && (
         <div
           style={{
-            fontSize: 11, color: "#92400e", background: "#fffbeb",
+            fontSize: 11, color: "#92400e", background: "var(--confirmation-bg)",
             border: "1px solid #fde68a", borderRadius: 6, padding: "6px 10px",
             lineHeight: 1.5,
           }}
@@ -1869,7 +2660,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="server 名称(唯一)"
-          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
         />
         <div style={{ display: "flex", gap: 4 }}>
           {(["http", "stdio"] as const).map((t) => (
@@ -1878,7 +2669,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
               className="btn-ghost"
               style={{
                 fontSize: 11, padding: "4px 10px",
-                background: type === t ? "var(--gradient-indigo)" : "rgba(255,255,255,0.5)",
+                background: type === t ? "var(--gradient-indigo)" : "var(--panel-bg)",
                 color: type === t ? "#fff" : "var(--text-primary)",
                 border: "none",
               }}
@@ -1896,7 +2687,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="http://127.0.0.1:port/mcp"
-            style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+            style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
           />
         </div>
       ) : (
@@ -1907,7 +2698,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               placeholder="npx"
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1916,7 +2707,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
               value={args}
               onChange={(e) => setArgs(e.target.value)}
               placeholder="空格分隔, 如 -y @modelcontextprotocol/server-filesystem C:/tmp"
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
         </>
@@ -1928,7 +2719,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           value={authToken}
           onChange={(e) => setAuthToken(e.target.value)}
           placeholder="可选, 服务器要求 Bearer 认证时填写(AES 加密存储)"
-          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)" }}
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
         />
       </div>
       {/* V1.2-6.2: 环境变量配置(stdio 子进程注入) */}
@@ -1940,7 +2731,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           placeholder={'每行 KEY=VALUE, 如:\nMY_API_KEY=sk-xxx\nBASE_URL=http://127.0.0.1:3000'}
           rows={3}
           spellCheck={false}
-          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "rgba(255,255,255,0.6)", resize: "vertical", fontFamily: "monospace" }}
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)", resize: "vertical", fontFamily: "monospace" }}
         />
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -2169,7 +2960,7 @@ const btnStyle: React.CSSProperties = {
   padding: "6px 14px",
   borderRadius: 8,
   border: "1px solid var(--border-color, rgba(128,128,128,0.3))",
-  background: "var(--panel-bg, rgba(255,255,255,0.6))",
+  background: "var(--panel-bg, var(--panel-bg))",
   cursor: "pointer",
 };
 
@@ -2309,7 +3100,7 @@ function HooksSection(): JSX.Element {
   const inputStyle = {
     padding: "6px 10px", borderRadius: 6, fontSize: 12,
     border: "1px solid rgba(148,163,184,0.3)",
-    background: "rgba(255,255,255,0.6)",
+    background: "var(--panel-bg)",
   } as const;
 
   return (
@@ -2338,7 +3129,7 @@ function HooksSection(): JSX.Element {
             style={{
               display: "flex", alignItems: "center", gap: 10,
               padding: "8px 12px", borderRadius: 8,
-              background: "rgba(255,255,255,0.5)",
+              background: "var(--panel-bg)",
               fontSize: 12,
             }}
           >
@@ -2470,7 +3261,7 @@ function HooksSection(): JSX.Element {
           {editing && (
             <button
               onClick={() => { setEditing(null); setMsg(null); }}
-              style={{ padding: "6px 12px", fontSize: 12, borderRadius: 6, border: "1px solid #ddd", background: "#fff", cursor: "pointer" }}
+              style={{ padding: "6px 12px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer" }}
             >
               取消
             </button>
@@ -2601,7 +3392,7 @@ function DataSection(): JSX.Element {
         <button className="btn-primary" onClick={() => void doBackup()} disabled={busy} style={{ padding: "7px 16px", fontSize: 12 }}>
           {busy ? "…" : "⬇ 一键备份"}
         </button>
-        <label style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #d97706", background: "#fffbeb", color: "#92400e", cursor: "pointer" }}>
+        <label style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #d97706", background: "var(--confirmation-bg)", color: "#92400e", cursor: "pointer" }}>
           ⬆ 上传还原
           <input
             ref={restoreRef}
@@ -2626,11 +3417,11 @@ function DataSection(): JSX.Element {
           value={batchIds}
           onChange={(e) => setBatchIds(e.target.value)}
         />
-        <button onClick={() => void doBatchExport()} disabled={busy} style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #6d28d9", background: "#f5f3ff", color: "#5b21b6", cursor: "pointer" }}>
+        <button onClick={() => void doBatchExport()} disabled={busy} style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #6d28d9", background: "var(--accent-soft-bg)", color: "#5b21b6", cursor: "pointer" }}>
           导出 MD
         </button>
         {batchContent && (
-          <button onClick={downloadBatch} style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #059669", background: "#ecfdf5", color: "#065f46", cursor: "pointer" }}>
+          <button onClick={downloadBatch} style={{ fontSize: 12, padding: "7px 16px", borderRadius: 8, border: "1px solid #059669", background: "var(--tool-result-bg)", color: "#065f46", cursor: "pointer" }}>
             ⬇ 下载合并文件
           </button>
         )}
@@ -2728,7 +3519,7 @@ function SystemSection(): JSX.Element {
   const inputStyle = {
     padding: "6px 10px", borderRadius: 6, fontSize: 12,
     border: "1px solid rgba(148,163,184,0.3)",
-    background: "rgba(255,255,255,0.6)",
+    background: "var(--panel-bg)",
   } as const;
 
   return (
@@ -2748,7 +3539,7 @@ function SystemSection(): JSX.Element {
           <span
             style={{
               fontSize: 11, padding: "1px 8px", borderRadius: 10,
-              background: cfg?.master_key_configured ? "rgba(76,175,80,0.12)" : "#fef3c7",
+              background: cfg?.master_key_configured ? "rgba(76,175,80,0.12)" : "var(--warning-bg)",
               color: cfg?.master_key_configured ? "#2e7d32" : "#d97706",
             }}
           >
@@ -2803,7 +3594,7 @@ function SystemSection(): JSX.Element {
         <button
           onClick={() => void doClearCache()}
           disabled={busy}
-          style={{ fontSize: 12, padding: "6px 14px", borderRadius: 8, border: "1px solid #d97706", background: "#fffbeb", color: "#92400e", cursor: "pointer" }}
+          style={{ fontSize: 12, padding: "6px 14px", borderRadius: 8, border: "1px solid #d97706", background: "var(--confirmation-bg)", color: "#92400e", cursor: "pointer" }}
         >
           🧹 清理产物缓存
         </button>
@@ -2812,9 +3603,11 @@ function SystemSection(): JSX.Element {
   );
 }
 
-function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = useState<string | null>(null);
+function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element {  const [wallpaper, setWallpaper] = useState<string | null>(null);
   const [wpType, setWpType] = useState<"image" | "video">("image");
-  const [fit, setFit] = useState<"cover" | "contain">("cover");
+  // 2026-08-08: 暗色/亮色各自独立保存背景; 这里直接编辑"当前全局主题"对应
+  // 的那一套, 在侧边栏切换主题后本区自动联动加载另一套(无需独立 tab)。
+  const targetTheme: "light" | "dark" = theme ?? "light";
   const [posX, setPosX] = useState(50);
   const [posY, setPosY] = useState(50);
   const [scale, setScale] = useState(100);
@@ -2828,7 +3621,9 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
   const load = useCallback(async (): Promise<void> => {
     setLoadError(null);
     try {
-      const resp = await adminFetch(`${API_BASE}/wallpaper`);
+      const resp = await adminFetch(
+        `${API_BASE}/wallpaper?theme=${encodeURIComponent(targetTheme)}`
+      );
       const data = await resp.json();
       if (data.wallpaper) {
         // 用 127.0.0.1 避免 Electron IPv6(::1) 解析坑; 加时间戳防浏览器缓存
@@ -2839,7 +3634,6 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
         setWallpaper(null);
       }
       if (data.style) {
-        setFit(data.style.fit === "contain" ? "contain" : "cover");
         setPosX(Number(data.style.position_x) || 50);
         setPosY(Number(data.style.position_y) || 50);
         setScale(Number(data.style.scale) || 100);
@@ -2848,7 +3642,7 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
     } catch {
       setWallpaper(null);
     }
-  }, []);
+  }, [targetTheme]);
 
   useEffect(() => {
     void load();
@@ -2864,14 +3658,15 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
         body: JSON.stringify({
           position_x: posX,
           position_y: posY,
-          fit,
-          scale,
+          fit: "contain", // 固定完整显示, 放大+移动选取区域
+          scale: Math.max(scale, 100),
           rotate,
+          theme: targetTheme,
         }),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
-      setMsg("显示样式已保存");
+      setMsg(`${targetTheme === "dark" ? "暗色" : "亮色"}主题样式已保存`);
     } catch (err) {
       setMsg(`保存失败: ${String(err)}`);
     } finally {
@@ -2907,7 +3702,7 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
       const resp = await adminFetch(`${API_BASE}/wallpaper`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data_url: dataUrl }),
+        body: JSON.stringify({ data_url: dataUrl, theme: targetTheme }),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
@@ -2918,7 +3713,7 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
           : null
       );
       setWpType(data.type === "video" ? "video" : "image");
-      setMsg(data.type === "video" ? "动态背景已更新, 首页将循环播放" : "壁纸已更新, 首页将使用新背景");
+      setMsg(`${targetTheme === "dark" ? "暗色" : "亮色"}主题背景已更新, 首页将使用新背景`);
     } catch (err) {
       setMsg(`上传失败: ${String(err)}`);
     } finally {
@@ -2930,9 +3725,12 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
     setBusy(true);
     setMsg(null);
     try {
-      await adminFetch(`${API_BASE}/wallpaper`, { method: "DELETE" });
+      await adminFetch(
+        `${API_BASE}/wallpaper?theme=${encodeURIComponent(targetTheme)}`,
+        { method: "DELETE" }
+      );
       setWallpaper(null);
-      setMsg("已恢复默认背景");
+      setMsg(`${targetTheme === "dark" ? "暗色" : "亮色"}主题已恢复默认背景`);
     } catch {
       setMsg("移除失败");
     } finally {
@@ -2943,11 +3741,17 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
   return (
     <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
       <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
-        主题壁纸
+        主题与壁纸
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
+        暗色/亮色主题各自独立保存背景, 当前编辑的是
+        <b style={{ color: "var(--text-primary)" }}> {targetTheme === "dark" ? "🌙 暗色" : "☀️ 亮色"}主题</b>
+        的背景 —— 在左侧边栏切换主题后, 这里自动联动到另一套
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
-        设置首页顶部背景: 静态图 (PNG / JPG / WebP, ≤6MB) 或动态视频
-        (MP4 / WebM, ≤50MB, 首页自动循环播放); 可调整显示位置与填充方式
+        支持静态图 (PNG / JPG / WebP, ≤6MB) 或动态视频 (MP4 / WebM, ≤50MB)。
+        图片文件原样保存、绝不裁剪; 缩放/移动/旋转只改变背景中显示的图片区域,
+        超出背景容器的部分依然存在只是不显示
       </div>
       <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
         <div
@@ -2957,7 +3761,9 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
             borderRadius: "var(--radius-sm)",
             overflow: "hidden",
             background:
-              "linear-gradient(135deg, #eef1f8 0%, #e6ebf6 45%, #ece7f7 100%)",
+              theme === "dark"
+                ? "linear-gradient(135deg, #0f172a 0%, #1e1b4b 45%, #111827 100%)"
+                : "linear-gradient(135deg, #eef1f8 0%, #e6ebf6 45%, #ece7f7 100%)",
             flexShrink: 0,
             border: "1px solid rgba(148,163,184,0.15)",
             position: "relative",
@@ -2965,6 +3771,7 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
         >
           {wallpaper && wpType === "video" && (
             <video
+              key={wallpaper}
               src={wallpaper}
               autoPlay
               loop
@@ -2975,21 +3782,23 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
               }
               onLoadedData={() => setLoadError(null)}
               style={{
-                // V1.4.1: 缩放落元素尺寸(width/height=scale%), left%(容器)与
-                // translate(-%)(元素)基数不同才有净偏移; transform 不再 scale
+                // 完整显示(contain)为基线, scale 放大 + position 选区域 + rotate;
+                // key={src} 重挂载播放淡入, 与首页一致
                 position: "absolute",
                 left: `${scale > 100 ? posX : 50}%`,
                 top: `${scale > 100 ? posY : 50}%`,
-                width: `${scale}%`,
-                height: `${scale}%`,
-                objectFit: fit,
+                width: `${Math.max(scale, 100)}%`,
+                height: `${Math.max(scale, 100)}%`,
+                objectFit: "contain",
                 transform: `translate(-${scale > 100 ? posX : 50}%, -${scale > 100 ? posY : 50}%) rotate(${rotate}deg)`,
                 display: "block",
+                animation: "wp-fade-in 0.4s ease both",
               }}
             />
           )}
           {wallpaper && wpType === "image" && (
             <img
+              key={wallpaper}
               src={wallpaper}
               alt="当前壁纸"
               onError={() =>
@@ -2997,14 +3806,17 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
               }
               onLoad={() => setLoadError(null)}
               style={{
+                // 完整显示(contain)为基线, scale 放大 + position 选区域 + rotate;
+                // key={src} 重挂载播放淡入, 与首页一致
                 position: "absolute",
                 left: `${scale > 100 ? posX : 50}%`,
                 top: `${scale > 100 ? posY : 50}%`,
-                width: `${scale}%`,
-                height: `${scale}%`,
-                objectFit: fit,
+                width: `${Math.max(scale, 100)}%`,
+                height: `${Math.max(scale, 100)}%`,
+                objectFit: "contain",
                 transform: `translate(-${scale > 100 ? posX : 50}%, -${scale > 100 ? posY : 50}%) rotate(${rotate}deg)`,
                 display: "block",
+                animation: "wp-fade-in 0.4s ease both",
               }}
             />
           )}
@@ -3057,36 +3869,6 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
             )}
           </div>
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>填充方式</span>
-            <button
-              className="btn-ghost"
-              style={{
-                padding: "6px 14px",
-                fontSize: 12,
-                background: fit === "cover" ? "var(--gradient-indigo)" : "rgba(255,255,255,0.5)",
-                color: fit === "cover" ? "#fff" : "var(--text-primary)",
-                border: "none",
-              }}
-              onClick={() => setFit("cover")}
-            >
-              铺满
-            </button>
-            <button
-              className="btn-ghost"
-              style={{
-                padding: "6px 14px",
-                fontSize: 12,
-                background: fit === "contain" ? "var(--gradient-indigo)" : "rgba(255,255,255,0.5)",
-                color: fit === "contain" ? "#fff" : "var(--text-primary)",
-                border: "none",
-              }}
-              onClick={() => setFit("contain")}
-            >
-              完整显示
-            </button>
-          </div>
-
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>水平位置</span>
             <input
@@ -3096,9 +3878,8 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
               value={posX}
               onChange={(e) => {
                 setPosX(Number(e.target.value));
-                // V1.4.1: cover 铺满 + scale<=100 时无裁剪溢出, 移动位置不可见
-                // → 拖动位置时自动放大到 110%, 保证有可移动空间
-                if (scale <= 100) setScale(110);
+                // 完整显示(scale=100)时无溢出区域, 移动不可见 → 自动放大保证可移动
+                if (scale <= 100) setScale(130);
               }}
               style={{ flex: 1 }}
             />
@@ -3114,21 +3895,21 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
               onChange={(e) => {
                 setPosY(Number(e.target.value));
                 // 同上: 自动放大保证移动可见
-                if (scale <= 100) setScale(110);
+                if (scale <= 100) setScale(130);
               }}
               style={{ flex: 1 }}
             />
             <span style={{ fontSize: 12, color: "var(--text-tertiary)", width: 34, textAlign: "right" }}>{posY}%</span>
           </div>
           <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: -4 }}>
-            💡 铺满模式下背景须大于画面才有移动空间: 拖动位置会自动放大到 110%, 也可手动调"缩放"后移动
+            💡 放大后背景才有可移动的空间: 拖动位置会自动放大到 130%, 也可手动调"缩放"
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>缩放</span>
             <input
               type="range"
-              min={50}
-              max={200}
+              min={100}
+              max={300}
               value={scale}
               onChange={(e) => setScale(Number(e.target.value))}
               style={{ flex: 1 }}
@@ -3147,8 +3928,8 @@ function WallpaperSection(): JSX.Element {  const [wallpaper, setWallpaper] = us
                   background:
                     rotate === deg
                       ? "var(--gradient-indigo)"
-                      : "rgba(255,255,255,0.5)",
-                  color: rotate === deg ? "#fff" : "var(--text-primary)",
+                      : "var(--button-ghost-bg)",
+                  color: rotate === deg ? "var(--on-accent)" : "var(--text-primary)",
                   border: "none",
                 }}
                 onClick={() => setRotate(deg)}

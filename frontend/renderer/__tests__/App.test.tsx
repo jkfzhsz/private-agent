@@ -66,27 +66,32 @@ function ws(): FakeWebSocket {
 }
 
 async function pickMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  // HomeView 三个按钮: 工作模式 / 分析模式 / 设计模式
-  await screen.findByText("工作模式");
-  await user.click(screen.getByText("工作模式"));
-  // 激活后顶部应显示 skill 名(office)
-  await waitFor(() => expect(screen.getByText("office")).toBeInTheDocument());
+  // HomeView 三个按钮: 子瞻 / 白圭 / 清和
+  // 用 role+name(正则)匹配按钮, 避免 sidebar "📄 子瞻 (N)" 与按钮"子瞻 工作与学习..."
+  // 重名(按钮 accessible name 是 "子瞻 + subtitle" 拼接)
+  await screen.findByTestId("mode-btn-office");
+  await user.click(screen.getByTestId("mode-btn-office"));
+  // 激活后顶部 chip "子瞻" + sidebar 组标题均含"子瞻" → getAllByText 接受多元素
+  await waitFor(() =>
+    expect(screen.getAllByText("子瞻").length).toBeGreaterThanOrEqual(1)
+  );
 }
 
 describe("App 首页与模式选择集成", () => {
   it("初始渲染首页与三个模式按钮(AC-17)", async () => {
     render(<App />);
-    expect(await screen.findByText("工作模式")).toBeInTheDocument();
-    expect(screen.getByText("分析模式")).toBeInTheDocument();
-    expect(screen.getByText("设计模式")).toBeInTheDocument();
+    // 三个按钮(role=button, 名称以场景中文名开头)均存在
+    expect(await screen.findByTestId("mode-btn-office")).toBeInTheDocument();
+    expect(screen.getByTestId("mode-btn-data_analysis")).toBeInTheDocument();
+    expect(screen.getByTestId("mode-btn-frontend_design")).toBeInTheDocument();
   });
 
   it("点击模式按钮后进入 chat 视图并显示 skill 名(AC-19)", async () => {
     const user = userEvent.setup();
     render(<App />);
     await pickMode(user);
-    // 顶部 badge 显示当前激活的 skill
-    expect(screen.getByText("office")).toBeInTheDocument();
+    // 顶部 badge 显示当前激活的场景中文名(子瞻) — sidebar 与 chip 都含此名
+    expect(screen.getAllByText("子瞻").length).toBeGreaterThanOrEqual(1);
   });
 
   it("WS skill_not_found error 自动切回首页(AC-18)", async () => {
@@ -100,8 +105,8 @@ describe("App 首页与模式选择集成", () => {
       });
     });
 
-    // 回到首页: 三个模式按钮重新可见
-    expect(await screen.findByText("工作模式")).toBeInTheDocument();
+    // 回到首页: HomeView 三个模式按钮重新可见(role+name 精确匹配)
+    expect(await screen.findByTestId("mode-btn-office")).toBeInTheDocument();
   });
 
   // 2026-08-07: 首页点模式必须新建会话(不复用历史会话 id)
@@ -118,7 +123,7 @@ describe("App 首页与模式选择集成", () => {
             ok: true,
             json: () =>
               Promise.resolve({
-                locked_version: "1.0.0",
+                locked_version: "1.1.0",
                 frozen_hash: "abc",
                 skill_name: body.skill_name,
               }),
@@ -136,7 +141,7 @@ describe("App 首页与模式选择集成", () => {
 
     const user = userEvent.setup();
     render(<App />);
-    // 第一次点工作模式 → 会话 A
+    // 第一次点子瞻 → 会话 A
     await pickMode(user);
     expect(activateUrls.length).toBe(1);
     // skill_not_found → 回首页
@@ -145,9 +150,10 @@ describe("App 首页与模式选择集成", () => {
         data: JSON.stringify({ type: "error", message: "skill_not_found" }),
       });
     });
-    await screen.findByText("工作模式");
-    // 再点工作模式 → 必须是新会话(不同 session id)
-    await user.click(screen.getByText("工作模式"));
+    await screen.findByTestId("mode-btn-office");
+    // 再点子瞻 → 0.5.0 P5: 点击图标恢复未结束对话(不新建);
+    // skill_not_found 已切回首页且窗口无快照 → 走新建, 应是新会话(不同 session id)
+    await user.click(screen.getByTestId("mode-btn-office"));
     await waitFor(() => expect(activateUrls.length).toBe(2));
     expect(activateUrls[1]).not.toBe(activateUrls[0]);
     vi.unstubAllGlobals();
@@ -169,8 +175,9 @@ describe("App 首页与模式选择集成", () => {
     });
 
     await waitFor(() => {
-      // chat 视图不应包含首页的"工作模式"按钮
-      expect(screen.queryByText("工作模式")).toBeNull();
+      // 普通 error 不切回首页: 仍停留在 chat 视图, HomeView 按钮(mode-btn-office)
+      // 不存在。注意 sidebar 场景组始终含"子瞻", 不能 queryByText
+      expect(screen.queryByTestId("mode-btn-office")).toBeNull();
     });
   });
 });

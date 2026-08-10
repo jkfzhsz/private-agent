@@ -3,6 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
+import RobotAvatar from "./RobotAvatar";
+
+// 2026-08-10: 侧边栏固定宽度两态(展开/折叠), 取消外部拖拽调宽
+// 左右侧边栏对称: 折叠宽度均为 44px(与 ArtifactPanel 的 PANEL_COLLAPSED_WIDTH 一致)
+export const SIDEBAR_EXPANDED_WIDTH = 220;
+export const SIDEBAR_COLLAPSED_WIDTH = 44;
 
 export type ViewKey = "home" | "chat" | "knowledge" | "memory" | "agents" | "settings";
 
@@ -89,6 +95,15 @@ const SYSTEM_ITEMS: { key: ViewKey; label: string; icon: JSX.Element }[] = [
   },
 ];
 
+// 0.5.0 M1: 场景技术标识 → 中文名(显示层统一 scene_name)
+const SCENE_NAME_MAP: Record<string, string> = {
+  office: "子瞻",
+  data_analysis: "白圭",
+  frontend_design: "清和",
+};
+const sceneName = (key: string | null): string =>
+  key ? SCENE_NAME_MAP[key] ?? key : "无 skill";
+
 function NavLabel({ children }: { children: string }): JSX.Element {
   return (
     <div
@@ -132,6 +147,13 @@ function TaskTree({
   const [renamingValue, setRenamingValue] = useState("");
   const [hoverId, setHoverId] = useState<number | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
+  // 0.5.0 M1(2026-08-08): 历史树按场景分组(子瞻/白圭/清和), 场景组可折叠
+  const [sceneOpen, setSceneOpen] = useState<Record<string, boolean>>({
+    office: true,
+    data_analysis: true,
+    frontend_design: true,
+    global: true,
+  });
   // V1.1-3.2 搜索 + 导出; V1.4-8.4 升级为跨模块(会话/技能/知识库)
   const [searchQ, setSearchQ] = useState("");
   const [searchResults, setSearchResults] = useState<GlobalHit[]>([]);
@@ -327,19 +349,29 @@ function TaskTree({
     }
   };
 
-  // 分组: 活跃会话按文件夹分组(folder 为 null 归"未分组"), 归档会话独立折叠区
+  // 0.5.0 M1(2026-08-08): 历史按场景分三大类展示 ——
+  // 子瞻(office)/白圭(data_analysis)/清和(frontend_design) 三组 +
+  // 全局组(未锁定场景/其他 skill 的会话, 保留 folder 子分组兼容旧行为)。
+  const SCENE_GROUPS: { key: string; name: string; icon: string }[] = [
+    { key: "office", name: "子瞻", icon: "📄" },
+    { key: "data_analysis", name: "白圭", icon: "📈" },
+    { key: "frontend_design", name: "清和", icon: "🎨" },
+  ];
   const activeSessions = sessions.filter((s) => s.status !== "archived");
   const archivedSessions = sessions.filter((s) => s.status === "archived");
-  const folderOrder: string[] = [];
-  const groups = new Map<string, SessionItem[]>();
+  const sceneMap = new Map<string, SessionItem[]>();
+  for (const g of SCENE_GROUPS) sceneMap.set(g.key, []);
+  sceneMap.set("global", []);
   for (const s of activeSessions) {
-    const key = s.folder ?? "";
-    if (!groups.has(key)) {
-      groups.set(key, []);
-      folderOrder.push(key);
-    }
-    groups.get(key)!.push(s);
+    const key = SCENE_GROUPS.some((g) => g.key === s.locked_skill_name)
+      ? s.locked_skill_name!
+      : "global";
+    sceneMap.get(key)!.push(s);
   }
+
+  const toggleScene = (key: string): void => {
+    setSceneOpen((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const renderSessionRow = (s: SessionItem): JSX.Element => {
     const isCurrent = currentSessionId === s.id;
@@ -362,7 +394,7 @@ function TaskTree({
           borderRadius: 6,
           cursor: "pointer",
           position: "relative",
-          background: isCurrent ? "rgba(255,255,255,0.8)" : "transparent",
+          background: isCurrent ? "var(--panel-bg-hover)" : "transparent",
           color: isCurrent ? "var(--text-primary)" : "var(--text-secondary)",
           fontWeight: isCurrent ? 600 : 400,
         }}
@@ -386,7 +418,7 @@ function TaskTree({
               border: "1px solid var(--border)",
               borderRadius: 4,
               padding: "2px 4px",
-              background: "#fff",
+              background: "var(--input-bg)",
               color: "var(--text-primary)",
               outline: "none",
             }}
@@ -405,9 +437,9 @@ function TaskTree({
                     fontSize: 9,
                     padding: "1px 6px",
                     borderRadius: 8,
-                    background: "#fff3e0",
-                    color: "#e65100",
-                    border: "1px solid #ffcc80",
+                    background: "var(--warning-bg)",
+                    color: "var(--warning-text)",
+                    border: "1px solid var(--warning-border)",
                     whiteSpace: "nowrap",
                   }}
                   title="会话被中断, 可断点继续"
@@ -417,7 +449,7 @@ function TaskTree({
               )}
             </span>
             <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
-              {s.locked_skill_name ?? "无 skill"}
+              {sceneName(s.locked_skill_name)}
               {s.last_turn > 0 ? ` · ${s.last_turn} 轮` : ""}
               {s.user_msg_count ? ` · ${s.user_msg_count} 条` : ""}
             </span>
@@ -475,7 +507,7 @@ function TaskTree({
               display: "flex",
               flexDirection: "column",
               gap: 2,
-              background: "rgba(255,255,255,0.95)",
+              background: "var(--panel-bg-hover)",
               border: "1px solid var(--border)",
               borderRadius: 6,
               padding: 4,
@@ -527,8 +559,8 @@ function TaskTree({
             flexShrink: 0,
             width: 24,
             height: 24,
-            border: "1px solid rgba(148,163,184,0.3)",
-            background: "rgba(255,255,255,0.6)",
+            border: "1px solid var(--border-color)",
+            background: "var(--button-ghost-bg)",
             color: "var(--text-secondary)",
             fontSize: 15,
             lineHeight: 1,
@@ -592,7 +624,7 @@ function TaskTree({
                 border: "1px solid var(--border)",
                 borderRadius: 6,
                 padding: "5px 8px",
-                background: "rgba(255,255,255,0.7)",
+                background: "var(--panel-bg)",
                 color: "var(--text-primary)",
                 outline: "none",
               }}
@@ -608,7 +640,7 @@ function TaskTree({
                   overflowY: "auto",
                   border: "1px solid var(--border)",
                   borderRadius: 6,
-                  background: "rgba(255,255,255,0.95)",
+                  background: "var(--panel-bg-hover)",
                   padding: 4,
                 }}
               >
@@ -676,25 +708,40 @@ function TaskTree({
               暂无历史会话, 点击 + 新建
             </div>
           )}
-          {folderOrder.map((key) => (
-            <div key={key || "__unfiled__"} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "4px 8px 2px",
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: "var(--text-tertiary)",
-                }}
-              >
-                {key ? `📁 ${key}` : "未分组"}
-                <span style={{ fontWeight: 400, fontSize: 10 }}>({groups.get(key)!.length})</span>
+          {/* 0.5.0 M1: 历史按场景分组(子瞻/白圭/清和 + 全局) */}
+          {[...SCENE_GROUPS, { key: "global", name: "全局", icon: "🌐" }].map((g) => {
+            const list = sceneMap.get(g.key) ?? [];
+            if (list.length === 0) return null;
+            const isOpen = sceneOpen[g.key] !== false;
+            return (
+              <div key={g.key} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <button
+                  onClick={() => toggleScene(g.key)}
+                  title={`${g.name}场景会话(${list.length})`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "4px 8px 2px",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: "var(--text-tertiary)",
+                    border: "none",
+                    background: "transparent",
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {g.icon} {g.name}
+                    <span style={{ fontWeight: 400, fontSize: 10 }}>({list.length})</span>
+                  </span>
+                  <span>{isOpen ? "▾" : "▸"}</span>
+                </button>
+                {isOpen && list.map(renderSessionRow)}
               </div>
-              {groups.get(key)!.map(renderSessionRow)}
-            </div>
-          ))}
+            );
+          })}
           {archivedSessions.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 4 }}>
               <button
@@ -781,20 +828,64 @@ export default function Sidebar({
   currentSessionId,
   onSwitchSession,
   status,
-  width = 220,
+  width = SIDEBAR_EXPANDED_WIDTH,
   onResumeSession,
+  theme,
+  toggleTheme,
+  agentName,
+  onRenameAgent,
+  onOpenMonitor,
+  monitorActive,
 }: {
   active: ViewKey;
   onChange: (v: ViewKey) => void;
   currentSessionId: number | null;
   onSwitchSession: (id: number, skillName?: string | null, modelId?: string | null) => void;
   status: "connected" | "disconnected" | "reconnecting";
-  /** V1.1 布局优化: 展开时的宽度(外部拖拽控制), 折叠仍为 44px */
+  /** 2026-08-10: 展开宽度由 App 以固定常量传入(不可拖拽); 折叠为 SIDEBAR_COLLAPSED_WIDTH */
   width?: number;
   /** V1.5 项-4: 断点恢复 —— 点击对 interrupted 会话发送 resume(可空: 兼容未接入方) */
   onResumeSession?: (id: number) => void;
+  /** 2026-08-08: 主题切换入口移到侧边栏(亮色/暗色滑块) */
+  theme?: "light" | "dark";
+  toggleTheme?: () => void;
+  /** V1.1-3.6 智能体显示名(侧边栏顶部展示) */
+  agentName?: string;
+  /** V1.1-3.6 改名回调(App.tsx 注入, PUT /admin/agent-profile) */
+  onRenameAgent?: (name: string) => Promise<void>;
+  /** 0.5.0 P4(2026-08-08 蒋先生反馈): 左上角 PA 图标点击 → 开启主智能体对话
+      (原"改名"功能已移至设置页「智能体名称配置」卡) */
+  onOpenMonitor?: () => void;
+  /** 0.5.0 P5: 主智能体是否有未关闭对话(PA 图标旁状态圆点: 绿=对话中/红=无) */
+  monitorActive?: boolean;
 }): JSX.Element {
   const [collapsed, setCollapsed] = useState(false);
+  // V1.1-3.6 改名 popover 状态(锚定在侧边栏顶部智能体标识)
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameErr, setRenameErr] = useState<string | null>(null);
+  const doRename = async (): Promise<void> => {
+    const v = renameValue.trim();
+    if (!v) {
+      setRenameErr("名称不能为空");
+      return;
+    }
+    if (!onRenameAgent) {
+      setRenameErr("当前环境不支持改名");
+      return;
+    }
+    setRenameSaving(true);
+    setRenameErr(null);
+    try {
+      await onRenameAgent(v);
+      setRenameOpen(false);
+    } catch (e) {
+      setRenameErr(String(e));
+    } finally {
+      setRenameSaving(false);
+    }
+  };
 
   const statusColor =
     status === "connected" ? "#4caf50" :
@@ -826,9 +917,9 @@ export default function Sidebar({
     <nav
       className="glass-sidebar"
       style={{
-        width: collapsed ? 44 : width,
+        width: collapsed ? SIDEBAR_COLLAPSED_WIDTH : width,
         flexShrink: 0,
-        padding: collapsed ? "20px 6px 16px" : "24px 16px 16px",
+        padding: collapsed ? "16px 6px 16px" : "16px 16px 16px",
         display: "flex",
         flexDirection: "column",
         gap: 4,
@@ -838,27 +929,105 @@ export default function Sidebar({
         boxSizing: "border-box",
         transition: "width 0.3s var(--transition-smooth), padding 0.3s var(--transition-smooth)",
         alignItems: collapsed ? "center" : "stretch",
+        position: "relative",
       }}
     >
-      {/* 折叠控制条: 按钮独占一行(展开靠右, 收起居中), 与右栏按钮同一水平高度 */}
+      {/* 顶部: 智能体标识(可点击改名) + 折叠按钮同行, 节省垂直空白与右侧对称
+          2026-08-10 21:55: 收起态修复 —— 原实现收起时仍渲染 28px 智能体头像
+          (flex:1) + 28px 折叠按钮, 挤在 44-12=32px 内容区内被截成半个。
+          与右栏 ArtifactPanel 行为对齐: 收起时只渲染折叠按钮并居中, 不渲染智能体按钮。 */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          justifyContent: collapsed ? "center" : "flex-end",
-          minHeight: 28,
-          marginBottom: collapsed ? 12 : 16,
-          whiteSpace: "nowrap",
+          justifyContent: collapsed ? "center" : "space-between",
+          gap: 8,
+          padding: collapsed ? "2px 0 10px" : "4px 4px 12px",
+          borderBottom: "1px solid rgba(148,163,184,0.15)",
+          marginBottom: 8,
+          flexShrink: 0,
         }}
       >
+        {!collapsed && (
+          <button
+            onClick={() => {
+              // 0.5.0 P4(2026-08-08 蒋先生反馈): PA 图标点击 → 开启主智能体对话
+              // (原"修改智能体名称"popover 已移除, 改名迁至设置页「智能体名称配置」卡)
+              if (onOpenMonitor) {
+                onOpenMonitor();
+              } else {
+                setRenameOpen((o) => !o);
+                setRenameValue(agentName || "私人智能体");
+                setRenameErr(null);
+              }
+            }}
+            title={`${agentName || "主智能体"}(点击进入主智能体对话)`}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: "4px 6px",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              minWidth: 0,
+              fontFamily: "inherit",
+              flex: 1,
+            }}
+          >
+            <RobotAvatar size={28} style={{ borderRadius: 8 }} />
+            {/* 0.5.0 P5(2026-08-08 蒋先生反馈): 排列方式与左下角"本地用户"卡片一致 ——
+                头像在左, 名称加粗在上, 状态行(7px 圆点 + 文字)在名称下方 */}
+            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, minWidth: 0 }}>
+              <span
+                style={{
+                  fontSize: 15,
+                  fontWeight: 700,
+                  color: "var(--text-primary)",
+                  letterSpacing: "-0.02em",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  lineHeight: 1.2,
+                }}
+              >
+                {agentName || "私人智能体"}
+              </span>
+              <span
+                title={monitorActive ? "主智能体对话中" : "主智能体无对话"}
+                style={{
+                  fontSize: 11,
+                  color: "var(--text-tertiary)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                  lineHeight: 1.2,
+                }}
+              >
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    flexShrink: 0,
+                    backgroundColor: monitorActive ? "#22c55e" : "#ef4444",
+                  }}
+                />
+                {monitorActive ? "对话中" : "无对话"}
+              </span>
+            </span>
+        </button>
+        )}
         <button
           onClick={() => setCollapsed(!collapsed)}
+          title={collapsed ? "展开侧边栏" : "收起侧边栏"}
           style={{
             width: 28,
             height: 28,
             borderRadius: 8,
-            border: "1px solid rgba(148,163,184,0.15)",
-            background: "rgba(255,255,255,0.5)",
+            border: "1px solid var(--border-color)",
+            background: "var(--button-ghost-bg)",
             cursor: "pointer",
             color: "var(--text-secondary)",
             fontSize: 13,
@@ -867,49 +1036,80 @@ export default function Sidebar({
             justifyContent: "center",
             flexShrink: 0,
           }}
-          title={collapsed ? "展开侧边栏" : "收起侧边栏"}
         >
           {collapsed ? "»" : "«"}
         </button>
       </div>
 
-      {!collapsed && (
+      {/* 改名 popover(锚定在 nav 顶部下方, 折叠态不显示) */}
+      {renameOpen && !collapsed && (
         <div
           style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "4px 12px 20px",
-            borderBottom: "1px solid rgba(148,163,184,0.15)",
-            marginBottom: 8,
-            width: "100%",
-            boxSizing: "border-box",
+            position: "absolute",
+            top: 56,
+            left: 12,
+            right: 12,
+            zIndex: 100,
+            padding: 12,
+            borderRadius: 12,
+            background: "var(--panel-bg-solid)",
+            border: "1px solid var(--border-color)",
+            boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
           }}
         >
-          <div
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 12,
-              background: "var(--gradient-logo)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "#fff",
-              fontWeight: 700,
-              fontSize: 16,
-              fontFamily: "var(--font-sans)",
-              boxShadow: "0 4px 12px rgba(139,92,246,0.25)",
-              flexShrink: 0,
-            }}
-          >
-            智
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 8 }}>
+            修改智能体名称
           </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-sans)", letterSpacing: "-0.02em", whiteSpace: "nowrap" }}>
-              私人智能体
-            </div>
-            <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>私人智能体 v2.1</div>
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void doRename();
+              else if (e.key === "Escape") setRenameOpen(false);
+            }}
+            disabled={renameSaving}
+            placeholder="输入新名称"
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              padding: "6px 8px",
+              borderRadius: 6,
+              border: "1px solid var(--border-strong, #94a3b8)",
+              background: "var(--input-bg)",
+              color: "var(--text-primary)",
+              fontSize: 13,
+              marginBottom: 8,
+            }}
+          />
+          {renameErr && (
+            <div style={{ fontSize: 11, color: "var(--danger-text)", marginBottom: 8 }}>{renameErr}</div>
+          )}
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              className="btn-primary"
+              disabled={renameSaving}
+              onClick={() => void doRename()}
+              style={{ flex: 1, padding: "6px 0", fontSize: 12 }}
+            >
+              {renameSaving ? "保存中…" : "保存"}
+            </button>
+            <button
+              onClick={() => setRenameOpen(false)}
+              disabled={renameSaving}
+              style={{
+                flexShrink: 0,
+                padding: "6px 12px",
+                fontSize: 12,
+                border: "1px solid rgba(148,163,184,0.4)",
+                borderRadius: 6,
+                background: "var(--panel-bg-solid)",
+                color: "var(--text-secondary)",
+                cursor: "pointer",
+              }}
+            >
+              取消
+            </button>
           </div>
         </div>
       )}
@@ -917,14 +1117,42 @@ export default function Sidebar({
       {collapsed ? (
         <div
           style={{
-            writingMode: "vertical-rl",
-            fontSize: 12,
-            color: "var(--text-tertiary)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 12,
             margin: "auto 0",
-            letterSpacing: "0.1em",
           }}
         >
-          导航
+          <div
+            style={{
+              writingMode: "vertical-rl",
+              fontSize: 12,
+              color: "var(--text-tertiary)",
+              letterSpacing: "0.1em",
+            }}
+          >
+            导航
+          </div>
+          {toggleTheme && (
+            <button
+              onClick={toggleTheme}
+              title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+              style={{
+                fontSize: 14,
+                border: "none",
+                background: "var(--button-ghost-bg)",
+                color: "var(--text-primary)",
+                borderRadius: 10,
+                width: 30,
+                height: 30,
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              {theme === "dark" ? "☀️" : "🌙"}
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -941,14 +1169,82 @@ export default function Sidebar({
           <NavLabel>系统</NavLabel>
           {SYSTEM_ITEMS.map(renderItem)}
 
+          {/* 2026-08-08: 主题切换入口(亮色/暗色滑块), 切主题时首页背景联动切换 */}
+          {toggleTheme && (
+            <div
+              style={{
+                marginTop: "auto",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 10px",
+                background: "var(--panel-bg)",
+                borderRadius: "var(--radius-sm)",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 11,
+                  color: theme === "light" ? "var(--text-primary)" : "var(--text-tertiary)",
+                  fontWeight: theme === "light" ? 600 : 400,
+                  flexShrink: 0,
+                }}
+              >
+                ☀️ 亮色
+              </span>
+              <button
+                onClick={toggleTheme}
+                role="switch"
+                aria-checked={theme === "dark"}
+                title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+                style={{
+                  width: 42,
+                  height: 22,
+                  borderRadius: 11,
+                  border: "none",
+                  cursor: "pointer",
+                  position: "relative",
+                  flexShrink: 0,
+                  padding: 0,
+                  background:
+                    theme === "dark" ? "var(--gradient-indigo)" : "var(--surface-2)",
+                  transition: "background 0.3s var(--transition-smooth)",
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 2,
+                    left: theme === "dark" ? 22 : 2,
+                    width: 18,
+                    height: 18,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+                    transition: "left 0.3s var(--transition-smooth)",
+                  }}
+                />
+              </button>
+              <span
+                style={{
+                  fontSize: 11,
+                  color: theme === "dark" ? "var(--text-primary)" : "var(--text-tertiary)",
+                  fontWeight: theme === "dark" ? 600 : 400,
+                  flexShrink: 0,
+                }}
+              >
+                🌙 暗色
+              </span>
+            </div>
+          )}
+
           <div
             style={{
-              marginTop: "auto",
               padding: 12,
               display: "flex",
               alignItems: "center",
               gap: 10,
-              background: "rgba(255,255,255,0.5)",
+              background: "var(--panel-bg)",
               borderRadius: "var(--radius-sm)",
             }}
           >

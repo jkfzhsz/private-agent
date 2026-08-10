@@ -5,6 +5,13 @@ import { useState } from "react";
 
 import FilePanel from "./FilePanel";
 
+// 2026-08-10: 右侧面板固定宽度两态(展开/折叠), 取消外部拖拽调宽
+// 与左栏 Sidebar 对称: 折叠宽度均为 44px
+// 2026-08-10 21:15: 展开宽度 300→280 —— 蒋先生反馈右栏过宽, 收窄后
+// 中间区随之变宽 20px, 与右栏之间的视觉空间更开阔(几何缝隙保持 12px)
+export const PANEL_EXPANDED_WIDTH = 280;
+export const PANEL_COLLAPSED_WIDTH = 44;
+
 export interface Artifact {
   type: "image" | "file";
   url: string;
@@ -15,12 +22,12 @@ export default function ArtifactPanel({
   open,
   artifacts,
   onToggle,
-  width = 300,
+  width = PANEL_EXPANDED_WIDTH,
 }: {
   open: boolean;
   artifacts: Artifact[];
   onToggle: () => void;
-  /** V1.1 布局优化: 展开时的宽度(外部拖拽控制), 折叠仍为 44px */
+  /** 2026-08-10: 展开宽度由 App 以固定常量传入(不可拖拽); 折叠为 PANEL_COLLAPSED_WIDTH */
   width?: number;
 }): JSX.Element {
   const [tab, setTab] = useState<"artifacts" | "files">("artifacts");
@@ -29,7 +36,7 @@ export default function ArtifactPanel({
     <aside
       className="glass-sidebar"
       style={{
-        width: open ? width : 44,
+        width: open ? width : PANEL_COLLAPSED_WIDTH,
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
@@ -58,7 +65,7 @@ export default function ArtifactPanel({
             height: 28,
             borderRadius: 8,
             border: "1px solid rgba(148,163,184,0.15)",
-            background: "rgba(255,255,255,0.5)",
+            background: "var(--panel-bg)",
             cursor: "pointer",
             color: "var(--text-secondary)",
             fontSize: 13,
@@ -89,7 +96,9 @@ export default function ArtifactPanel({
                   border: "1px solid",
                   borderColor: tab === t.key ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.3)",
                   background: tab === t.key ? "rgba(139,92,246,0.1)" : "transparent",
-                  color: tab === t.key ? "#6d28d9" : "var(--text-tertiary)",
+                  // 2026-08-08: 激活态用 var(--text-primary)(亮色深/暗色浅)而非硬编码深紫;
+                  // 暗色主题下深紫字在紫色背景上对比度极低, 看起来像"残留黑字"
+                  color: tab === t.key ? "var(--text-primary)" : "var(--text-tertiary)",
                   fontWeight: tab === t.key ? 600 : 400,
                   cursor: "pointer",
                 }}
@@ -133,7 +142,7 @@ export default function ArtifactPanel({
               key={a.url}
               style={{
                 borderRadius: "var(--radius-sm)",
-                background: "rgba(255,255,255,0.5)",
+                background: "var(--panel-bg)",
                 overflow: "hidden",
                 border: "1px solid rgba(148,163,184,0.12)",
               }}

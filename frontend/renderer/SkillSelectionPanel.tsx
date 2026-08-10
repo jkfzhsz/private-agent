@@ -15,6 +15,9 @@ export interface SkillInfo {
   version: string;
   description: string;
   enabled: boolean;
+  // 0.5.0 M1: 场景名(子瞻/白圭/清和, 显示层统一 scene_name → display_name → name)
+  scene_name?: string;
+  display_name?: string;
   permissions?: {
     allow_file_write: boolean;
     allow_network: boolean;
@@ -31,18 +34,26 @@ interface SkillSelectionPanelProps {
 
 const API_BASE = "http://localhost:8765/admin";
 
+// 0.5.0 M1: 场景中文名(后端 skill.yaml scene_name 优先, 此处为旧后端回退)
 const SCENARIO_LABELS: Record<string, string> = {
-  office: "办公",
-  data_analysis: "数据分析",
-  frontend_design: "前端设计",
+  office: "子瞻",
+  data_analysis: "白圭",
+  frontend_design: "清和",
+};
+
+// 显示名解析: scene_name → display_name → SCENARIO_LABELS → name
+const displayName = (s: SkillInfo): string => {
+  if (s.scene_name && s.scene_name.trim() !== "") return s.scene_name.trim();
+  if (s.display_name && s.display_name.trim() !== "") return s.display_name.trim();
+  return SCENARIO_LABELS[s.name] ?? s.name;
 };
 
 // 阶段三批次3(T3.2): Required Permissions 徽章样式
 const permChipStyle: CSSProperties = {
   fontSize: 11,
-  color: "#6d28d9",
-  background: "#f3e8ff",
-  border: "1px solid #e9d5ff",
+  color: "var(--accent-soft-text)",
+  background: "var(--accent-soft-bg)",
+  border: "1px solid var(--border-color)",
   borderRadius: 10,
   padding: "1px 8px",
 };
@@ -121,7 +132,7 @@ export default function SkillSelectionPanel({
         <div
           role="alert"
           style={{
-            background: "#ffebee", color: "#c62828", padding: "8px 12px",
+            background: "var(--error-bg)", color: "var(--danger-text)", padding: "8px 12px",
             borderRadius: 6, fontSize: 13, marginBottom: 12,
           }}
         >
@@ -144,7 +155,7 @@ export default function SkillSelectionPanel({
           >
             <span>
               <span style={{ fontWeight: 600, fontSize: 15 }}>
-                {SCENARIO_LABELS[skill.name] ?? skill.name}
+                {displayName(skill)}
               </span>
               <span style={{ color: "#999", fontSize: 12, marginLeft: 8 }}>
                 v{skill.version}

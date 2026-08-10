@@ -245,7 +245,7 @@ export default function KnowledgeView({
   };
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", scrollbarGutter: "stable" }}>
       {/* 统计卡 */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 12 }}>
         <div className="stat-card animate-in delay-1">
@@ -292,7 +292,7 @@ export default function KnowledgeView({
             style={{
               fontSize: 13, fontWeight: 600, cursor: "pointer",
               padding: "8px 16px", borderRadius: 8,
-              background: "var(--gradient-indigo)", color: "#fff",
+              background: "var(--gradient-indigo)", color: "var(--on-accent)",
             }}
           >
             📄 上传文件(txt/md/csv/代码等)
@@ -321,9 +321,9 @@ export default function KnowledgeView({
             marginBottom: 8,
             padding: "8px 12px",
             borderRadius: 8,
-            background: "#eef6ff",
-            border: "1px solid #b8d9f5",
-            color: "#1d4e89",
+            background: "var(--tool-call-bg)",
+            border: "1px solid var(--border-color)",
+            color: "var(--text-secondary)",
             lineHeight: 1.6,
           }}
         >
@@ -372,7 +372,7 @@ export default function KnowledgeView({
               style={{
                 display: "flex", alignItems: "center", gap: 12,
                 padding: "12px 14px", borderRadius: "var(--radius-sm)",
-                background: "rgba(255,255,255,0.5)",
+                background: "var(--panel-bg)",
               }}
             >
               <span style={{ fontSize: 15 }}>📚</span>
@@ -399,7 +399,7 @@ export default function KnowledgeView({
                 style={{
                   flexShrink: 0, fontSize: 12, padding: "4px 10px",
                   border: "1px solid rgba(109,40,217,0.3)", borderRadius: 6,
-                  background: "rgba(237,233,254,0.6)", color: "#5b21b6",
+                  background: "var(--accent-soft-bg)", color: "var(--accent-soft-text)",
                   cursor: "pointer",
                 }}
               >
@@ -457,7 +457,7 @@ export default function KnowledgeView({
             title="top_k"
             style={{
               width: 60, padding: "6px 8px", borderRadius: 6, fontSize: 12,
-              border: "1px solid rgba(148,163,184,0.3)", background: "rgba(255,255,255,0.6)",
+              border: "1px solid rgba(148,163,184,0.3)", background: "var(--panel-bg)",
             }}
           />
           <button className="btn-primary" onClick={() => void runSearchTest()} disabled={testing}>
@@ -472,7 +472,7 @@ export default function KnowledgeView({
                 key={`${r.chunk_id ?? i}-${i}`}
                 style={{
                   padding: "10px 12px", borderRadius: 8,
-                  background: "rgba(255,255,255,0.5)", fontSize: 12,
+                  background: "var(--panel-bg)", fontSize: 12,
                 }}
               >
                 <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
@@ -506,7 +506,7 @@ export default function KnowledgeView({
               key={dt}
               style={{
                 padding: "10px 12px", borderRadius: 8,
-                background: "rgba(255,255,255,0.5)", fontSize: 12,
+                background: "var(--panel-bg)", fontSize: 12,
                 display: "flex", flexDirection: "column", gap: 6,
               }}
             >

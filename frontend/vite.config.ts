@@ -11,5 +11,15 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./test-setup.ts"],
+    // 排除构建产物/打包目录里的第三方测试(release2/release3/dist 为
+    // electron-builder 输出, 内含上传的第三方源码包测试, 会污染全量扫描)
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/dist-main/**",
+      "**/release2/**",
+      "**/release3/**",
+      "**/build/**",
+    ],
   },
 });

@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
+import RobotAvatar from "../components/RobotAvatar";
 
 const API_BASE = "http://127.0.0.1:8765/admin";
 
@@ -12,27 +13,16 @@ interface SkillItem {
   version: string;
   description: string;
   enabled: boolean;
+  // V1.1-3.6 改名:display_name 为空回退 name;后端 SkillManifest 新增同名字段
+  display_name: string;
+  avatar: string;
+  tags: string[];
   permissions: {
     allow_file_write: boolean;
     allow_network: boolean;
     sandbox_enabled: boolean;
     max_file_size_mb: number;
   };
-}
-
-const GRAVATAR_COLORS = [
-  "linear-gradient(135deg, #818cf8, #6366f1)",
-  "linear-gradient(135deg, #c084fc, #a855f7)",
-  "linear-gradient(135deg, #f472b6, #ec4899)",
-  "linear-gradient(135deg, #34d399, #10b981)",
-  "linear-gradient(135deg, #fbbf24, #f59e0b)",
-  "linear-gradient(135deg, #38bdf8, #0284c7)",
-];
-
-function colorFor(name: string): string {
-  let h = 0;
-  for (let i = 0; i < name.length; i += 1) h = (h * 31 + name.charCodeAt(i)) % 997;
-  return GRAVATAR_COLORS[h % GRAVATAR_COLORS.length];
 }
 
 export default function AgentLibraryView({
@@ -101,6 +91,11 @@ export default function AgentLibraryView({
     checks: { name: string; ok: boolean; detail: string }[];
   } | null>(null);
 
+  // V1.1-3.6 改名:正在编辑 display_name 的技能名;inputValue 为编辑框内容
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameInput, setRenameInput] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+
   const testSkill = async (s: SkillItem): Promise<void> => {
     setTesting(s.name);
     setTestResult(null);
@@ -123,8 +118,36 @@ export default function AgentLibraryView({
     }
   };
 
+  // V1.1-3.6 改名: PUT /admin/skills/{name}/meta body.display_name
+  // 后端把 display_name 写入 skill.yaml + PG manifest(标识符 name 不变)
+  const submitRename = async (s: SkillItem): Promise<void> => {
+    const trimmed = renameInput.trim();
+    if (!trimmed) {
+      setMsg({ ok: false, text: "显示名不能为空" });
+      return;
+    }
+    setRenameBusy(true);
+    try {
+      const resp = await adminFetch(`${API_BASE}/skills/${s.name}/meta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: trimmed }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail ?? data.error ?? `HTTP ${resp.status}`);
+      setMsg({ ok: true, text: `已将 "${s.name}" 重命名为 "${trimmed}"` });
+      setRenaming(null);
+      setRenameInput("");
+      void load();
+    } catch (e) {
+      setMsg({ ok: false, text: `改名失败: ${String(e)}` });
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", scrollbarGutter: "stable" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>技能库</div>
@@ -164,29 +187,42 @@ export default function AgentLibraryView({
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 10,
-                  background: colorFor(s.name),
-                  color: "#fff",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontWeight: 700,
-                  fontSize: 16,
-                  flexShrink: 0,
-                }}
-              >
-                {s.name.slice(0, 1).toUpperCase()}
-              </div>
+              {/* 智能体头像:统一桌面图标款式(蓝紫渐变机器人,所有技能一致品牌) */}
+              <RobotAvatar size={40} style={{ borderRadius: 10 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {s.name}
-                </div>
+                {renaming === s.name ? (
+                  <input
+                    autoFocus
+                    value={renameInput}
+                    onChange={(e) => setRenameInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void submitRename(s);
+                      else if (e.key === "Escape") {
+                        setRenaming(null);
+                        setRenameInput("");
+                      }
+                    }}
+                    disabled={renameBusy}
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 700,
+                      padding: "2px 6px",
+                      borderRadius: 4,
+                      border: "1px solid var(--border-strong, #94a3b8)",
+                      background: "var(--input-bg)",
+                      color: "var(--text-primary)",
+                      width: "100%",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                ) : (
+                  <div style={{ fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {s.display_name || s.name}
+                  </div>
+                )}
                 <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                   v{s.version} · {s.enabled ? "已启用" : "已停用"}
+                  {s.display_name && s.display_name !== s.name ? ` · ${s.name}` : ""}
                 </div>
               </div>
               <label title="启用/停用" style={{ flexShrink: 0, display: "flex", alignItems: "center", cursor: "pointer" }}>
@@ -197,48 +233,109 @@ export default function AgentLibraryView({
               {s.description || "暂无简介"}
             </div>
             <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
-              <button
-                className="btn-primary"
-                style={{ flex: 1, padding: "6px 0", fontSize: 12 }}
-                disabled={!s.enabled}
-                title={s.enabled ? `调用 ${s.name} 开启对话` : "已停用"}
-                onClick={() => onActivate(s.name)}
-              >
-                ▶ 调用
-              </button>
-              <button
-                style={{
-                  flexShrink: 0,
-                  padding: "6px 12px",
-                  fontSize: 12,
-                  border: "1px solid rgba(148,163,184,0.4)",
-                  borderRadius: 6,
-                  background: "#fff",
-                  color: "var(--text-secondary)",
-                  cursor: "pointer",
-                }}
-                title="一键验证技能能否加载/工具是否齐全"
-                onClick={() => void testSkill(s)}
-                disabled={testing === s.name}
-              >
-                {testing === s.name ? "测试中…" : "🔍 测试"}
-              </button>
-              <button
-                style={{
-                  flexShrink: 0,
-                  padding: "6px 12px",
-                  fontSize: 12,
-                  border: "1px solid rgba(220,38,38,0.3)",
-                  borderRadius: 6,
-                  background: "rgba(254,226,226,0.4)",
-                  color: "#dc2626",
-                  cursor: "pointer",
-                }}
-                title="删除技能"
-                onClick={() => void removeSkill(s)}
-              >
-                🗑 删除
-              </button>
+              {renaming === s.name ? (
+                <>
+                  <button
+                    style={{
+                      flex: 1,
+                      padding: "6px 0",
+                      fontSize: 12,
+                      border: "1px solid rgba(22,163,74,0.4)",
+                      borderRadius: 6,
+                      background: "rgba(220,252,231,0.5)",
+                      color: "#15803d",
+                      cursor: renameBusy ? "wait" : "pointer",
+                    }}
+                    disabled={renameBusy}
+                    onClick={() => void submitRename(s)}
+                  >
+                    {renameBusy ? "保存中…" : "✓ 保存"}
+                  </button>
+                  <button
+                    style={{
+                      flexShrink: 0,
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      border: "1px solid rgba(148,163,184,0.4)",
+                      borderRadius: 6,
+                      background: "var(--panel-bg-solid)",
+                      color: "var(--text-secondary)",
+                      cursor: "pointer",
+                    }}
+                    disabled={renameBusy}
+                    onClick={() => {
+                      setRenaming(null);
+                      setRenameInput("");
+                    }}
+                  >
+                    取消
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="btn-primary"
+                    style={{ flex: 1, padding: "6px 0", fontSize: 12 }}
+                    disabled={!s.enabled}
+                    title={s.enabled ? `调用 ${s.name} 开启对话` : "已停用"}
+                    onClick={() => onActivate(s.name)}
+                  >
+                    ▶ 调用
+                  </button>
+                  <button
+                    style={{
+                      flexShrink: 0,
+                      padding: "6px 10px",
+                      fontSize: 12,
+                      border: "1px solid rgba(148,163,184,0.4)",
+                      borderRadius: 6,
+                      background: "var(--panel-bg-solid)",
+                      color: "var(--text-secondary)",
+                      cursor: "pointer",
+                    }}
+                    title="改名(设置显示名, 标识符不变)"
+                    onClick={() => {
+                      setRenaming(s.name);
+                      setRenameInput(s.display_name || s.name);
+                    }}
+                  >
+                    ✏️ 重命名
+                  </button>
+                  <button
+                    style={{
+                      flexShrink: 0,
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      border: "1px solid rgba(148,163,184,0.4)",
+                      borderRadius: 6,
+                      background: "var(--panel-bg-solid)",
+                      color: "var(--text-secondary)",
+                      cursor: "pointer",
+                    }}
+                    title="一键验证技能能否加载/工具是否齐全"
+                    onClick={() => void testSkill(s)}
+                    disabled={testing === s.name}
+                  >
+                    {testing === s.name ? "测试中…" : "🔍 测试"}
+                  </button>
+                  <button
+                    style={{
+                      flexShrink: 0,
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      border: "1px solid rgba(220,38,38,0.3)",
+                      borderRadius: 6,
+                      background: "rgba(254,226,226,0.4)",
+                      color: "#dc2626",
+                      cursor: "pointer",
+                    }}
+                    title="删除技能"
+                    onClick={() => void removeSkill(s)}
+                  >
+                    🗑 删除
+                  </button>
+                </>
+              )}
             </div>
             {testResult && testResult.name === s.name && (
               <div

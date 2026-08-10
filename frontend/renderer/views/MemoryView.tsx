@@ -15,12 +15,16 @@ interface MemoryItem {
   created_at: string | null;
   last_accessed_at: string | null;
   access_count: number;
+  // 0.5.0 M1: 场景归属(global/office/data_analysis/frontend_design)
+  scope?: string;
 }
 
 interface MemoryConfig {
   enabled: boolean;
   inject_limit: number;
+  inject_global_n: number;
   extract_interval_turns: number;
+  archive_before_evict: boolean;
   eviction: {
     max_active_count: number;
     min_importance_threshold: number;
@@ -38,6 +42,15 @@ const TYPE_META: Record<string, { label: string; color: string }> = {
 
 const TYPES = ["preference", "fact", "todo", "decision", "correction"];
 
+// 0.5.0 M1: 场景过滤选项(全局 + 三场景)
+const SCOPES: { v: string; label: string }[] = [
+  { v: "", label: "全部" },
+  { v: "global", label: "全局" },
+  { v: "office", label: "子瞻" },
+  { v: "data_analysis", label: "白圭" },
+  { v: "frontend_design", label: "清和" },
+];
+
 export default function MemoryView({
   sessionId,
   onOpenSession,
@@ -48,6 +61,8 @@ export default function MemoryView({
 }): JSX.Element {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [typeFilter, setTypeFilter] = useState("");
+  // 0.5.0 M1: 场景过滤(空=全部)
+  const [scopeFilter, setScopeFilter] = useState("");
   const [searchQ, setSearchQ] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -58,6 +73,8 @@ export default function MemoryView({
   // 手动新增
   const [newContent, setNewContent] = useState("");
   const [newType, setNewType] = useState("fact");
+  // 0.5.0 M1: 新增记忆场景归属(默认 global)
+  const [newScope, setNewScope] = useState("global");
   const [newImportance, setNewImportance] = useState(0.5);
   const [adding, setAdding] = useState(false);
   const [addMsg, setAddMsg] = useState<string | null>(null);
@@ -73,6 +90,7 @@ export default function MemoryView({
     try {
       const params = new URLSearchParams({ limit: "100" });
       if (typeFilter) params.set("type", typeFilter);
+      if (scopeFilter) params.set("scope", scopeFilter);
       if (searchQ.trim()) params.set("q", searchQ.trim());
       const resp = await adminFetch(`${API_BASE}/memories?${params.toString()}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -82,7 +100,7 @@ export default function MemoryView({
     } finally {
       setLoading(false);
     }
-  }, [typeFilter, searchQ]);
+  }, [typeFilter, scopeFilter, searchQ]);
 
   useEffect(() => {
     void loadMemories();
@@ -142,6 +160,8 @@ export default function MemoryView({
           content,
           type: newType,
           importance: newImportance,
+          // 0.5.0 M1: 场景归属(空=global)
+          scope: newScope,
         }),
       });
       const data = await resp.json();
@@ -180,6 +200,9 @@ export default function MemoryView({
         body: JSON.stringify({
           enabled: cfg.enabled,
           inject_limit: Number(cfg.inject_limit),
+          // 0.5.0 M1: 全局常驻画像条数 + 驱逐前归档
+          inject_global_n: Number(cfg.inject_global_n),
+          archive_before_evict: cfg.archive_before_evict,
           extract_interval_turns: Number(cfg.extract_interval_turns),
           eviction_max_active_count: Number(cfg.eviction.max_active_count),
           eviction_min_importance_threshold: Number(
@@ -208,13 +231,13 @@ export default function MemoryView({
       style={{
         width: 76, padding: "4px 8px", borderRadius: 6, fontSize: 12,
         border: "1px solid rgba(148,163,184,0.3)",
-        background: "rgba(255,255,255,0.6)",
+        background: "var(--panel-bg)",
       }}
     />
   );
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4 }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", scrollbarGutter: "stable" }}>
       {/* 操作行: 提取 + 新增 */}
       <div className="stat-card animate-in delay-1" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
         <input
@@ -239,10 +262,21 @@ export default function MemoryView({
         <select
           value={newType}
           onChange={(e) => setNewType(e.target.value)}
-          style={{ padding: "6px 8px", borderRadius: 6, fontSize: 12, border: "1px solid rgba(148,163,184,0.3)", background: "rgba(255,255,255,0.6)" }}
+          style={{ padding: "6px 8px", borderRadius: 6, fontSize: 12, border: "1px solid rgba(148,163,184,0.3)", background: "var(--panel-bg)" }}
         >
           {TYPES.map((t) => (
             <option key={t} value={t}>{TYPE_META[t]?.label ?? t}</option>
+          ))}
+        </select>
+        {/* 0.5.0 M1: 新增记忆场景归属 */}
+        <select
+          value={newScope}
+          onChange={(e) => setNewScope(e.target.value)}
+          title="记忆场景归属"
+          style={{ padding: "6px 8px", borderRadius: 6, fontSize: 12, border: "1px solid rgba(148,163,184,0.3)", background: "var(--panel-bg)" }}
+        >
+          {SCOPES.filter((s) => s.v !== "").map((s) => (
+            <option key={s.v} value={s.v}>{s.label}</option>
           ))}
         </select>
         <input
@@ -253,7 +287,7 @@ export default function MemoryView({
           value={String(newImportance)}
           onChange={(e) => setNewImportance(Number(e.target.value))}
           title="重要度 0~1"
-          style={{ width: 56, padding: "6px 8px", borderRadius: 6, fontSize: 12, border: "1px solid rgba(148,163,184,0.3)", background: "rgba(255,255,255,0.6)" }}
+          style={{ width: 56, padding: "6px 8px", borderRadius: 6, fontSize: 12, border: "1px solid rgba(148,163,184,0.3)", background: "var(--panel-bg)" }}
         />
         <button
           className="btn-primary"
@@ -282,6 +316,18 @@ export default function MemoryView({
               </label>
               <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
                 注入上限 {numInput(cfg.inject_limit, (n) => setCfg({ ...cfg, inject_limit: n }))}
+              </label>
+              {/* 0.5.0 M1: 全局常驻画像条数(其余配额给场景记忆) */}
+              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                全局画像(条) {numInput(cfg.inject_global_n, (n) => setCfg({ ...cfg, inject_global_n: n }))}
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={cfg.archive_before_evict}
+                  onChange={(e) => setCfg({ ...cfg, archive_before_evict: e.target.checked })}
+                />
+                驱逐前归档
               </label>
               <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
                 提取间隔(轮) {numInput(cfg.extract_interval_turns, (n) => setCfg({ ...cfg, extract_interval_turns: n }))}
@@ -329,6 +375,17 @@ export default function MemoryView({
                 {f.l}
               </button>
             ))}
+            {/* 0.5.0 M1: 场景过滤(全局/子瞻/白圭/清和) */}
+            {SCOPES.map((f) => (
+              <button
+                key={f.v || "__all__"}
+                className={`nav-item${scopeFilter === f.v ? " active" : ""}`}
+                style={{ width: "auto", padding: "6px 12px", fontSize: 12 }}
+                onClick={() => setScopeFilter(f.v)}
+              >
+                {f.label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -348,7 +405,7 @@ export default function MemoryView({
                 style={{
                   display: "flex", alignItems: "flex-start", gap: 12,
                   padding: "12px 14px", borderRadius: "var(--radius-sm)",
-                  background: "rgba(255,255,255,0.5)",
+                  background: "var(--panel-bg)",
                 }}
               >
                 <span
@@ -365,6 +422,12 @@ export default function MemoryView({
                     {m.content}
                   </div>
                   <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+                    {/* 0.5.0 M1: 场景标签(全局不标) */}
+                    {m.scope && m.scope !== "global" && (
+                      <span style={{ marginRight: 8, color: "#7c3aed" }}>
+                        @{m.scope}
+                      </span>
+                    )}
                     重要度 {m.importance?.toFixed(2) ?? "—"} · 访问 {m.access_count} 次
                     {m.created_at ? ` · ${new Date(m.created_at).toLocaleString()}` : ""}
                   </div>
@@ -376,7 +439,7 @@ export default function MemoryView({
                       style={{
                         marginTop: 6, fontSize: 11, padding: "2px 10px",
                         borderRadius: 10, border: "1px solid rgba(139,92,246,0.3)",
-                        background: "rgba(237,233,254,0.5)", color: "#6d28d9",
+                        background: "var(--accent-soft-bg)", color: "var(--accent-soft-text)",
                         cursor: "pointer",
                       }}
                     >

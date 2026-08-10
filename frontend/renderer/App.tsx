@@ -8,19 +8,21 @@
 // - ACK 机制:收到 react_event 后发送 ack(session_id + turn)
 // - session_id 管理:首次连接时从 URL 参数获取或生成
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import LiquidBackground from "./components/LiquidBackground";
-import Sidebar, { type ViewKey } from "./components/Sidebar";
-import ArtifactPanel, { type Artifact } from "./components/ArtifactPanel";
+import Sidebar, { type ViewKey, SIDEBAR_EXPANDED_WIDTH } from "./components/Sidebar";
+import ArtifactPanel, { type Artifact, PANEL_EXPANDED_WIDTH } from "./components/ArtifactPanel";
 import AgentLibraryView from "./views/AgentLibraryView";
-import ResizeHandle from "./components/ResizeHandle";
 import HomeView from "./views/HomeView";
 import KnowledgeView from "./views/KnowledgeView";
 import MemoryView from "./views/MemoryView";
 import SettingsView from "./views/SettingsView";
+import RobotAvatar from "./components/RobotAvatar";
 import { deAIfy } from "./utils/deAIfy";
 import "./styles/design-tokens.css";
 
 import { adminFetch } from "./utils/apiClient";
+
 // V1.5 项-1(ADR-012 §3.4 M3): 子任务卡片面板(WS 即时刷新 + DB 轮询兜底)
 import SubagentPanel, {
   createSubagent,
@@ -68,6 +70,9 @@ interface WSMessage {
   count?: number;
   effective_offset?: number;
   message?: string;
+  // 2026-08-10 22:00: 后端 replay 重放的历史事件带此标记, 前端据此跳过
+  // 确认弹窗等实时副作用(历史工具调用已执行完毕, 不应再次触发权限确认)
+  replayed?: boolean;
   // V1.5 项-1(M3): 子代理事件(后端 delegate_subtask / runner 推送)
   subagent_id?: number;
   task_id?: string;
@@ -104,7 +109,21 @@ const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string 
 
 // M3 AC-9: tool_result 中 outputs/*.png 等图片路径解析(蓝图 §7.12)
 // 匹配 "outputs/foo.png" 或 "/outputs/foo-bar.jpg" 形式的路径
-const IMAGE_PATH_RE = /(?:^|[^\w/])((?:\/?outputs\/)?[\w\-]+\.(?:png|jpg|jpeg|gif|svg|webp))/gi;
+// 2026-08-10 22:00: [\w\-] → [\w\-\u4e00-\u9fff] 支持中文文件名(如 分析报告.png),
+// 原实现 \w 不含中文, 中文名产物提取不到导致右栏产物区为空
+const IMAGE_PATH_RE = /(?:^|[^\w/])((?:\/?outputs\/)?[\w\-\u4e00-\u9fff]+\.(?:png|jpg|jpeg|gif|svg|webp))/gi;
+
+// 0.5.0 M1(2026-08-08): 场景技术标识 → 中文名显示映射(与后端 skill.yaml
+// scene_name 同步; activeSkill 存技术标识, 显示层映射为子瞻/白圭/清和)。
+const SCENE_NAME_MAP: Record<string, string> = {
+  office: "子瞻",
+  data_analysis: "白圭",
+  frontend_design: "清和",
+};
+const sceneDisplayName = (skill: string | null): string => {
+  if (!skill) return "未锁定场景";
+  return SCENE_NAME_MAP[skill] ?? skill;
+};
 
 function extractImagePaths(text: string): string[] {
   if (!text) return [];
@@ -123,7 +142,8 @@ const FILES_BASE = "http://127.0.0.1:8765/files/outputs";
 function imagePathToUrl(path: string): string {
   // 取 outputs/ 之后的部分作为 filename,拼接后端文件服务绝对地址
   // (vite 5173 下相对路径会请求前端自身导致 404)
-  const match = path.match(/outputs\/([\w\-\.]+)$/i);
+  // 2026-08-10 22:00: [\w\-\.] → [\w\-\u4e00-\u9fff] 支持中文文件名
+  const match = path.match(/outputs\/([\w\-\u4e00-\u9fff]+)$/i);
   const filename = match ? match[1] : path.replace(/^\/?outputs\//, "");
   return `${FILES_BASE}/${filename}`;
 }
@@ -148,9 +168,10 @@ const taskBtnStyle: React.CSSProperties = {
   fontSize: 12,
   padding: "5px 14px",
   borderRadius: 10,
-  border: "1px solid #ddd",
-  background: "#fff",
-  color: "#334155",
+  border: "1px solid var(--border-strong)",
+  background: "var(--panel-bg-solid)",
+  // 2026-08-08: 硬编码 #334155 在暗色下(深底)几乎看不见 → 语义变量
+  color: "var(--text-primary)",
   cursor: "pointer",
 };
 
@@ -189,9 +210,9 @@ function MsgActionBtn({
       title={title}
       style={{
         fontSize: 11,
-        border: "1px solid #e5e7eb",
-        background: "#f9fafb",
-        color: danger ? "#dc2626" : "#6b7280",
+        border: "1px solid var(--border-color)",
+        background: "var(--surface-1)",
+        color: danger ? "#dc2626" : "var(--text-secondary)",
         borderRadius: 10,
         padding: "3px 10px",
         cursor: "pointer",
@@ -243,6 +264,16 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
   }
 }
 
+// 0.5.1(2026-08-10 蒋先生要求"错误零静默"): 错误分类着色 —— 按消息前缀
+// 【设定问题】橙 / 【程序异常】红 / 【能力边界】蓝, 让用户一眼区分问题归因
+function errorCategoryColor(message?: unknown): string | null {
+  const msg = String(message ?? "");
+  if (msg.includes("【设定问题】")) return "#d97706";
+  if (msg.includes("【程序异常】")) return "#dc2626";
+  if (msg.includes("【能力边界】")) return "#2563eb";
+  return null;
+}
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 视图组件(评估已移除; 设置/知识库/记忆见 views/ 目录; 首页见 HomeView)
@@ -255,6 +286,36 @@ function formatPayload(eventType: EventType, payload: Record<string, unknown>): 
 export default function App(): JSX.Element {
   const [events, setEvents] = useState<ReactEvent[]>([]);
   const [input, setInput] = useState("");
+  // 0.5.1 A(2026-08-09 蒋先生反馈): 权限确认全局弹窗 —— 独立置顶,
+  // 任何窗口收到确认请求都弹出(不再只渲染在对话流内导致错过/超时)。
+  // payload 来自 tool_confirmation_required 事件; 倒计时默认 60s(与后端一致)。
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    confirmation_id: string;
+    session_id: number;
+    message: string;
+    risk?: string;
+    reason?: string;
+    argsPreview?: string;
+  } | null>(null);
+  // 确认弹窗倒计时(秒)。比后端超时(60s)提前 5s 关闭 —— 避免用户在
+  // 超时边界点击"同意"时后端 confirmation_id 已过期 → unknown confirmation_id
+  const [confirmCountdown, setConfirmCountdown] = useState<number>(55);
+  useEffect(() => {
+    if (!pendingConfirm) return;
+    setConfirmCountdown(55);
+    const iv = setInterval(() => {
+      setConfirmCountdown((c) => {
+        if (c <= 1) {
+          clearInterval(iv);
+          // 超时: 关闭弹窗(后端会返回 Tool confirmation timeout, 无需前端回传)
+          setPendingConfirm(null);
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [pendingConfirm]);
   // 阶段三批次3(T3.4): 编辑重发纠正沉淀 —— 记录被编辑的原消息(发送时提取 correction 记忆)
   const [editingOriginal, setEditingOriginal] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnStatus>("disconnected");
@@ -266,7 +327,9 @@ export default function App(): JSX.Element {
   const [isGenerating, setIsGenerating] = useState(false);
   // 对话中切换技能弹层
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
-  const [availableSkills, setAvailableSkills] = useState<{ name: string; version: string; enabled: boolean }[]>([]);
+  const [availableSkills, setAvailableSkills] = useState<
+    { name: string; version: string; enabled: boolean; description?: string; model_scope?: string[] }[]
+  >([]);
   const [sessionId, setSessionId] = useState<number>(() => getSessionIdFromUrl());
   const [realSessionId, setRealSessionId] = useState<number | null>(null);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
@@ -287,7 +350,79 @@ export default function App(): JSX.Element {
       /* 忽略 */
     }
   }, [theme]);
-  const toggleTheme = (): void => setTheme((t) => (t === "dark" ? "light" : "dark"));
+  const toggleTheme = (): void => {
+    const next = (theme === "dark" ? "light" : "dark") as "light" | "dark";
+    // V1.4-8.4 主题切换淡入淡出: 用 View Transitions API(Electron 30 = Chromium 124+)
+    // 对整个 root 做 cross-fade, CSS 变量瞬间变化配合截图交叉淡化, 平滑过渡所有
+    // 元素(背景/文字/边框)。flushSync 强制 React 在 callback 内同步 flush DOM,
+    // 否则 setState 异步更新导致 startViewTransition 截图前后相同 → 无动画。
+    // 不支持时降级为瞬时切换(老浏览器/极端环境零回归)。
+    const docAny = document as unknown as {
+      startViewTransition?: (cb: () => void) => unknown;
+    };
+    if (typeof docAny.startViewTransition === "function") {
+      docAny.startViewTransition(() => {
+        flushSync(() => setTheme(next));
+      });
+    } else {
+      setTheme(next);
+    }
+  };
+  // V1.1-3.6 智能体显示名(首页问候卡/对话区/侧边栏展示, 可改名持久化)
+  // 0.5.0 M1(2026-08-08 修复): 会话激活场景时, agentName 跟随场景智能体名
+  // (子瞻/白圭/清和) 同步, 蒋先生反馈: 对话应展示场景智能体而非手动设置的
+  // "无涯"等主智能体名。手动改名仅在无场景会话生效。
+  // 0.5.0 P4: 默认值改为 "主智能体" —— 与监控 tab 标签 + 系统监控角色一致
+  const [agentName, setAgentName] = useState<string>("主智能体");
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await adminFetch("http://127.0.0.1:8765/admin/agent-profile");
+        if (resp.ok) {
+          const data = await resp.json();
+          if (!cancelled && typeof data.display_name === "string" && data.display_name.trim()) {
+            setAgentName(data.display_name.trim());
+          }
+        }
+      } catch {
+        /* 读取失败用默认名 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // 0.5.0 P4(2026-08-08 蒋先生二次反馈修复):
+  // 删除"场景变化→agentName 同步"effect —— 该逻辑导致返回首页后
+  // agentName 残留场景名(如"子瞻")。agentName 恒为主智能体名(用户配置);
+  // 对话区助手名用 sceneDisplayName(activeSkill) 单独计算(见下方 renderChatAssistantName)。
+  const renderChatAssistantName = (): string => {
+    // 场景会话 → 显示场景智能体名; 监控/全局会话 → 显示主智能体名
+    if (activeSlot !== 0 && activeSkill && SCENE_NAME_MAP[activeSkill]) {
+      return SCENE_NAME_MAP[activeSkill];
+    }
+    return agentName || "主智能体";
+  };
+  const renameAgent = useCallback(async (name: string): Promise<void> => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    try {
+      const resp = await adminFetch("http://127.0.0.1:8765/admin/agent-profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: trimmed }),
+      });
+      if (resp.ok) {
+        setAgentName(trimmed);
+        return;
+      }
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error ?? `HTTP ${resp.status}`);
+    } catch (e) {
+      throw new Error(`保存失败: ${String(e)}`);
+    }
+  }, []);
   // 每个 turn 的"推理过程"展开状态(默认收起)
   const [openThinkingTurns, setOpenThinkingTurns] = useState<Set<number>>(new Set());
   // 会话级模型选择: "auto"(fallback 链) 或 provider 名(手动锁定)
@@ -295,8 +430,9 @@ export default function App(): JSX.Element {
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   // 工作区选择(画地为牢): 会话级工作目录
   const [workspace, setWorkspace] = useState<string | null>(null);
-  const [editingWorkspace, setEditingWorkspace] = useState(false);
   const [workspaceInput, setWorkspaceInput] = useState("");
+  // 2026-08-08: 工作区设置弹层(输入区左侧 📁 图标触发; 支持原生目录选择器)
+  const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
 
   // 按 turn 分组事件:同一轮对话合并为一个 AI 回复块
   const turnGroups = useMemo(() => {
@@ -308,6 +444,14 @@ export default function App(): JSX.Element {
     }
     return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
   }, [events]);
+
+  // 0.5.1(2026-08-10 蒋先生反馈): 对话自动滚动 —— 消息/流式内容变化时
+  // 滚动到底部, 避免用户提问后需手动下拉。
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [turnGroups, isGenerating, view]);
 
   const toggleThinking = (turn: number): void => {
     setOpenThinkingTurns((prev) => {
@@ -322,10 +466,11 @@ export default function App(): JSX.Element {
   };
 
   // 右栏产物: 从 tool_result 提取图片 + 文件(去重)
+  // 2026-08-10 22:00: fileRe 支持中文文件名([\w\-\u4e00-\u9fff] 替代 \w)
   const artifacts = useMemo<Artifact[]>(() => {
     const list: Artifact[] = [];
     const fileRe =
-      /(?:\/?outputs\/)?[\w\-\.]+\.(?:xlsx|docx|csv|html|md|pdf|json|txt|pptx|zip)/gi;
+      /(?:\/?outputs\/)?[\w\-\u4e00-\u9fff]+\.(?:xlsx|docx|csv|html|md|pdf|json|txt|pptx|zip)/gi;
     for (const ev of events) {
       if (ev.event_type !== "tool_result") continue;
       const text = formatPayload("tool_result", ev.payload);
@@ -343,11 +488,9 @@ export default function App(): JSX.Element {
 
   const [artifactsOpen, setArtifactsOpen] = useState(true);
 
-  // V1.1 布局优化: 左右分区宽度(拖拽分隔条调整, clamp 防极端值)
-  const [sidebarW, setSidebarW] = useState(220);
-  const [panelW, setPanelW] = useState(300);
-  const clampSidebar = (w: number): number => Math.min(400, Math.max(140, w));
-  const clampPanel = (w: number): number => Math.min(560, Math.max(240, w));
+  // 2026-08-10: 左右侧边栏改为固定宽度两态(展开/折叠), 移除拖拽调宽
+  // 展开宽度用固定常量(Sidebar 220 / ArtifactPanel 300), 折叠均为 44px,
+  // 点击各自收起按钮折叠/恢复; 不再允许自由拖拽导致布局失衡。
 
   // HomeView 模式按钮: 激活 skill + 切换到对话视图
   // 会话锁定(AC-4): 同一 session 激活后不允许切换 skill(409),
@@ -356,6 +499,44 @@ export default function App(): JSX.Element {
   // activeSkill=null(如从"无 skill"历史会话切回首页)时复用 realSessionId,
   // 导致"新对话走进旧会话" / 对已锁定其他 skill 的历史会话报 409
   const handlePickMode = async (skill: string): Promise<void> => {
+    // 0.5.0 P2: 激活新技能前保存当前窗口快照
+    saveWindowSnapshot();
+    // 0.5.0 P5(2026-08-08): 场景技能 → slot 映射; 若该场景已有未关闭对话
+    // (windowCacheRef 快照), 点击图标=恢复该对话(无缝切换), 否则新建。
+    const slotMap: Record<string, number> = {
+      office: 1,
+      data_analysis: 2,
+      frontend_design: 3,
+    };
+    const targetSlot = slotMap[skill] ?? 1;
+    const existing = windowCacheRef.current[targetSlot];
+    // 恢复校验: 快照 sessionId 必须是真实会话(>0)且属于该场景
+    // (saveWindowSnapshot 会把当前 activeSlot 的 home 态写入快照, 需排除)
+    if (
+      existing &&
+      existing.sessionId &&
+      existing.sessionId > 0 &&
+      existing.skill === skill
+    ) {
+      // 恢复既有场景对话(不重建会话): 与 switchWindow 恢复分支一致
+      setEvents(existing.events);
+      setInput(existing.input);
+      setActiveSkill(existing.skill ?? skill);
+      setSessionModel(existing.model);
+      lastTurnRef.current = existing.lastTurn;
+      // 0.5.0 P6(2026-08-09): 恢复快照已有本地 events → 增量续传(不全量重放)
+      fullReloadRef.current = false;
+      // 同步 ref(不等 effect): 渲染提交前旧窗口事件不被误收
+      sessionIdRef.current = existing.sessionId;
+      realSessionIdRef.current = existing.sessionId;
+      activeSlotRef.current = targetSlot;
+      setRealSessionId(existing.sessionId);
+      setSessionId(existing.sessionId);
+      setActiveSlot(targetSlot);
+      setView(existing.skill ? "chat" : "home");
+      bumpSlots();
+      return;
+    }
     const onHome = view === "home";
     const needNewSession =
       onHome || (activeSkill !== null && activeSkill !== skill);
@@ -364,10 +545,21 @@ export default function App(): JSX.Element {
         ? Math.floor(Math.random() * 100000) + 1
         : realSessionId ?? sessionId;
     if (needNewSession) {
-      // 新会话: 触发 ws 重连 + 清空当前对话(后端对新 session 懒创建行)
+      // 新会话: 触发 ws replay + 清空当前对话(后端对新 session 懒创建行)
       setSessionId(sid);
       setRealSessionId(null);
+      // 0.5.0 P6(2026-08-09): 同步 ref —— 新会话 sid 未知, 置 0 表示"未确认",
+      // 事件过滤接受懒创建回传; 窗口快照尚未挂载, 其他窗口事件不误收
+      sessionIdRef.current = sid;
+      realSessionIdRef.current = null;
+      activeSlotRef.current = targetSlot;
       setEvents([]);
+      // 0.5.0 P4(2026-08-08): tab 条已删, 场景切换走 handlePickMode ——
+      // 新会话必须清空输入框(否则上一场景草稿残留到新场景)
+      setInput("");
+      // 0.5.0 P6(2026-08-09): 单 WS 复用下 replay 用 lastTurnRef —— 新会话
+      // 必须归零, 否则残留旧会话 turn 值导致新会话 replay 从错误位置续传
+      lastTurnRef.current = 0;
     }
     try {
       const resp = await adminFetch(
@@ -383,6 +575,17 @@ export default function App(): JSX.Element {
         throw new Error(err.detail ?? `HTTP ${resp.status}`);
       }
       setActiveSkill(skill);
+      setActiveSlot(targetSlot);
+      // 新建会话 → 挂载快照(绿点)
+      windowCacheRef.current[targetSlot] = {
+        sessionId: sid,
+        skill,
+        events: [],
+        input: "",
+        model: "auto",
+        lastTurn: 0,
+      };
+      bumpSlots();
       setView("chat");
     } catch (e) {
       // eslint-disable-next-line no-alert
@@ -397,22 +600,28 @@ export default function App(): JSX.Element {
     modelId?: string | null
   ): void => {
     if (id === sessionId && view === "chat") return;
-    // 关闭当前 ws(connect effect 依赖 sessionId 会重连)
-    const ws = wsRef.current;
-    if (ws) {
-      ws.onclose = null;
-      ws.close();
-      wsRef.current = null;
-    }
+    // 0.5.0 P2: 切换会话前保存当前窗口快照(输入框/事件流不丢失)
+    saveWindowSnapshot();
+    // 0.5.0 P6(2026-08-09): 不再手动 close WS —— 单 WS 复用, sessionId 变化后
+    // 由下方 replay effect 通过既有连接发送 replay 切换会话(原实现 close+重连,
+    // 重连期间 status!=="connected" 导致切换后输入框短时间无法发送)。
     setIsPaused(false); // V1.5 项-5: 切换会话清除暂停态
+    // 0.5.0 M1(2026-08-08 修复): 切换会话重置生成态, 避免 A 会话 isGenerating=true
+    // 残留到 B 会话导致 UI 一直显示"停止"按钮但无实际生成 → 用户感知"无输出"
+    setIsGenerating(false);
     setEvents([]);
     setActiveSkill(skillName ?? null);
     lastTurnRef.current = 0;
+    // 切换会话重置重连计数, 让 ws onopen 后正常连接
+    reconnectAttemptRef.current = 0;
     // V1.5 项-1(M3 R7): 切换会话清空子代理卡片, 由重连后 DB 轮询重建
     setSubagents({});
     // 切换历史会话: 全量加载(忽略服务端 ws_offset, 否则 offset=1 会跳过第 1 轮)
     fullReloadRef.current = true;
     setSessionModel(modelId ?? "auto");
+    // 0.5.0 P6(2026-08-09): 同步 ref(不等 effect) —— 切换瞬间旧窗口事件不误收
+    sessionIdRef.current = id;
+    realSessionIdRef.current = id;
     setRealSessionId(id);
     setSessionId(id);
     // V1.5 项-4: 查询断点恢复信息(interrupted 会话显示"断点继续"横幅)
@@ -433,11 +642,256 @@ export default function App(): JSX.Element {
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastTurnRef = useRef<number>(0);
+  // 0.5.0 P6(2026-08-09): 单 WS 复用 —— connect/handleMessage 不再依赖
+  // sessionId(避免切换会话/窗口触发 WS 断开重建, 重连期间输入框不可用)。
+  // sessionIdRef 恒为最新会话 id, WS 事件/重连后用 ref 读当前值发 replay。
+  const sessionIdRef = useRef<number>(sessionId);
+  // 懒创建回传的真实会话 id(前端随机 sid → 后端回传真实 id)
+  const realSessionIdRef = useRef<number | null>(realSessionId);
+  // 当前活动窗口 slot(ref 版, handleMessage 事件过滤用, 避免依赖闭包 state)
+  // 注: 初始化默认 1(与 useState 默认一致), 由下方 effect 随 activeSlot 同步
+  const activeSlotRef = useRef<number>(1);
+  // 已发送 replay 的会话 id(避免首次挂载/重复切换时重复 replay)
+  const lastReplaySessionRef = useRef<number | null>(null);
   const fullReloadRef = useRef<boolean>(false);
+  // 会话切换后同步 sessionIdRef(供 connect 的 onopen/重连使用当前会话)
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+  // 同步真实会话 id(懒创建回传后 handleMessage 过滤用)
+  useEffect(() => {
+    realSessionIdRef.current = realSessionId;
+  }, [realSessionId]);
+
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventIdRef = useRef<number>(0);
   const manualCloseRef = useRef<boolean>(false);
+
+  // 0.5.0 P2(2026-08-08): 四窗口并发 —— 窗口状态缓存。
+  // 4 个固定窗口: 0=监控(主智能体) / 1=子瞻 / 2=白圭 / 3=清和。
+  // 当前渲染窗口 = 全局 state(sessionId/events/activeSkill), 切换窗口时:
+  // 保存当前窗口状态到 cacheRef[activeSlot] → 恢复目标窗口状态(或懒初始化)。
+  const WINDOW_SLOTS = [0, 1, 2, 3] as const;
+  // slot → 场景技能映射(固定: 监控=无 skill, 其余对应三场景)
+  const WINDOW_SLOT_SKILL: Record<number, string | null> = {
+    0: null, // 监控窗口(主智能体, 无场景 skill)
+    1: "office",
+    2: "data_analysis",
+    3: "frontend_design",
+  };
+  // 0.5.0 P4(2026-08-08 蒋先生反馈): 监控 tab 标签与主智能体名字同步(默认"主智能体")
+  // 0/2/3 tab 显示 emoji + 场景中文名, 用户改名 agentName 后 0 tab 自动跟随
+  const monitorLabel = `📊 ${agentName || "主智能体"}`;
+  const WINDOW_TAB_LABELS: Record<number, string> = {
+    0: monitorLabel,
+    1: "📄 子瞻",
+    2: "📈 白圭",
+    3: "🎨 清和",
+  };
+  interface WindowSnapshot {
+    sessionId: number | null;
+    skill: string | null;
+    events: ReactEvent[];
+    input: string;
+    model: string;
+    lastTurn: number;
+  }
+  const [activeSlot, setActiveSlot] = useState<number>(1); // 默认子瞻窗口
+  // 0.5.0 P6(2026-08-09): 同步活动窗口 slot(handleMessage 事件归属过滤用,
+  // 避免闭包捕获旧 state; 切换函数内也主动同步, 此处 effect 兜底)
+  useEffect(() => {
+    activeSlotRef.current = activeSlot;
+  }, [activeSlot]);
+  const windowCacheRef = useRef<Record<number, WindowSnapshot>>({});
+  // 0.5.0 P5(2026-08-08): 快照增删版本号 —— windowCacheRef 是 ref(不触发渲染),
+  // 图标状态圆点需在快照保存/关闭后重渲染; 每次变更 ++ 强制派生计算刷新。
+  const [slotsVersion, setSlotsVersion] = useState<number>(0);
+  const bumpSlots = useCallback((): void => {
+    setSlotsVersion((v) => v + 1);
+  }, []);
+  // 各 slot 活跃对话状态(红=无对话/绿=有对话): 派生自 windowCacheRef
+  const slotHasSession = useCallback(
+    (slot: number): boolean => !!windowCacheRef.current[slot]?.sessionId,
+    []
+  );
+  void slotsVersion; // 依赖 slotsVersion 使组件在 bump 后重渲染(派生圆点)
+  const saveWindowSnapshot = useCallback((): void => {
+    if (windowCacheRef.current[activeSlot]) {
+      windowCacheRef.current[activeSlot] = {
+        ...windowCacheRef.current[activeSlot],
+        sessionId: realSessionId ?? sessionId,
+        skill: activeSkill,
+        events,
+        input,
+        model: sessionModel,
+        lastTurn: lastTurnRef.current,
+      };
+    } else {
+      windowCacheRef.current[activeSlot] = {
+        sessionId: realSessionId ?? sessionId,
+        skill: activeSkill,
+        events,
+        input,
+        model: sessionModel,
+        lastTurn: lastTurnRef.current,
+      };
+    }
+  }, [activeSlot, realSessionId, sessionId, activeSkill, events, input, sessionModel]);
+  // 0.5.0 P3: 进入监控窗口(主智能体) —— 无快照时创建/复用 monitor 会话
+  const enterMonitorWindow = useCallback(async (): Promise<void> => {
+    saveWindowSnapshot();
+    try {
+      // 已有 monitor 会话则复用第一个活跃的, 否则新建 kind=monitor
+      const listResp = await adminFetch(
+        "http://127.0.0.1:8765/admin/sessions?limit=50"
+      );
+      let monitorId: number | null = null;
+      if (listResp.ok) {
+        const list = await listResp.json();
+        const found = (list ?? []).find(
+          (s: { kind?: string; status?: string; id: number }) =>
+            s.kind === "monitor" && s.status !== "archived"
+        );
+        if (found) monitorId = found.id;
+      }
+      let sid: number;
+      if (monitorId) {
+        sid = monitorId;
+      } else {
+        const resp = await adminFetch("http://127.0.0.1:8765/admin/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: "monitor", title: "系统监控" }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+        sid = data.id;
+      }
+      // 挂载到 slot 0 快照并切换
+      windowCacheRef.current[0] = {
+        sessionId: sid,
+        skill: null,
+        events: [],
+        input: "",
+        model: "auto",
+        lastTurn: 0,
+      };
+      bumpSlots();
+      setEvents([]);
+      setInput("");
+      setActiveSkill(null);
+      lastTurnRef.current = 0;
+      // 0.5.0 P6(2026-08-09): 进入 monitor 会话全量加载历史
+      fullReloadRef.current = true;
+      // 同步 ref(不等 effect) —— 切换瞬间旧窗口事件不误收
+      sessionIdRef.current = sid;
+      realSessionIdRef.current = sid;
+      activeSlotRef.current = 0;
+      setRealSessionId(sid);
+      setSessionId(sid);
+      setActiveSlot(0);
+      setView("chat");
+    } catch (e) {
+      // eslint-disable-next-line no-alert
+      window.alert(`进入监控窗口失败: ${String(e)}`);
+    }
+  }, [saveWindowSnapshot, bumpSlots]);
+
+  // 切换窗口: 保存当前 → 恢复目标(有快照)或重置为新窗口
+  const switchWindow = useCallback(
+    (slot: number): void => {
+      if (slot === activeSlot) return;
+      // 0.5.0 P3: 监控窗口(0)无快照时进入自动创建 monitor 会话
+      if (slot === 0 && !windowCacheRef.current[0]?.sessionId) {
+        void enterMonitorWindow();
+        return;
+      }
+      saveWindowSnapshot();
+      const snap = windowCacheRef.current[slot];
+      if (snap && snap.sessionId) {
+        // 恢复历史窗口状态(不重建会话)
+        setEvents(snap.events);
+        setInput(snap.input);
+        setActiveSkill(snap.skill);
+        setSessionModel(snap.model);
+        lastTurnRef.current = snap.lastTurn;
+        // 0.5.0 P6(2026-08-09): 恢复快照已有本地 events → 增量续传
+        fullReloadRef.current = false;
+        // 同步 ref(不等 effect) —— 切换瞬间旧窗口事件不误收
+        sessionIdRef.current = snap.sessionId;
+        realSessionIdRef.current = snap.sessionId;
+        activeSlotRef.current = slot;
+        setRealSessionId(snap.sessionId);
+        setSessionId(snap.sessionId);
+        setActiveSlot(slot);
+        setView(snap.skill ? "chat" : "home");
+      } else {
+        // 无快照: 空窗口, 回首页选择/进入该窗口技能
+        setEvents([]);
+        setInput("");
+        setActiveSkill(null);
+        lastTurnRef.current = 0;
+        // 0.5.0 P6(2026-08-09): 同步 ref —— 空窗口无会话, 事件全部忽略
+        sessionIdRef.current = 0;
+        realSessionIdRef.current = null;
+        activeSlotRef.current = slot;
+        setRealSessionId(null);
+        setSessionId(0);
+        setActiveSlot(slot);
+        setView("home");
+      }
+    },
+    [activeSlot, saveWindowSnapshot, enterMonitorWindow]
+  );
+  // 0.5.0 P2: 关闭窗口 tab → 归档该窗口会话至"历史任务" + 清空快照。
+  // 归档后会话保留在 Sidebar「已归档」折叠区, 可点开继续(恢复新窗口)。
+  const closeWindow = useCallback(
+    (slot: number): void => {
+      const snap = windowCacheRef.current[slot];
+      const targetId = snap?.sessionId ?? realSessionId ?? sessionId;
+      if (targetId && targetId > 0 && !(activeSlot === slot && !snap)) {
+        void adminFetch(`http://127.0.0.1:8765/admin/sessions/${targetId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "archived" }),
+        })
+          .then((r) => {
+            // 0.5.1: 归档后引导(历史树「已归档」区默认折叠, 用户易找不到
+            // —— 明确告知位置, 标题已随对话内容展示)
+            if (r.ok) {
+              notifyUser(
+                "对话已归档",
+                "可在侧边栏「已归档」区找到并点击恢复该对话"
+              );
+            }
+          })
+          .catch(() => undefined);
+      }
+      delete windowCacheRef.current[slot];
+      bumpSlots();
+      // 若关闭的是当前活动窗口 → 切到相邻窗口(优先 0 监控)
+      // 注: 不调用 saveWindowSnapshot —— 关闭的是当前窗口, 无需保存自身状态
+      // (若此时调用会用全局 state 覆盖已删除的 slot 快照, 导致"关闭无效")
+      if (activeSlot === slot) {
+        const next = slot === 0 ? 1 : 0;
+        const nsnap = windowCacheRef.current[next];
+        setEvents(nsnap?.events ?? []);
+        setInput(nsnap?.input ?? "");
+        setActiveSkill(nsnap?.skill ?? null);
+        lastTurnRef.current = nsnap?.lastTurn ?? 0;
+        // 0.5.0 P6(2026-08-09): 同步 ref(不等 effect) —— 关闭后立即切换归属
+        sessionIdRef.current = nsnap?.sessionId ?? 0;
+        realSessionIdRef.current = nsnap?.sessionId ?? null;
+        activeSlotRef.current = next;
+        setRealSessionId(nsnap?.sessionId ?? null);
+        setSessionId(nsnap?.sessionId ?? 0);
+        setActiveSlot(next);
+        setView(nsnap?.skill ? "chat" : "home");
+      }
+    },
+    [activeSlot, realSessionId, sessionId, saveWindowSnapshot, bumpSlots]
+  );
 
   // ── 发送消息到 WS ──────────────────────────────────────────────────────────
   const sendWs = useCallback((msg: Record<string, unknown>): void => {
@@ -620,6 +1074,7 @@ export default function App(): JSX.Element {
     }
   });
   const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [tplName, setTplName] = useState("");
   const [tplMsg, setTplMsg] = useState<string | null>(null);
 
@@ -825,9 +1280,12 @@ export default function App(): JSX.Element {
   // V1.5 项-1(ADR-012 §3.4 R7): 子代理卡片 DB 轮询兜底(WS 断线丢事件时
   // 全量重建; 后端 watchdog 判定依赖 DB 不依赖 WS)。仅重建"仍在该会话"
   // 的子代理, 保留 WS 实时收到的最新状态。
+  // 0.5.0 P6(2026-08-09): 依赖 [realSessionId, sessionId] 会随会话切换重建
+  // → 被 connect 引用会破坏单 WS 复用(connect 每次重建 → 重连)。改为稳定
+  // 闭包 + 用 sessionIdRef 读当前会话, 供 connect/replay effect 引用。
   const fetchSubagents = useCallback((): void => {
     void adminFetch(
-      `http://127.0.0.1:8765/admin/subagents?session_id=${realSessionId ?? sessionId}`
+      `http://127.0.0.1:8765/admin/subagents?session_id=${sessionIdRef.current}`
     )
       .then((r) => (r.ok ? r.json() : []))
       .then((rows: any[]) => {
@@ -860,7 +1318,7 @@ export default function App(): JSX.Element {
       .catch(() => {
         /* 轮询失败静默(WS 事件仍可即时刷新) */
       });
-  }, [realSessionId, sessionId]);
+  }, []);
 
   // V1.2-6.3: 用量统计 + 错误摘要(任务抽屉内)
   const [usageData, setUsageData] = useState<{
@@ -905,7 +1363,10 @@ export default function App(): JSX.Element {
     void (async () => {
       try {
         const resp = await adminFetch("http://127.0.0.1:8765/admin/skills");
-        const data = (await resp.json()) as { name: string; version: string; enabled: boolean }[];
+        const data = (await resp.json()) as {
+          name: string; version: string; enabled: boolean;
+          description?: string; model_scope?: string[];
+        }[];
         if (!cancelled) setAvailableSkills(Array.isArray(data) ? data : []);
       } catch {
         if (!cancelled) setAvailableSkills([]);
@@ -917,15 +1378,148 @@ export default function App(): JSX.Element {
   }, [skillPickerOpen]);
 
   // ── 处理收到的 WS 消息 ──────────────────────────────────────────────────────
+  // 0.5.0 P6(2026-08-09): 后台会话事件写入该窗口快照(独立状态切片)。
+  // 单 WS 复用下所有会话事件都到达同一连接; 非当前窗口的会话事件直接写入
+  // windowCacheRef 对应 slot 的 events(与当前渲染同款 delta/thinking 累积),
+  // 不触发当前视图渲染; 切回该窗口时 switchWindow 恢复快照即展示后台进展。
+  // 注: 仅操作 ref, 不依赖 state, 引用稳定可被 handleMessage 安全捕获。
+  const appendToSlotEvents = useCallback(
+    (slot: number, msg: WSMessage): void => {
+      const snap = windowCacheRef.current[slot];
+      if (!snap || !msg.event_type || msg.turn === undefined) return;
+      const turn = msg.turn as number;
+      const mk = (et: EventType): ReactEvent => ({
+        id: ++eventIdRef.current,
+        session_id: msg.session_id ?? snap.sessionId ?? 0,
+        turn,
+        event_type: et,
+        payload: msg.payload ?? {},
+        ts: Date.now(),
+      });
+      // delta 流式累积: 合并到该 turn 最后一条 delta(与当前渲染一致)
+      if (msg.event_type === "delta") {
+        const deltaText = String(msg.payload?.content ?? "");
+        if (!deltaText) return;
+        const last = [...snap.events]
+          .reverse()
+          .find(
+            (e) =>
+              e.turn === turn &&
+              (e.event_type === "delta" || e.event_type === "final")
+          );
+        if (last && last.event_type === "delta") {
+          snap.events = snap.events.map((e) =>
+            e.id === last.id
+              ? {
+                  ...e,
+                  payload: {
+                    turn,
+                    content: String(e.payload.content ?? "") + deltaText,
+                  },
+                }
+              : e
+          );
+        } else if (!(last && last.event_type === "final")) {
+          snap.events = [...snap.events, mk("delta")];
+        }
+      } else if (msg.event_type === "thinking") {
+        // 推理增量: 合并到该 turn 最后一条 thinking(与当前渲染一致)
+        const reasoning = String(
+          msg.payload?.reasoning ?? msg.payload?.content ?? ""
+        );
+        const last = [...snap.events]
+          .reverse()
+          .find((e) => e.turn === turn && e.event_type === "thinking");
+        if (last) {
+          snap.events = snap.events.map((e) =>
+            e.id === last.id
+              ? {
+                  ...e,
+                  payload: {
+                    turn,
+                    reasoning: String(e.payload.reasoning ?? "") + reasoning,
+                  },
+                }
+              : e
+          );
+        } else {
+          snap.events = [
+            ...snap.events,
+            mk("thinking" as EventType),
+          ];
+        }
+      } else {
+        // 其余事件(user/final/tool_call/tool_result/error/sandbox_output)直接追加
+        snap.events = [...snap.events, mk(msg.event_type as EventType)];
+      }
+      // 更新该窗口 lastTurn(切回时 replay 从正确位置增量续传)
+      if (turn > snap.lastTurn) snap.lastTurn = turn;
+      // 快照仅用于切回展示, 不 bumpSlots(避免当前视图无谓重渲染)
+    },
+    []
+  );
   const handleMessage = useCallback((msg: WSMessage): void => {
     switch (msg.type) {
       case "pong":
         break;
 
       case "react_event": {
+        // 0.5.1 A: 权限确认请求 → 全局置顶弹窗(与事件归属/当前窗口无关,
+        // 避免确认卡片埋在对话流内被错过 → 60s 超时 → 对话卡死)。
+        // 2026-08-10 22:00: 加 !msg.replayed —— 切回历史会话时后端 replay
+        // 重放的历史事件若含 tool_confirmation_required, 不应再次弹窗
+        // (历史工具调用已执行完毕, 恢复会话不应重新触发权限确认)。
+        if (msg.event_type === "tool_confirmation_required" && msg.payload && !msg.replayed) {
+          const p = msg.payload as {
+            confirmation_id?: string;
+            message?: string;
+            risk?: string;
+            reason?: string;
+            args_preview?: string;
+          };
+          if (p.confirmation_id) {
+            setPendingConfirm({
+              confirmation_id: p.confirmation_id,
+              session_id:
+                (msg.session_id as number) ??
+                (realSessionIdRef.current ?? sessionIdRef.current),
+              message: String(p.message ?? "需要确认"),
+              risk: p.risk,
+              reason: p.reason,
+              argsPreview: p.args_preview,
+            });
+            // 系统通知(后台/其他窗口时也能提醒)
+            notifyUser("需要你的确认", String(p.message ?? "工具执行需确认"));
+          }
+        }
         if (msg.event_type && msg.turn !== undefined && msg.payload) {
+          // 0.5.0 P6(2026-08-09): 单 WS 复用下的事件分发 —— WS 上所有会话的
+          // 事件都会到达。当前渲染会话(realSessionId ?? sessionId)的事件走
+          // 正常渲染; 其他窗口后台生成中的事件写入该窗口快照(独立状态切片,
+          // 不渲染当前视图), 切回该窗口时 switchWindow 恢复快照即展示。
+          const curSid = realSessionIdRef.current ?? sessionIdRef.current;
+          if (msg.session_id && msg.session_id !== curSid) {
+            // 属于其他窗口快照的会话(后台生成中) → 写入该窗口快照
+            const targetSlot = (WINDOW_SLOTS as readonly number[]).find(
+              (s) =>
+                s !== activeSlotRef.current &&
+                windowCacheRef.current[s]?.sessionId === msg.session_id
+            );
+            if (targetSlot !== undefined) {
+              appendToSlotEvents(targetSlot, msg);
+              return;
+            }
+            // 懒创建回传(B2 P1-9): 仅当前会话真实 id 尚未确认(realSessionId
+            // 为 null)时才接受任意未知 sid 作为回传; 已确认后一律忽略。
+            if (realSessionIdRef.current == null) {
+              realSessionIdRef.current = msg.session_id;
+              setRealSessionId(msg.session_id);
+            } else {
+              return;
+            }
+          }
           // 从后端回传更新真实 session_id(B2 P1-9:activate 需要真实 session)
-          if (msg.session_id && msg.session_id !== sessionId) {
+          if (msg.session_id && msg.session_id !== sessionIdRef.current) {
             setRealSessionId(msg.session_id);
           }
           // V1.5 项-5: 流程级暂停状态(不进入事件列表, 仅切换按钮态)
@@ -970,7 +1564,7 @@ export default function App(): JSX.Element {
                   ...prev,
                   {
                     id: ++eventIdRef.current,
-                    session_id: msg.session_id ?? sessionId,
+                    session_id: msg.session_id ?? sessionIdRef.current,
                     turn: t,
                     event_type: "delta" as EventType,
                     payload: { turn: t, content: deltaText },
@@ -1010,7 +1604,7 @@ export default function App(): JSX.Element {
                 ...prev,
                 {
                   id: ++eventIdRef.current,
-                  session_id: msg.session_id ?? sessionId,
+                  session_id: msg.session_id ?? sessionIdRef.current,
                   turn: t,
                   event_type: "thinking" as EventType,
                   payload: { turn: t, reasoning },
@@ -1022,7 +1616,7 @@ export default function App(): JSX.Element {
           }
           const event: ReactEvent = {
             id: ++eventIdRef.current,
-            session_id: msg.session_id ?? sessionId,
+            session_id: msg.session_id ?? sessionIdRef.current,
             turn: msg.turn,
             event_type: msg.event_type,
             payload: msg.payload,
@@ -1036,7 +1630,7 @@ export default function App(): JSX.Element {
           // ACK 回写
           sendWs({
             type: "ack",
-            session_id: msg.session_id ?? sessionId,
+            session_id: msg.session_id ?? sessionIdRef.current,
             turn: msg.turn,
           });
         }
@@ -1053,6 +1647,11 @@ export default function App(): JSX.Element {
 
       case "turn_end":
         // 一轮结束,可在此做 UI 收尾
+        // 0.5.0 P6(2026-08-09): 单 WS 复用下只处理当前会话的 turn_end
+        // (后台窗口的 turn_end 不打断当前窗口生成态)
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          break;
+        }
         setIsGenerating(false);
         setIsPaused(false); // V1.5 项-5: 轮次结束清除暂停态
         // V1.4-8.4: 应用在后台时系统通知(任务完成)
@@ -1175,12 +1774,50 @@ export default function App(): JSX.Element {
 
       case "turn_cancelled":
         // 打断/停止: 后端已取消当前 turn
+        // 0.5.0 P6(2026-08-09): 只处理当前会话的取消(后台窗口的 cancel 不干扰)
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          break;
+        }
         setIsGenerating(false);
         setIsPaused(false); // V1.5 项-5: 终止时清除暂停态
         void notifyUser("任务已停止", "你手动停止了本轮对话");
         break;
 
       case "error":
+        // 0.5.1: 确认相关错误(unknown confirmation_id 等超时竞态)
+        // → 关闭全局确认弹窗, 避免用户对已过期确认重复操作
+        if (
+          msg.message &&
+          /confirmation|permission/i.test(String(msg.message))
+        ) {
+          setPendingConfirm(null);
+        }
+        // 0.5.0 P6(2026-08-09): 单 WS 复用下按会话归属分发 —— 当前会话的
+        // 错误走正常处理; 后台窗口的错误写入该窗口快照(切回时可见)。
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          const errSlot = (WINDOW_SLOTS as readonly number[]).find(
+            (s) =>
+              s !== activeSlotRef.current &&
+              windowCacheRef.current[s]?.sessionId === msg.session_id
+          );
+          if (errSlot !== undefined && msg.message) {
+            const snap = windowCacheRef.current[errSlot];
+            if (snap) {
+              snap.events = [
+                ...snap.events,
+                {
+                  id: ++eventIdRef.current,
+                  session_id: msg.session_id,
+                  turn: msg.turn ?? snap.lastTurn,
+                  event_type: "error",
+                  payload: { message: msg.message },
+                  ts: Date.now(),
+                },
+              ];
+            }
+          }
+          break;
+        }
         setIsGenerating(false);
         void notifyUser("任务出错", String(msg.message ?? "未知错误"));
         if (msg.message) {
@@ -1191,7 +1828,7 @@ export default function App(): JSX.Element {
           }
           const event: ReactEvent = {
             id: ++eventIdRef.current,
-            session_id: msg.session_id ?? sessionId,
+            session_id: msg.session_id ?? sessionIdRef.current,
             turn: msg.turn ?? lastTurnRef.current,
             event_type: "error",
             payload: { message: msg.message },
@@ -1204,7 +1841,7 @@ export default function App(): JSX.Element {
       default:
         break;
     }
-  }, [sessionId, sendWs]);
+  }, [sendWs]);
 
   // ── 建立 WS 连接 ──────────────────────────────────────────────────────────
   const connect = useCallback((): void => {
@@ -1218,9 +1855,12 @@ export default function App(): JSX.Element {
         setStatus("connected");
         reconnectAttemptRef.current = 0;
         // 重连后发送 replay(首次连接 last_turn=0; 切换历史会话 full=true 全量加载)
+        // 0.5.0 P6(2026-08-09): 用 sessionIdRef 读当前会话(connect 不再依赖
+        // sessionId, 否则切换会话会触发 close+重连, 重连期间输入框不可用)
+        lastReplaySessionRef.current = sessionIdRef.current;
         sendWs({
           type: "replay",
-          session_id: sessionId,
+          session_id: sessionIdRef.current,
           last_turn: lastTurnRef.current,
           full: fullReloadRef.current,
         });
@@ -1254,8 +1894,10 @@ export default function App(): JSX.Element {
       setStatus("reconnecting");
       scheduleReconnect();
     }
+    // 0.5.0 P6(2026-08-09): connect 不再依赖 sessionId —— 单 WS 复用,
+    // 会话切换由 replay effect 处理, 避免每次切换断开重建连接
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, sendWs, handleMessage]);
+  }, [sendWs, handleMessage, fetchSubagents]);
 
   // ── 指数退避重连 ──────────────────────────────────────────────────────────
   const scheduleReconnect = useCallback((): void => {
@@ -1365,7 +2007,28 @@ export default function App(): JSX.Element {
     setIsGenerating(true); // 生成中(显示"停止"按钮)
   }, [input, sessionId, sendWs, pendingUpload, pendingImage, editingOriginal, realSessionId, autoExec, autoRounds]);
 
+  // 0.5.0 P6(2026-08-09): 单 WS 复用 —— sessionId 变化时不再断开重建连接,
+  // 直接通过既有 WS 发送 replay 切换会话(后端按 session_id 路由)。
+  // 效果: 切换会话/窗口零重连, 输入框立即可用(原实现每次切换都 close+connect,
+  // 重连期间 status!=="connected" 导致发送按钮禁用)。
+  useEffect(() => {
+    if (lastReplaySessionRef.current === sessionId) return;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN && sessionId > 0) {
+      lastReplaySessionRef.current = sessionId;
+      sendWs({
+        type: "replay",
+        session_id: sessionId,
+        last_turn: lastTurnRef.current,
+        full: fullReloadRef.current,
+      });
+      fetchSubagents();
+    }
+  }, [sessionId, sendWs, fetchSubagents]);
+
   // ── 生命周期:挂载时连接,卸载时关闭 ──────────────────────────────────────
+  // 0.5.0 P6(2026-08-09): 依赖去掉 sessionId —— 单 WS 复用, WS 只在挂载时
+  // 建立一次; 会话/窗口切换由 replay effect 走既有连接(零重连, 输入框不中断)
   useEffect(() => {
     manualCloseRef.current = false;
     connect();
@@ -1381,7 +2044,7 @@ export default function App(): JSX.Element {
       }
       wsRef.current = null;
     };
-  }, [connect, sessionId]);
+  }, [connect]);
 
   // 加载默认工作区(画地为牢选择器显示用; 会话工作区后端持久化)
   useEffect(() => {
@@ -1422,32 +2085,32 @@ export default function App(): JSX.Element {
         return;
       }
       setWorkspace(data.workspace ?? null);
-      setEditingWorkspace(false);
+      setWorkspacePanelOpen(false);
     } catch (err) {
       window.alert(`工作区设置失败: ${String(err)}`);
     }
   }, [realSessionId, sessionId, workspaceInput]);
 
   // 加载可用模型列表(模型选择器用)
-  useEffect(() => {
-    let cancelled = false;
-    adminFetch("http://localhost:8765/admin/settings/providers")
-      .then((r) => r.json())
-      .then((data) => {
-        if (!cancelled) {
-          const names = (data.providers ?? [])
-            .filter((p: { enabled: boolean }) => p.enabled)
-            .map((p: { name: string }) => p.name);
-          setModelOptions(names);
-        }
-      })
-      .catch(() => {
-        // 后端未就绪时静默, 选择器只显示"自动"
-      });
-    return () => {
-      cancelled = true;
-    };
+  // 0.5.1(2026-08-09 蒋先生反馈): 改为每次进入对话视图/窗口切换时刷新,
+  // 避免"启动后新增 provider 不出现在下拉框"(原来仅 mount 拉取一次)。
+  const refreshModelOptions = useCallback(async (): Promise<void> => {
+    try {
+      const r = await adminFetch(
+        "http://127.0.0.1:8765/admin/settings/providers"
+      );
+      const data = await r.json();
+      const names = (data.providers ?? [])
+        .filter((p: { enabled: boolean }) => p.enabled)
+        .map((p: { name: string }) => p.name);
+      setModelOptions(names);
+    } catch {
+      // 后端未就绪时静默, 选择器只显示"自动"
+    }
   }, []);
+  useEffect(() => {
+    void refreshModelOptions();
+  }, [refreshModelOptions, view]);
 
   // 切换会话模型选择(自动/手动)
   const changeSessionModel = async (modelId: string): Promise<void> => {
@@ -1473,7 +2136,11 @@ export default function App(): JSX.Element {
   // ── 渲染 ──────────────────────────────────────────────────────────────────
   // ── 渲染: FlowSpace 布局(液体背景 + 侧边栏 + 顶栏 + 内容视图) ─────────
   // V1.1 布局优化: 外层 100vw×100vh 铺满视口(overflow hidden), 内层三栏 flex
-  // + 拖拽分隔条(ResizeHandle), 左右栏可拖拽调宽、可折叠
+  // 2026-08-10: 左右栏固定宽度两态(展开/折叠), 移除拖拽分隔条(ResizeHandle);
+  // 收起按钮在各自栏内(左栏 « / 右栏 »), 宽度不可自由拖拽
+  // 0.5.0 P4(2026-08-08 蒋先生最终决定): 删除窗口 tab 条 UI(多次位置调整
+  // 均不满意)。窗口切换能力保留: 侧边栏左上角 PA 图标 → 主智能体对话;
+  // 首页三场景按钮 → 场景会话; 侧边栏会话列表 → 历史会话。
   return (
     <div
       style={{
@@ -1500,6 +2167,10 @@ export default function App(): JSX.Element {
           width: "100%",
           height: "100%",
           overflow: "hidden",
+          // 2026-08-10: 栏间空隙统一为显式数值, 不再依赖 flex gap 的隐式行为。
+          // 中间区 wrapper 用 margin: "0 12px" 硬性定义左右各 12px 间隙,
+          // 宽度由 flex 精确分配 = 100% − 左栏220 − 右栏300 − 左间隙12 − 右间隙12。
+          // 任意窗口宽度下两侧间隙恒定 12px, 与设置页/对话页共用同一容器, 状态无关。
         }}
       >
         <Sidebar
@@ -1508,22 +2179,55 @@ export default function App(): JSX.Element {
           currentSessionId={realSessionId ?? sessionId}
           onSwitchSession={handleSwitchSession}
           status={status}
-          width={sidebarW}
+          width={SIDEBAR_EXPANDED_WIDTH}
           onResumeSession={(sid) => resumeSession(sid)}
+          theme={theme}
+          toggleTheme={toggleTheme}
+          agentName={agentName}
+          onRenameAgent={(n) => renameAgent(n)}
+          // 0.5.0 P4: PA 图标点击 → 开启主智能体对话(改名已迁设置页)
+          onOpenMonitor={() => void enterMonitorWindow()}
+          // 0.5.0 P5: 主智能体是否有未关闭对话(PA 图标状态圆点)
+          monitorActive={slotHasSession(0)}
         />
-        <ResizeHandle
-          onDrag={(delta) => setSidebarW((w) => clampSidebar(w + delta))}
-        />
-        <div style={{ flex: 1, minWidth: 0, display: "flex", minHeight: 0 }}>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            minHeight: 0,
+            // 2026-08-10 21:25: 左右缝隙的真正来源 —— ArtifactPanel 实际渲染在
+            // 本容器(中间区 wrapper)内部而非 App 渲染容器层! 实测 DOM 链:
+            //   main → wrapper → App容器;  ArtifactPanel → wrapper → App容器
+            // 故左侧缝隙来自本容器 margin-left(对 Sidebar), 右侧缝隙必须由
+            // 本容器 gap 提供(main ↔ ArtifactPanel 之间), 之前 gap 加在 App
+            // 容器层只修了左侧, 右侧 main 右缘直接顶在右栏左缘(重叠/无缝隙)。
+            // 现在 margin:"0 12px"(左缝隙) + gap:12(右缝隙), 两侧对称 12px。
+            margin: "0 12px",
+            gap: 12,
+          }}
+        >
           <main style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
             {view === "home" && (
               <HomeView
                 onPickMode={handlePickMode}
                 activeSkill={activeSkill}
                 sessionId={realSessionId ?? sessionId}
+                theme={theme}
+                // 0.5.0 P5: 场景按钮状态圆点(绿=对话中/红=无对话)
+                slotActive={(skill) =>
+                  slotHasSession(
+                    skill === "office" ? 1 : skill === "data_analysis" ? 2 : 3
+                  )
+                }
               />
             )}
-            {view === "chat" && activeSkill && (
+            {/* 0.5.0 P3/P4: 监控窗口(主智能体, 无场景 skill)
+                —— 2026-08-08 蒋先生反馈: 用户要的是可对话的主智能体, 不是监控面板。
+                故 PA 图标进入后渲染与场景会话一致的对话视图(chat), 顶部 tab 条 +
+                消息列表 + 输入框。MonitorPanel 移除(监控工具由主智能体在对话中
+                主动调用 system_metrics_query/system_status 完成分析)。 */}
+            {view === "chat" && (
               <div
                 className="glass-panel"
                 style={{
@@ -1553,64 +2257,37 @@ export default function App(): JSX.Element {
                       fontWeight: 600,
                     }}
                   >
-                    {activeSkill}
+                    {/* 0.5.0 M1(2026-08-08): chip 仅显示场景中文名(用户要求两字);
+                        测试用 getAllByText(场景名) 接受 sidebar 重复
+                        0.5.0 P6(2026-08-09): 统一渲染后主智能体(无 skill)显示主智能体名 */}
+                    {renderChatAssistantName()}
                   </span>
                   <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                     session={realSessionId ?? sessionId}
                   </span>
-                  {/* 对话中加载/切换技能: 弹技能面板 → 新会话激活 */}
-                  <button
-                    onClick={() => setSkillPickerOpen(true)}
-                    title="切换技能(将新建会话)"
-                    style={{
-                      fontSize: 12, padding: "4px 12px", borderRadius: 10,
-                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
-                    }}
-                  >
-                    🔄 切换技能
-                  </button>
+                  {/* 对话中加载/切换技能: 弹技能面板 → 新会话激活(主智能体无 skill, 隐藏) */}
+                  {activeSkill && (
+                    <button
+                      onClick={() => setSkillPickerOpen(true)}
+                      title="切换技能(将新建会话)"
+                      style={{
+                        fontSize: 12, padding: "4px 12px", borderRadius: 10,
+                        border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
+                        color: "var(--text-primary)",
+                      }}
+                    >
+                      🔄 切换技能
+                    </button>
+                  )}
                   <span style={{ flex: 1 }} />
-                  {/* 会话级模型选择: 自动(fallback 链) / 手动锁定单模型 */}
-                  <select
-                    value={sessionModel}
-                    onChange={(e) => void changeSessionModel(e.target.value)}
-                    style={{
-                      fontSize: 11,
-                      padding: "4px 8px",
-                      borderRadius: 10,
-                      border: "1px solid rgba(148,163,184,0.3)",
-                      background: "rgba(255,255,255,0.6)",
-                      color: "var(--text-primary)",
-                      outline: "none",
-                    }}
-                    title="选择本会话使用的模型: 自动=fallback 链降级; 手动=全程使用所选模型"
-                  >
-                    <option value="auto">🤖 自动(fallback 链)</option>
-                    {modelOptions.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                        {sessionModel === m ? " ✓" : ""}
-                      </option>
-                    ))}
-                  </select>
-                  {/* V1.4-8.4 主题切换 */}
-                  <button
-                    onClick={toggleTheme}
-                    title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
-                    style={{
-                      fontSize: 13, padding: "4px 10px", borderRadius: 10,
-                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
-                    }}
-                  >
-                    {theme === "dark" ? "☀️" : "🌙"}
-                  </button>
                   {/* V1.1-3.5 会话设置(记忆开关/截断/系统提示词) */}
                   <button
                     onClick={() => void openSettings()}
                     title="会话设置(记忆/截断/系统提示词)"
                     style={{
                       fontSize: 12, padding: "4px 10px", borderRadius: 10,
-                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
+                      border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
+                      color: "var(--text-primary)",
                     }}
                   >
                     ⚙ 设置
@@ -1624,10 +2301,30 @@ export default function App(): JSX.Element {
                     title="任务执行状态"
                     style={{
                       fontSize: 12, padding: "4px 10px", borderRadius: 10,
-                      border: "1px solid #ddd", background: "#fff", cursor: "pointer",
+                      border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
+                      color: "var(--text-primary)",
                     }}
                   >
                     📋 任务
+                  </button>
+                  {/* 0.5.0 P5: 关闭当前对话(主动结束 → 归档历史任务, 状态圆点转红)。
+                      未关闭的对话切换页面不打断, 可随时点图标回来继续 */}
+                  <button
+                    onClick={() => {
+                      // eslint-disable-next-line no-alert
+                      if (!window.confirm("关闭当前对话?将归档至历史任务, 可随时恢复。")) return;
+                      closeWindow(activeSlot);
+                    }}
+                    title="关闭对话(归档至历史任务)"
+                    style={{
+                      fontSize: 12, padding: "4px 10px", borderRadius: 10,
+                      border: "1px solid rgba(239,68,68,0.4)",
+                      background: "rgba(239,68,68,0.06)",
+                      cursor: "pointer",
+                      color: "#ef4444",
+                    }}
+                  >
+                    🗑 关闭对话
                   </button>
                 </div>
                 {/* V1.5 项-4: 断点恢复横幅(interrupted 会话 + 存在 checkpoint) */}
@@ -1640,10 +2337,10 @@ export default function App(): JSX.Element {
                       margin: "0 4px 8px",
                       padding: "8px 12px",
                       borderRadius: 10,
-                      background: "#fff8e1",
-                      border: "1px solid #ffcc80",
+                      background: "var(--warning-bg)",
+                      border: "1px solid var(--warning-border)",
                       fontSize: 12,
-                      color: "#7a4f01",
+                      color: "var(--warning-text)",
                       flexShrink: 0,
                     }}
                   >
@@ -1655,7 +2352,7 @@ export default function App(): JSX.Element {
                       style={{
                         fontSize: 12, padding: "4px 14px", borderRadius: 10,
                         border: "1px solid #e6a23c", background: "#f7a83b",
-                        color: "#fff", cursor: "pointer", fontWeight: 600,
+                        color: "var(--on-accent)", cursor: "pointer", fontWeight: 600,
                       }}
                     >
                       ▶ 断点继续
@@ -1663,6 +2360,7 @@ export default function App(): JSX.Element {
                   </div>
                 )}
                 <div
+                  ref={chatScrollRef}
                   style={{
                     flex: 1,
                     minHeight: 0,
@@ -1671,8 +2369,17 @@ export default function App(): JSX.Element {
                   }}
                 >
         {turnGroups.length === 0 && (
-          <div style={{ color: "#999", textAlign: "center", paddingTop: 40 }}>
-            发送一条消息开始对话
+          <div style={{ color: "var(--text-tertiary)", textAlign: "center", paddingTop: 40, lineHeight: 1.8 }}>
+            {/* 0.5.0 P6(2026-08-09): 统一渲染后空态按角色区分 —— 主智能体显示监控引导 */}
+            {activeSlot === 0 && !activeSkill ? (
+              <>
+                我是{agentName || "主智能体"} —— 负责系统监控与优化。
+                <br />
+                你可以问"查看系统性能"、"有哪些可优化点"、或让我分析最近指标。
+              </>
+            ) : (
+              "发送一条消息开始对话"
+            )}
           </div>
         )}
         {turnGroups.map(([turn, evs]) => {
@@ -1720,10 +2427,11 @@ export default function App(): JSX.Element {
                 >
                   <div
                     style={{
-                      backgroundColor: "#dbeafe",
+                      backgroundColor: "var(--chat-user-bg)",
                       borderRadius: "12px 12px 2px 12px",
                       padding: "8px 14px",
                       maxWidth: "80%",
+                      color: "var(--text-primary)",
                     }}
                   >
                     <pre
@@ -1770,30 +2478,15 @@ export default function App(): JSX.Element {
 
               {userEv && (
                 <div style={{ display: "flex", gap: 10 }}>
-                  <div
-                    style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: "50%",
-                      flexShrink: 0,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: 14,
-                      fontWeight: 600,
-                      color: "#fff",
-                      background: "linear-gradient(135deg, #818cf8, #c084fc)",
-                    }}
-                  >
-                    智
-                  </div>
+                  {/* 2026-08-08: 助手头像统一桌面图标原图 + 名字(场景会话=场景名, 否则主智能体名) */}
+                  <RobotAvatar size={32} style={{ marginTop: 2 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
-                      私人智能体
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>
+                      {renderChatAssistantName()}
                     </div>
 
                     {isPending && !thinkingEv && (
-                      <div style={{ color: "#9ca3af", fontSize: 13 }}>
+                      <div style={{ color: "var(--text-tertiary)", fontSize: 13 }}>
                         💭 思考中…
                       </div>
                     )}
@@ -1801,7 +2494,7 @@ export default function App(): JSX.Element {
                     {thinkingEv && (
                       <div
                         style={{
-                          border: "1px solid #e5e7eb",
+                          border: "1px solid var(--border-color)",
                           borderRadius: 10,
                           marginBottom: 8,
                           overflow: "hidden",
@@ -1816,17 +2509,17 @@ export default function App(): JSX.Element {
                             width: "100%",
                             padding: "6px 10px",
                             border: "none",
-                            background: "#f9fafb",
-                            cursor: "pointer",
-                            fontSize: 12,
-                            color: "#6b7280",
+                          background: "var(--surface-1)",
+                          cursor: "pointer",
+                          fontSize: 12,
+                          color: "var(--text-secondary)",
                             textAlign: "left",
                           }}
                         >
                           <span style={{ fontSize: 11 }}>{thinkingOpen ? "▾" : "▸"}</span>
                           {thinkingOpen ? "收起推理过程" : "查看推理过程"}
                           {!thinkingOpen && (
-                            <span style={{ color: "#9ca3af", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            <span style={{ color: "var(--text-tertiary)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               {thinkingText.slice(0, 60)}
                             </span>
                           )}
@@ -1839,7 +2532,7 @@ export default function App(): JSX.Element {
                               whiteSpace: "pre-wrap",
                               wordBreak: "break-word",
                               fontSize: 12,
-                              color: "#6b7280",
+                              color: "var(--text-secondary)",
                               maxHeight: 260,
                               overflowY: "auto",
                               // 2026-08-07: 去掉斜体(用户反馈)
@@ -1868,11 +2561,11 @@ export default function App(): JSX.Element {
                             <div
                               style={{
                                 backgroundColor:
-                                  te.event_type === "tool_call" ? "#eef2ff" : "#ecfdf5",
+                                  te.event_type === "tool_call" ? "var(--tool-call-bg)" : "var(--tool-result-bg)",
                                 borderRadius: 10,
                                 padding: "6px 10px",
                                 fontSize: 12,
-                                color: "#6b7280",
+                                color: "var(--text-secondary)",
                               }}
                             >
                               {te.event_type === "tool_call" ? (
@@ -1890,7 +2583,7 @@ export default function App(): JSX.Element {
                                     key={p}
                                     src={imagePathToUrl(p)}
                                     alt={p}
-                                    style={{ maxWidth: "100%", borderRadius: 10, border: "1px solid #e5e7eb" }}
+                                    style={{ maxWidth: "100%", borderRadius: 10, border: "1px solid var(--border-color)" }}
                                   />
                                 ))}
                               </div>
@@ -1904,7 +2597,7 @@ export default function App(): JSX.Element {
                       <div
                         style={{
                           marginBottom: 8,
-                          border: "1px solid #e2e8f0",
+                          border: "1px solid var(--border-color)",
                           borderRadius: 10,
                           overflow: "hidden",
                         }}
@@ -1912,11 +2605,11 @@ export default function App(): JSX.Element {
                         <div
                           style={{
                             padding: "4px 10px",
-                            background: "#f8fafc",
+                            background: "var(--code-bg)",
                             fontSize: 11,
                             fontWeight: 600,
                             color: "#64748b",
-                            borderBottom: "1px solid #e2e8f0",
+                            borderBottom: "1px solid var(--border-color)",
                           }}
                         >
                           🖥️ 沙箱输出
@@ -1959,7 +2652,7 @@ export default function App(): JSX.Element {
                               marginBottom: 8,
                               border: "1px solid #fcd34d",
                               borderRadius: 10,
-                              background: "#fffbeb",
+                              background: "var(--confirmation-bg)",
                               padding: "10px 12px",
                             }}
                           >
@@ -2000,7 +2693,7 @@ export default function App(): JSX.Element {
                               </pre>
                             )}
                             {confirmResultEv ? (
-                              <div style={{ fontSize: 12, color: "#6b7280" }}>
+                              <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
                                 {formatPayload("tool_confirmation_result", confirmResultEv.payload)}
                               </div>
                             ) : (
@@ -2076,31 +2769,32 @@ export default function App(): JSX.Element {
                       })}
 
                     {finalText && !deletedTurns.has(turn) ? (
-                      <div>
-                        <div
+                      // 0.5.0 M1(2026-08-08 修复): 头像与名字由 userEv 外层统一渲染一次,
+                      // finalText 区只渲染气泡容器, 避免同一回复出现两次头像
+                      <div
+                        style={{
+                          backgroundColor: "var(--chat-ai-bg)",
+                          border: "1px solid var(--chat-ai-border)",
+                          borderRadius: 12,
+                          padding: "10px 14px",
+                          color: "var(--text-primary)",
+                        }}
+                      >
+                        <pre
                           style={{
-                            backgroundColor: "#ffffff",
-                            border: "1px solid #e5e7eb",
-                            borderRadius: 12,
-                            padding: "10px 14px",
+                            margin: 0,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            fontSize: 13,
+                            fontFamily: "inherit",
+                            lineHeight: 1.6,
                           }}
                         >
-                          <pre
-                            style={{
-                              margin: 0,
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              fontSize: 13,
-                              fontFamily: "inherit",
-                              lineHeight: 1.6,
-                            }}
-                          >
-                            {finalText}
-                          </pre>
-                        </div>
+                          {finalText}
+                        </pre>
                         {/* V1.1-3.3 消息操作条(非生成中显示) */}
                         {!isGenerating && (
-                          <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
+                          <div style={{ display: "flex", gap: 4, marginTop: 6, marginLeft: 0, flexWrap: "wrap" }}>
                             <MsgActionBtn label="🔄 重生成" title="重新生成这条回复" onClick={() => regenerateTurn(turn)} />
                             <MsgActionBtn
                               label={starredTurns.has(turn) ? "★ 已收藏" : "☆ 收藏"}
@@ -2116,21 +2810,21 @@ export default function App(): JSX.Element {
                         )}
                       </div>
                     ) : finalText && deletedTurns.has(turn) ? (
-                      <div style={{ fontSize: 12, color: "#9ca3af", fontStyle: "italic" }}>
+                      <div style={{ fontSize: 12, color: "var(--text-tertiary)", fontStyle: "italic" }}>
                         此回复已删除
                       </div>
-                    ) : isPending && !thinkingEv ? (
-                      <div style={{ color: "#9ca3af", fontSize: 13 }}>💭 思考中…</div>
                     ) : null}
 
                     {errorEv && (
                       <div
                         style={{
-                          backgroundColor: "#ffebee",
+                          backgroundColor: "var(--error-bg)",
                           borderRadius: 10,
                           padding: "8px 12px",
                           fontSize: 13,
-                          color: "#c62828",
+                          color:
+                            errorCategoryColor(errorEv.payload?.message) ??
+                            "var(--danger-text)",
                         }}
                       >
                         ❌ {formatPayload("error", errorEv.payload)}
@@ -2165,83 +2859,20 @@ export default function App(): JSX.Element {
         />
       </div>
 
-      {/* 工作区条(画地为牢): 显示/修改会话工作目录, agent 操作范围告知层 */}
+      {/* 2026-08-08: 统一输入卡片 —— 附件区/输入框/底部操作行(工作区 + 更多 +
+          模型选择 + 发送)整合为一张卡片; 各元素统一 40px 高度, 底部行窄屏可换行 */}
       <div
         style={{
+          marginTop: 12,
+          border: "1px solid var(--border-strong)",
+          borderRadius: 14,
+          background: "var(--panel-bg-solid)",
+          padding: 8,
           display: "flex",
-          alignItems: "center",
-          gap: 8,
-          marginTop: 10,
-          fontSize: 12,
-          color: "#6b7280",
+          flexDirection: "column",
+          gap: 6,
         }}
       >
-        {editingWorkspace ? (
-          <>
-            <input
-              type="text"
-              value={workspaceInput}
-              onChange={(e) => setWorkspaceInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void saveWorkspace();
-                }
-              }}
-              placeholder="输入工作区目录路径, 如 D:/MyProject"
-              style={{
-                flex: 1,
-                padding: "6px 10px",
-                borderRadius: 10,
-                border: "1px solid #ccc",
-                fontSize: 12,
-                outline: "none",
-              }}
-            />
-            <button
-              onClick={() => void saveWorkspace()}
-              style={{ padding: "6px 12px", borderRadius: 10, border: "none", background: "#1976d2", color: "#fff", fontSize: 12, cursor: "pointer" }}
-            >
-              保存
-            </button>
-            <button
-              onClick={() => setEditingWorkspace(false)}
-              style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", color: "#666", fontSize: 12, cursor: "pointer" }}
-            >
-              取消
-            </button>
-          </>
-        ) : (
-          <>
-            <span>📁 工作区:</span>
-            <span
-              style={{
-                flex: 1,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                background: "#f3f4f6",
-                borderRadius: 10,
-                padding: "4px 8px",
-              }}
-              title={workspace ?? "（默认工作目录）"}
-            >
-              {workspace ?? "（默认工作目录）"}
-            </span>
-            <button
-              onClick={() => {
-                setWorkspaceInput(workspace ?? "");
-                setEditingWorkspace(true);
-              }}
-              style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ddd", background: "#fff", color: "#374151", fontSize: 12, cursor: "pointer" }}
-            >
-              更换
-            </button>
-          </>
-        )}
-      </div>
-
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         {/* 上传文档: 选择文件 → base64 上传后端 → 发送时附带文件路径 */}
         <input
           ref={fileInputRef}
@@ -2249,72 +2880,65 @@ export default function App(): JSX.Element {
           style={{ display: "none" }}
           onChange={(e) => void handleFilePick(e.target.files?.[0])}
         />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          title="上传文档(≤15MB, 支持 pdf/docx/xlsx/txt/图片等)"
-          style={{
-            padding: "10px 12px", borderRadius: 10, border: "1px solid #ddd",
-            backgroundColor: "#fff", fontSize: 14, cursor: "pointer",
-          }}
-        >
-          📎
-        </button>
-        {/* V1.4-8.4 提示词模板库 */}
-        <button
-          onClick={() => setTemplatesOpen(!templatesOpen)}
-          title="提示词模板库(保存常用提示词/插入)"
-          style={{
-            padding: "10px 12px", borderRadius: 10, border: "1px solid #ddd",
-            backgroundColor: templatesOpen ? "#f5f3ff" : "#fff",
-            color: templatesOpen ? "#5b21b6" : "#333",
-            fontSize: 14, cursor: "pointer",
-          }}
-        >
-          📋
-        </button>
-        {pendingUpload && (
-          <span style={{ fontSize: 12, color: "#4caf50", alignSelf: "center", whiteSpace: "nowrap" }}>
-            ✓ {pendingUpload.name}
-          </span>
+
+        {/* 附件区(待发送文件/图片 chip) */}
+        {(pendingUpload || pendingImage) && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {pendingUpload && (
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "4px 10px",
+                  borderRadius: 16,
+                  background: "var(--chip-bg)",
+                  border: "1px solid var(--border-color)",
+                  fontSize: 12,
+                  color: "var(--text-primary)",
+                }}
+              >
+                <span>📄</span>
+                <span style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {pendingUpload.name}
+                </span>
+                <button
+                  onClick={() => setPendingUpload(null)}
+                  title="移除文件"
+                  style={{
+                    border: "none", background: "transparent", cursor: "pointer",
+                    fontSize: 12, color: "var(--text-tertiary)", padding: 0, lineHeight: 1,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+            {pendingImage && (
+              <div style={{ position: "relative", display: "inline-flex" }}>
+                <img
+                  src={pendingImage.preview}
+                  alt="待发送图片"
+                  style={{ height: 34, borderRadius: 10, border: "1px solid var(--border-color)" }}
+                />
+                <button
+                  onClick={() => setPendingImage(null)}
+                  title="移除图片"
+                  style={{
+                    position: "absolute", top: -6, right: -6,
+                    width: 16, height: 16, borderRadius: "50%",
+                    border: "none", background: "#d32f2f", color: "#fff",
+                    fontSize: 10, lineHeight: 1, cursor: "pointer", padding: 0,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+          </div>
         )}
-        {pendingImage && (
-          <span
-            style={{
-              position: "relative",
-              alignSelf: "center",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-            }}
-          >
-            <img
-              src={pendingImage.preview}
-              alt="待发送图片"
-              style={{ height: 34, borderRadius: 10, border: "1px solid #ddd" }}
-            />
-            <button
-              onClick={() => setPendingImage(null)}
-              title="移除图片"
-              style={{
-                position: "absolute",
-                top: -6,
-                right: -6,
-                width: 16,
-                height: 16,
-                borderRadius: "50%",
-                border: "none",
-                background: "#d32f2f",
-                color: "#fff",
-                fontSize: 10,
-                lineHeight: 1,
-                cursor: "pointer",
-                padding: 0,
-              }}
-            >
-              ×
-            </button>
-          </span>
-        )}
+
+        {/* 消息输入框(2026-08-08 无框化: 无边框 + 透明背景, 融入输入卡片) */}
         <textarea
           ref={inputRef}
           value={input}
@@ -2327,13 +2951,13 @@ export default function App(): JSX.Element {
               sendMessage();
             }
           }}
-          placeholder="输入消息,Enter 发送,Shift+Enter 换行,可直接粘贴图片"
+          placeholder={activeSlot === 0 && !activeSkill ? `向${agentName || "主智能体"}提问(如: 查看系统性能)…` : "输入消息,Enter 发送,Shift+Enter 换行,可直接粘贴图片"}
           rows={2}
           style={{
             flex: 1,
-            padding: "10px 12px",
-            borderRadius: 12,
-            border: "1px solid #ddd",
+            padding: "8px 4px",
+            borderRadius: 10,
+            border: "none",
             fontSize: 14,
             outline: "none",
             resize: "vertical",
@@ -2341,32 +2965,268 @@ export default function App(): JSX.Element {
             maxHeight: 160,
             fontFamily: "inherit",
             lineHeight: 1.5,
+            background: "transparent",
+            color: "var(--text-primary)",
           }}
         />
+
+        {/* 2026-08-08: 原分隔线已移除(输入区与底部操作行无框化过渡) */}
+
+        {/* 底部操作行: 工作区 / 更多 / 模型选择 / 发送(统一 34px, 窄屏自动换行) */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          {/* 2026-08-08: 工作区图标(画地为牢) —— 点击弹出设置面板(原生目录选择器) */}
+          <div style={{ position: "relative" }}>
+            <button
+              onClick={() => {
+                setWorkspaceInput(workspace ?? "");
+                setWorkspacePanelOpen((v) => !v);
+              }}
+              title={`工作区: ${workspace ?? "（默认工作目录）"}`}
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 7,
+                border: "none",
+                backgroundColor: workspace ? "rgba(16,185,129,0.15)" : "var(--button-ghost-bg)",
+                color: workspace ? "#10b981" : "var(--text-primary)",
+                fontSize: 15,
+                lineHeight: 1,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "all 0.15s ease",
+              }}
+            >
+              📁
+            </button>
+            {workspacePanelOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "100%",
+                  left: 0,
+                  marginBottom: 8,
+                  width: 320,
+                  background: "var(--panel-bg-solid)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: 12,
+                  boxShadow: "0 10px 30px rgba(15,23,42,0.15)",
+                  padding: 12,
+                  zIndex: 60,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>工作区设置</div>
+                <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8 }}>
+                  画地为牢: agent 操作范围限定在该目录(留空 = 默认工作目录)
+                </div>
+                <div
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+                    padding: "6px 10px", borderRadius: 8,
+                    background: "var(--chip-bg)", fontSize: 12, color: "var(--text-secondary)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}
+                  title={workspace ?? "（默认工作目录）"}
+                >
+                  📁 {workspace ?? "（默认工作目录）"}
+                </div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                  <button
+                    onClick={() => void (async () => {
+                      try {
+                        const dir = await window.pa?.pickDirectory?.();
+                        if (dir) setWorkspaceInput(dir);
+                      } catch {
+                        /* 非 Electron 环境忽略 */
+                      }
+                    })()}
+                    title={window.pa?.pickDirectory ? "打开系统目录选择器" : "当前环境不支持目录选择器, 请手动输入路径"}
+                    style={{
+                      flex: 1, padding: "6px 10px", borderRadius: 8, cursor: "pointer",
+                      border: "1px solid var(--border-strong)", background: "var(--button-ghost-bg)",
+                      color: "var(--text-primary)", fontSize: 12,
+                    }}
+                  >
+                    📂 选择目录
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={workspaceInput}
+                  onChange={(e) => setWorkspaceInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void saveWorkspace();
+                    }
+                  }}
+                  placeholder="或手动输入目录路径, 如 D:/MyProject"
+                  style={{
+                    width: "100%", boxSizing: "border-box",
+                    padding: "6px 10px", borderRadius: 8,
+                    border: "1px solid var(--border-strong)",
+                    fontSize: 12, outline: "none", marginBottom: 8,
+                  }}
+                />
+                <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                  <button
+                    onClick={() => void saveWorkspace()}
+                    style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#1976d2", color: "var(--on-accent)", fontSize: 12, cursor: "pointer" }}
+                  >
+                    保存
+                  </button>
+                  <button
+                    onClick={() => setWorkspacePanelOpen(false)}
+                    style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--button-ghost-bg)", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer" }}
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* + 号工具菜单: 集成上传文件 + 提示词模板 */}
+          <div style={{ position: "relative" }}>
+          <button
+            onClick={() => setPlusMenuOpen((v) => !v)}
+            title="更多"
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 7,
+              border: "none",
+              backgroundColor: plusMenuOpen ? "rgba(139,92,246,0.18)" : "var(--button-ghost-bg)",
+              color: plusMenuOpen ? "#a78bfa" : "var(--text-primary)",
+              fontSize: 17,
+              lineHeight: 1,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              transition: "all 0.15s ease",
+            }}
+          >
+            +
+          </button>
+          {plusMenuOpen && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: "100%",
+                left: 0,
+                marginBottom: 8,
+                background: "var(--panel-bg-solid)",
+                border: "1px solid var(--border-color)",
+                borderRadius: 12,
+                boxShadow: "0 10px 30px rgba(15,23,42,0.18)",
+                padding: 8,
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                width: 280,
+                zIndex: 50,
+              }}
+            >
+              {/* 2026-08-08: 重构为 IDE 风格专业菜单(参考截图):
+                  每项左侧图标+文字, 右侧 → 箭头; 宽菜单、舒适间距,
+                  hover 高亮加深, 为后续扩展子菜单(模式/连接器/功能等)留空间。 */}
+              {[
+                { icon: "📎", label: "添加文件", onClick: () => { fileInputRef.current?.click(); setPlusMenuOpen(false); } },
+                { icon: "📋", label: "提示词模板", onClick: () => { setTemplatesOpen(true); setPlusMenuOpen(false); } },
+              ].map((item) => (
+                <button
+                  key={item.label}
+                  onClick={item.onClick}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: "none",
+                    background: "transparent",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    color: "var(--text-primary)",
+                    textAlign: "left",
+                    transition: "background 0.15s ease",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-2)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ width: 18, textAlign: "center" }}>{item.icon}</span>
+                    <span>{item.label}</span>
+                  </span>
+                  <span style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1 }}>›</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {/* 2026-08-08: 原左侧工具列/输入容器已并入统一输入卡片(上方) */}
+
+        {/* 会话级模型选择: 自动(fallback 链) / 手动锁定单模型(2026-08-08 移入输入卡片) */}
+        <select
+          value={sessionModel}
+          onChange={(e) => void changeSessionModel(e.target.value)}
+          title="选择本会话使用的模型: 自动=fallback 链降级; 手动=全程使用所选模型"
+          style={{
+            height: 28,
+            padding: "0 8px",
+            borderRadius: 7,
+            border: "none",
+            background: "var(--input-bg)",
+            color: "var(--text-primary)",
+            fontSize: 12,
+            outline: "none",
+            flex: "1 1 110px",
+            minWidth: 110,
+            maxWidth: 200,
+          }}
+        >
+          <option value="auto">🤖 自动(fallback 链)</option>
+          {modelOptions.map((m) => (
+            <option key={m} value={m}>
+              {m}
+              {sessionModel === m ? " ✓" : ""}
+            </option>
+          ))}
+        </select>
+
+        <span style={{ flex: 1 }} />
         <button
           onClick={isGenerating ? stopGeneration : sendMessage}
           disabled={!isGenerating && (status !== "connected" || !input.trim())}
           title={isGenerating ? "停止生成(彻底终止当前轮次)" : "发送消息"}
           style={{
-            padding: "10px 22px",
-            borderRadius: 12,
-            border: isGenerating ? "1px solid #d97706" : "none",
+            height: 28,
+            padding: "0 14px",
+            borderRadius: 7,
+            border: "none",
             backgroundColor: isGenerating
-              ? "#fff"
+              ? "rgba(120,53,15,0.35)"
               : (status === "connected" && input.trim() ? "#1976d2" : "#bbb"),
-            color: isGenerating ? "#d97706" : "#fff",
-            fontSize: 14,
+            color: isGenerating ? "#fcd34d" : "#fff",
+            fontSize: 12,
             fontWeight: 600,
             cursor: (status === "connected" || isGenerating) ? "pointer" : "not-allowed",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
             transition: "all 0.15s var(--transition-smooth)",
           }}
         >
           {isGenerating ? "■ 停止" : "发送"}
         </button>
-          </div>
-          </div>
-          )}
-          {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} />}
+        </div>{/* 底部操作行闭合 */}
+      </div>{/* 统一输入卡片闭合 */}
+    </div>
+  )}
+          {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} theme={theme} />}
           {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
           {view === "memory" && (
             <MemoryView
@@ -2399,7 +3259,7 @@ export default function App(): JSX.Element {
                 maxWidth: "90vw",
                 maxHeight: "80vh",
                 overflowY: "auto",
-                background: "#fff",
+                background: "var(--panel-bg-solid)",
                 borderRadius: 14,
                 padding: "20px 24px",
                 boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
@@ -2448,7 +3308,7 @@ export default function App(): JSX.Element {
                     disabled={!autoExec}
                     style={{
                       width: 70, padding: "4px 8px", borderRadius: 10,
-                      border: "1px solid #ddd", fontSize: 13,
+                      border: "1px solid var(--border-strong)", fontSize: 13,
                     }}
                   />
                   <span style={{ fontSize: 12, color: "#64748b" }}>轮</span>
@@ -2456,7 +3316,7 @@ export default function App(): JSX.Element {
                     onClick={() => void saveAutoExec()}
                     style={{
                       fontSize: 12, padding: "5px 14px", borderRadius: 10,
-                      border: "1px solid #6d28d9", background: "#f5f3ff",
+                      border: "1px solid #6d28d9", background: "var(--accent-soft-bg)",
                       color: "#5b21b6", cursor: "pointer",
                     }}
                   >
@@ -2480,7 +3340,7 @@ export default function App(): JSX.Element {
                     onChange={(e) => setTruncateTurn(Number(e.target.value))}
                     style={{
                       width: 80, padding: "4px 8px", borderRadius: 10,
-                      border: "1px solid #ddd", fontSize: 13,
+                      border: "1px solid var(--border-strong)", fontSize: 13,
                     }}
                   />
                   <span style={{ fontSize: 12, color: "#64748b" }}>轮</span>
@@ -2488,7 +3348,7 @@ export default function App(): JSX.Element {
                     onClick={() => void doTruncate()}
                     style={{
                       fontSize: 12, padding: "5px 14px", borderRadius: 10,
-                      border: "1px solid #d97706", background: "#fffbeb",
+                      border: "1px solid #d97706", background: "var(--confirmation-bg)",
                       color: "#92400e", cursor: "pointer",
                     }}
                   >
@@ -2507,7 +3367,7 @@ export default function App(): JSX.Element {
                   onClick={() => void loadSystemPrompt()}
                   style={{
                     fontSize: 12, padding: "5px 14px", borderRadius: 10,
-                    border: "1px solid #ddd", background: "#f8fafc",
+                    border: "1px solid var(--border-strong)", background: "var(--code-bg)",
                     color: "#334155", cursor: "pointer", marginBottom: 8,
                   }}
                 >
@@ -2520,8 +3380,8 @@ export default function App(): JSX.Element {
                     style={{
                       width: "100%", boxSizing: "border-box", minHeight: 180,
                       resize: "vertical", fontSize: 12, fontFamily: "Consolas, monospace",
-                      border: "1px solid #e2e8f0", borderRadius: 10, padding: 10,
-                      color: "#334155", background: "#f8fafc",
+                      border: "1px solid var(--border-color)", borderRadius: 10, padding: 10,
+                      color: "#334155", background: "var(--code-bg)",
                     }}
                   />
                 )}
@@ -2556,7 +3416,7 @@ export default function App(): JSX.Element {
                 maxWidth: "90vw",
                 maxHeight: "70vh",
                 overflowY: "auto",
-                background: "#fff",
+                background: "var(--panel-bg-solid)",
                 borderRadius: 14,
                 padding: "18px 22px",
                 boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
@@ -2586,14 +3446,14 @@ export default function App(): JSX.Element {
                   placeholder="模板名(默认取输入前 20 字)"
                   style={{
                     flex: 1, padding: "6px 10px", borderRadius: 10,
-                    border: "1px solid #ddd", fontSize: 12,
+                    border: "1px solid var(--border-strong)", fontSize: 12,
                   }}
                 />
                 <button
                   onClick={saveCurrentAsTemplate}
                   style={{
                     fontSize: 12, padding: "6px 14px", borderRadius: 10,
-                    border: "1px solid #6d28d9", background: "#f5f3ff",
+                    border: "1px solid #6d28d9", background: "var(--accent-soft-bg)",
                     color: "#5b21b6", cursor: "pointer", whiteSpace: "nowrap",
                   }}
                 >
@@ -2614,7 +3474,7 @@ export default function App(): JSX.Element {
                     style={{
                       display: "flex", alignItems: "center", gap: 8,
                       padding: "8px 10px", borderRadius: 10,
-                      background: "rgba(245,243,255,0.6)", fontSize: 12,
+                      background: "var(--accent-soft-bg)", fontSize: 12,
                     }}
                   >
                     <button
@@ -2665,7 +3525,7 @@ export default function App(): JSX.Element {
                 maxWidth: "92vw",
                 maxHeight: "80vh",
                 overflowY: "auto",
-                background: "#fff",
+                background: "var(--panel-bg-solid)",
                 borderRadius: 14,
                 padding: "20px 24px",
                 boxShadow: "0 20px 60px rgba(15,23,42,0.25)",
@@ -2751,11 +3611,11 @@ export default function App(): JSX.Element {
                   style={{
                     maxHeight: 240,
                     overflowY: "auto",
-                    border: "1px solid #e2e8f0",
+                    border: "1px solid var(--border-color)",
                     borderRadius: 10,
                     padding: 8,
                     marginBottom: 12,
-                    background: "#f8fafc",
+                    background: "var(--code-bg)",
                   }}
                 >
                   {eventsLoading && (
@@ -2792,7 +3652,7 @@ export default function App(): JSX.Element {
                           fontWeight: 600,
                           color:
                             ev.event_type === "error" || ev.event_type === "tool_error"
-                              ? "#dc2626"
+                              ? (errorCategoryColor(ev.summary) ?? "#dc2626")
                               : ev.event_type === "tool_call"
                                 ? "#6d28d9"
                                 : ev.event_type === "final"
@@ -2826,11 +3686,11 @@ export default function App(): JSX.Element {
                   style={{
                     maxHeight: 240,
                     overflowY: "auto",
-                    border: "1px solid #e2e8f0",
+                    border: "1px solid var(--border-color)",
                     borderRadius: 10,
                     padding: 12,
                     marginBottom: 12,
-                    background: "#f8fafc",
+                    background: "var(--code-bg)",
                     display: "flex",
                     flexDirection: "column",
                     gap: 10,
@@ -2853,7 +3713,7 @@ export default function App(): JSX.Element {
                             value: usageData.total_cost.toFixed(4),
                           },
                         ].map((s) => (
-                          <div key={s.label} style={{ background: "#fff", borderRadius: 10, padding: "8px 10px" }}>
+                          <div key={s.label} style={{ background: "var(--panel-bg-solid)", borderRadius: 10, padding: "8px 10px" }}>
                             <div style={{ fontSize: 10, color: "#94a3b8" }}>{s.label}</div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: "#334155" }}>{s.value}</div>
                           </div>
@@ -2918,10 +3778,10 @@ export default function App(): JSX.Element {
                     <div
                       key={t.turn}
                       style={{
-                        border: "1px solid #e2e8f0",
+                        border: "1px solid var(--border-color)",
                         borderRadius: 10,
                         padding: "10px 14px",
-                        background: hasError ? "#fff7f7" : "#fafafa",
+                        background: hasError ? "var(--error-bg)" : "var(--surface-1)",
                       }}
                     >
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -2970,14 +3830,11 @@ export default function App(): JSX.Element {
             </div>
           </div>
         )}
-        <ResizeHandle
-          onDrag={(delta) => setPanelW((w) => clampPanel(w - delta))}
-        />
         <ArtifactPanel
           open={artifactsOpen}
           artifacts={artifacts}
           onToggle={() => setArtifactsOpen(!artifactsOpen)}
-          width={panelW}
+          width={PANEL_EXPANDED_WIDTH}
         />
 
         {/* 对话中切换技能弹层 */}
@@ -2996,26 +3853,49 @@ export default function App(): JSX.Element {
             >
               <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>选择技能</div>
               <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 12 }}>
-                切换技能将新建会话(当前会话保持原技能)
+                切换技能将新建会话(当前会话保持原技能); 部分技能仅限当前模型(DeepSeek 系列)使用
               </div>
-              {availableSkills.filter((s) => s.enabled).map((s) => (
-                <button
-                  key={s.name}
-                  onClick={() => {
-                    setSkillPickerOpen(false);
-                    void handlePickMode(s.name as "office" | "data_analysis" | "frontend_design");
-                  }}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "space-between",
-                    width: "100%", padding: "10px 14px", marginBottom: 8,
-                    borderRadius: 10, border: "1px solid #ddd", background: "#fff",
-                    fontSize: 14, cursor: "pointer", textAlign: "left",
-                  }}
-                >
-                  <span>{s.name}</span>
-                  <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>v{s.version}</span>
-                </button>
-              ))}
+              {(() => {
+                // 2026-08-08: 按会话生效模型过滤 model_scope 限定技能;
+                // auto=fallback 链时取第一个可用 provider 作为生效模型。
+                const effectiveModel =
+                  sessionModel === "auto" ? (modelOptions[0] ?? "") : sessionModel;
+                const m = effectiveModel.toLowerCase();
+                const matches = (scope?: string[]): boolean =>
+                  !scope || scope.length === 0 || scope.some((s) => m.includes(s.toLowerCase()));
+                const enabled = availableSkills.filter((s) => s.enabled);
+                const dsSkills = enabled.filter((s) => matches(s.model_scope));
+                const genSkills = enabled.filter((s) => !matches(s.model_scope));
+                const groups: { label: string; list: typeof enabled }[] = [];
+                if (dsSkills.length > 0)
+                  groups.push({ label: `🎯 当前模型专属 (${effectiveModel || "auto"})`, list: dsSkills });
+                if (genSkills.length > 0) groups.push({ label: "通用技能", list: genSkills });
+                return groups.map((g) => (
+                  <div key={g.label} style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "4px 2px 6px" }}>
+                      {g.label}
+                    </div>
+                    {g.list.map((s) => (
+                      <button
+                        key={s.name}
+                        onClick={() => {
+                          setSkillPickerOpen(false);
+                          void handlePickMode(s.name as "office" | "data_analysis" | "frontend_design");
+                        }}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          width: "100%", padding: "10px 14px", marginBottom: 8,
+                          borderRadius: 10, border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)",
+                          fontSize: 14, cursor: "pointer", textAlign: "left",
+                        }}
+                      >
+                        <span>{s.name}</span>
+                        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>v{s.version}</span>
+                      </button>
+                    ))}
+                  </div>
+                ));
+              })()}
               {availableSkills.filter((s) => s.enabled).length === 0 && (
                 <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: 16, textAlign: "center" }}>
                   暂无可用技能
@@ -3023,7 +3903,7 @@ export default function App(): JSX.Element {
               )}
               <button
                 onClick={() => setSkillPickerOpen(false)}
-                style={{ width: "100%", padding: "8px", marginTop: 6, borderRadius: 10, border: "none", background: "#eee", cursor: "pointer", fontSize: 13 }}
+                style={{ width: "100%", padding: "8px", marginTop: 6, borderRadius: 10, border: "none", background: "var(--border-color)", cursor: "pointer", fontSize: 13 }}
               >
                 取消
               </button>
@@ -3031,6 +3911,159 @@ export default function App(): JSX.Element {
           </div>
         )}
         </div>
+        {/* 0.5.1 A: 权限确认全局弹窗(置顶, 任何窗口可见) */}
+        {pendingConfirm && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 9999,
+              background: "rgba(0,0,0,0.45)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <div
+              style={{
+                width: 460,
+                maxWidth: "92vw",
+                borderRadius: 16,
+                background: "var(--panel-bg-solid)",
+                border: "1px solid var(--border-strong)",
+                boxShadow: "0 12px 48px rgba(0,0,0,0.35)",
+                padding: 20,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 8,
+                }}
+              >
+                <span style={{ fontSize: 15, fontWeight: 700 }}>
+                  ⚠️ 需要你的确认
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: "var(--text-tertiary)",
+                    marginLeft: "auto",
+                  }}
+                >
+                  {confirmCountdown}s 后超时
+                </span>
+              </div>
+              <div
+                style={{
+                  fontSize: 13,
+                  color: "var(--text-secondary)",
+                  marginBottom: 8,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {pendingConfirm.message}
+              </div>
+              {pendingConfirm.risk && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#b45309",
+                    marginBottom: 4,
+                  }}
+                >
+                  风险级别: {pendingConfirm.risk}
+                </div>
+              )}
+              {pendingConfirm.reason && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#78350f",
+                    marginBottom: 4,
+                  }}
+                >
+                  原因: {pendingConfirm.reason}
+                </div>
+              )}
+              {pendingConfirm.argsPreview && (
+                <pre
+                  style={{
+                    margin: "0 0 8px",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                    fontSize: 11,
+                    color: "#b45309",
+                    fontFamily: "Consolas, monospace",
+                    background: "var(--panel-bg-hover)",
+                    borderRadius: 8,
+                    padding: 8,
+                    maxHeight: 160,
+                    overflow: "auto",
+                  }}
+                >
+                  {pendingConfirm.argsPreview}
+                </pre>
+              )}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  justifyContent: "flex-end",
+                  marginTop: 14,
+                }}
+              >
+                <button
+                  onClick={() => {
+                    sendWs({
+                      type: "tool_confirmation",
+                      session_id: pendingConfirm.session_id,
+                      confirmation_id: pendingConfirm.confirmation_id,
+                      approved: false,
+                    });
+                    setPendingConfirm(null);
+                  }}
+                  style={{
+                    background: "var(--border-color)",
+                    color: "var(--text-primary)",
+                    border: "none",
+                    borderRadius: 10,
+                    padding: "6px 18px",
+                    fontSize: 13,
+                    cursor: "pointer",
+                  }}
+                >
+                  拒绝
+                </button>
+                <button
+                  onClick={() => {
+                    sendWs({
+                      type: "tool_confirmation",
+                      session_id: pendingConfirm.session_id,
+                      confirmation_id: pendingConfirm.confirmation_id,
+                      approved: true,
+                    });
+                    setPendingConfirm(null);
+                  }}
+                  style={{
+                    background: "#16a34a",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 10,
+                    padding: "6px 18px",
+                    fontSize: 13,
+                    cursor: "pointer",
+                  }}
+                >
+                  同意执行
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

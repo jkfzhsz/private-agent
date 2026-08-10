@@ -47,6 +47,8 @@ const api = {
     ipcRenderer.on("update:progress", listener);
     return () => ipcRenderer.removeListener("update:progress", listener);
   },
+  // 2026-08-08: 工作区目录选择(渲染进程调起原生目录选择器)
+  pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("app:pick-directory"),
 };
 
 contextBridge.exposeInMainWorld("pa", api);

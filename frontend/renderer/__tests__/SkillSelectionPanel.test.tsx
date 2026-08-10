@@ -14,9 +14,9 @@ import SkillSelectionPanel from "../SkillSelectionPanel";
 const API_BASE = "http://localhost:8765/admin";
 
 const SKILLS = [
-  { name: "office", version: "1.0.0", description: "办公场景技能", enabled: true },
-  { name: "data_analysis", version: "1.0.0", description: "数据分析技能", enabled: true },
-  { name: "frontend_design", version: "1.0.0", description: "前端设计技能", enabled: true },
+  { name: "office", version: "1.0.0", description: "办公场景技能", enabled: true, scene_name: "子瞻" },
+  { name: "data_analysis", version: "1.0.0", description: "数据分析技能", enabled: true, scene_name: "白圭" },
+  { name: "frontend_design", version: "1.0.0", description: "前端设计技能", enabled: true, scene_name: "清和" },
 ];
 
 beforeEach(() => {
@@ -47,17 +47,17 @@ afterEach(() => {
 describe("SkillSelectionPanel", () => {
   it("渲染 GET /admin/skills 返回的技能列表", async () => {
     render(<SkillSelectionPanel sessionId={1} onActivated={() => {}} />);
-    await screen.findByText("办公");
-    expect(screen.getByText("数据分析")).toBeInTheDocument();
-    expect(screen.getByText("前端设计")).toBeInTheDocument();
+    await screen.findByText("子瞻");
+    expect(screen.getByText("白圭")).toBeInTheDocument();
+    expect(screen.getByText("清和")).toBeInTheDocument();
   });
 
   it("点击技能卡片触发 POST activate", async () => {
     const user = userEvent.setup();
     render(<SkillSelectionPanel sessionId={42} onActivated={() => {}} />);
-    await screen.findByText("办公");
+    await screen.findByText("子瞻");
 
-    await user.click(screen.getByText("办公"));
+    await user.click(screen.getByText("子瞻"));
 
     await waitFor(() => {
       const calls = vi.mocked(fetch).mock.calls.filter(
@@ -74,9 +74,9 @@ describe("SkillSelectionPanel", () => {
     const user = userEvent.setup();
     const onActivated = vi.fn();
     render(<SkillSelectionPanel sessionId={1} onActivated={onActivated} />);
-    await screen.findByText("办公");
+    await screen.findByText("子瞻");
 
-    await user.click(screen.getByText("办公"));
+    await user.click(screen.getByText("子瞻"));
 
     await waitFor(() => expect(onActivated).toHaveBeenCalledWith("office"));
   });
@@ -97,8 +97,8 @@ describe("SkillSelectionPanel", () => {
     );
 
     render(<SkillSelectionPanel sessionId={1} onActivated={() => {}} />);
-    await screen.findByText("办公");
-    await user.click(screen.getByText("办公"));
+    await screen.findByText("子瞻");
+    await user.click(screen.getByText("子瞻"));
 
     await screen.findByText(/技能不存在/);
   });

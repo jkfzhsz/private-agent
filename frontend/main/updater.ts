@@ -7,11 +7,25 @@
 // 更新源: package.json build.publish 或环境变量 PA_UPDATE_REPO(owner/repo);
 // 默认 zongxin/private-agent(施工文件夹发布脚本 scripts/publish-release.mjs
 // 打 tag 并上传构建产物)。
+// 2026-08-08: 下载加速 —— GitHub Release 资产国内直连极慢/超时,
+// 默认经 gh-proxy.com 镜像(实测 0.6MB/s, 直连 20s 0 字节)。可用环境变量
+// PA_UPDATE_MIRROR 覆盖: 设镜像前缀(如 https://ghfast.top/ 会自动补 /),
+// 设 "direct"/"none"/空 则直连 GitHub 不走镜像。
 import { app } from "electron";
 import { createHash } from "crypto";
 import { createWriteStream } from "fs";
 import { join } from "path";
 import { spawn } from "child_process";
+
+// 2026-08-08: 下载 URL 经镜像前缀加速(gh-proxy.com 实测最优)。
+function mirrorUrl(rawUrl: string): string {
+  const mirror = (process.env.PA_UPDATE_MIRROR ?? "https://gh-proxy.com/").trim();
+  if (!mirror || mirror === "direct" || mirror === "none") return rawUrl;
+  const base = mirror.endsWith("/") ? mirror : `${mirror}/`;
+  // 已带该镜像前缀则不再拼接(防止重复)
+  if (rawUrl.startsWith(base)) return rawUrl;
+  return `${base}${rawUrl}`;
+}
 
 // 版本号解析: "0.1.0" / "v0.1.0" / "0.1.0-beta.1" → [0,1,0,...]
 function parseVersion(v: string): number[] {
@@ -135,7 +149,9 @@ export async function downloadUpdate(
   onProgress?: (received: number, total: number, percent: number) => void
 ): Promise<DownloadResult> {
   const target = join(app.getPath("temp"), `private-agent-setup-${Date.now()}.exe`);
-  const resp = await fetch(asset.url, {
+  // 2026-08-08: 走镜像加速下载(PA_UPDATE_MIRROR 可覆盖/禁用)
+  const url = mirrorUrl(asset.url);
+  const resp = await fetch(url, {
     headers: { Accept: "application/octet-stream", "User-Agent": "private-agent" },
     signal: AbortSignal.timeout(600000),
   });

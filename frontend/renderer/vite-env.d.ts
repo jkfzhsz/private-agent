@@ -32,5 +32,7 @@ interface Window {
     ) => () => void;
     // 阶段二批次 1: admin 控制面鉴权 token(Electron 主进程从 backend/.env 注入)
     adminToken?: string;
+    // 2026-08-08: 工作区目录选择(原生目录选择器; 非 Electron 环境不存在)
+    pickDirectory?: () => Promise<string | null>;
   };
 }
