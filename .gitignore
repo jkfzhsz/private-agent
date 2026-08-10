@@ -30,6 +30,22 @@ backend/.claude/
 # Sandbox runtime artifacts
 backend/outputs/
 backend/.sandbox/
+# 根目录沙箱产物(对话生成文件, 不纳入版本库)
+/outputs/
+
+# 上传数据(Reasonix 源 zip 等, 不纳入版本库)
+backend/uploads/
+
+# 一次性验证脚本(不入库)
+backend/verify_mig_tmp.py
+backend/verify_p3.py
+backend/skills/reasonix-skills-main.zip
+
+# 运行时用户配置(不入库)
+backend/agent-profile.json
+
+# HuggingFace 模型缓存(不入库)
+models--*/
 
 # Electron 编译产物
 frontend/dist-main/
@@ -51,3 +67,7 @@ backend/tests/.pytest_results.xml
 
 # 发布凭据(本地 token, 绝不上传)
 scripts/.gh-token
+
+# 0.5.1: 本地模型权重缓存 + pip 缓存(不纳入版本库)
+kb-model-cache/
+.pip-cache/
