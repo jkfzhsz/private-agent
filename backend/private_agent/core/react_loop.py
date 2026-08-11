@@ -34,6 +34,7 @@ from private_agent.core.checkpoint import CheckpointManager
 from private_agent.core.compressor import Compressor
 from private_agent.core.injection_guard import InjectionGuard
 from private_agent.core.token_estimator import TokenEstimator
+from private_agent.eval.online_failure_collector import FailureType
 from private_agent.models.base import AllProvidersFailedError, ChatResult, ModelAdapter
 from private_agent.observability.logging import setup_logger
 from private_agent.storage.react_events import insert_react_event
@@ -188,6 +189,7 @@ class ReactLoop:
         vision_adapter: ModelAdapter | None = None,
         reflection_engine: Any | None = None,
         evolution_repo: Any | None = None,
+        failure_collector: Any | None = None,
     ) -> None:
         self._session_id = session_id
         # 0.5.1(2026-08-10 双链架构): vision_adapter 为多模态链, 发图语境
@@ -302,6 +304,10 @@ class ReactLoop:
         self._reflection_engine = reflection_engine
         self._evolution_repo = evolution_repo
         self._turn_events: list[dict[str, Any]] = []
+        # Phase 3(2026-08-11): 在线失败案例采集器(OnlineFailureCollector),
+        # None 时零回归(未配置采集的会话不执行)。失败时由 _collect_failure
+        # 调用, 将工具失败/迭代用尽/模型全失败写入 M4 审核队列。
+        self._failure_collector = failure_collector
 
     # ──────────────────────────────────────────────────────────────────────────
     # State machine
@@ -669,6 +675,12 @@ class ReactLoop:
                     final_output=err_text,
                     had_error=True,
                 )
+                await self._collect_failure(
+                    failure_type=FailureType.PROVIDER_ERROR,
+                    failure_detail=err_text,
+                    user_message=user_message,
+                    final_output=err_text,
+                )
                 return
 
             # B4 P0-4: 记录对话计费
@@ -1031,6 +1043,14 @@ class ReactLoop:
                                 "tool timeout after %ss: tool=%s",
                                 timeout_sec, plan["tool_name"],
                             )
+                            await self._collect_failure(
+                                failure_type=FailureType.TOOL_ERROR,
+                                failure_detail=(
+                                    f"工具 {plan['tool_name']} 执行超时"
+                                    f"({int(timeout_sec)}s)"
+                                ),
+                                user_message=user_message,
+                            )
                             result = ToolResult(
                                 output="",
                                 error=(
@@ -1041,6 +1061,14 @@ class ReactLoop:
                         except Exception as e:  # noqa: BLE001
                             self._logger.exception(
                                 "Tool handler failed: tool=%s", plan["tool_name"]
+                            )
+                            await self._collect_failure(
+                                failure_type=FailureType.TOOL_ERROR,
+                                failure_detail=(
+                                    f"工具 {plan['tool_name']} 执行失败: "
+                                    f"{type(e).__name__}: {e}"
+                                ),
+                                user_message=user_message,
                             )
                             result = ToolResult(
                                 output="",
@@ -1259,6 +1287,11 @@ class ReactLoop:
             user_message=user_message,
             final_output="",
             had_error=True,
+        )
+        await self._collect_failure(
+            failure_type=FailureType.ITERATION_EXHAUSTED,
+            failure_detail=f"达到最大迭代次数 {self._max_iterations}",
+            user_message=user_message,
         )
 
     async def _emit_delta(self, text: str) -> None:
@@ -1576,6 +1609,42 @@ class ReactLoop:
                 ))
         except Exception as e:
             self._logger.warning("reflection_persist_failed scope=%s error=%s", scope, e)
+
+    async def _collect_failure(
+        self,
+        failure_type: FailureType,
+        failure_detail: str,
+        user_message: str,
+        final_output: str = "",
+    ) -> None:
+        """Phase 3(2026-08-11): 在线失败案例采集(对应 EvoSkill Executor Agent)。
+
+        条件: failure_collector 已注入。scope 从 sessions.locked_skill_name
+        读取(与 _maybe_reflect 同模式)。采集失败/异常仅告警不中断对话
+        (失败案例收集为旁路能力, 不影响主对话流程)。
+        """
+        if self._failure_collector is None:
+            return
+        try:
+            scope = await self._conn.fetchval(
+                "SELECT locked_skill_name FROM sessions WHERE id = $1",
+                self._session_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._logger.warning("failure_scope_query_failed: %s", e)
+            return
+        try:
+            await self._failure_collector.collect(
+                session_id=self._session_id,
+                scope=scope,
+                user_message=user_message,
+                failure_type=failure_type,
+                failure_detail=failure_detail,
+                react_events=self._turn_events,
+                final_output=final_output,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._logger.warning("failure_collect_failed: %s", e)
 
     async def _apply_compression(self, result: dict) -> None:
         """把压缩结果落库 + 更新内存 active_zone。
