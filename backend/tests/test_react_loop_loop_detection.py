@@ -115,7 +115,13 @@ def test_detect_same_args_loop():
 
 
 def test_detect_same_tool_loop():
-    """同工具高频(不同参数) → same_tool。"""
+    """同工具高频且参数种类少(<3) → same_tool。
+
+    2026-08-10 修复(蒋先生反馈"批量记忆被判死循环"): same_tool 分支新增
+    `len(set(same_tool_keys)) < 3` 条件 —— 参数各异的高频调用视为合法批量/
+    遍历操作放行, 参数高度重复才判死循环。故本测试用 2 种参数交替 5 次,
+    满足"参数种类 < 3"触发条件。
+    """
     _setup_schema()
 
     async def _run():
@@ -127,10 +133,39 @@ def test_detect_same_tool_loop():
             loop = ReactLoop(session_id=session_id, context_manager=cm,
                              adapter=_MockAdapter([]), tools=[], conn=conn,
                              cfg={"context": {"status_bar": {"enabled": False}}})
+            # 2 种参数交替, 参数种类=2 < 3, 满足 same_tool 触发条件
+            params = ["query0", "query0", "query1", "query1", "query0"]
             for i in range(4):
-                assert loop._detect_tool_loop("web_search", {"q": f"query{i}"}) is None
-            # 第 5 次同工具 → same_tool
-            assert loop._detect_tool_loop("web_search", {"q": "query4"}) == "same_tool"
+                assert loop._detect_tool_loop("web_search", {"q": params[i]}) is None
+            # 第 5 次同工具(参数种类仍 < 3) → same_tool
+            assert loop._detect_tool_loop("web_search", {"q": params[4]}) == "same_tool"
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_same_tool_allows_distinct_args_batch():
+    """同工具高频但参数全不同 → 放行(2026-08-10 修复回归测试)。
+
+    批量记忆多只股票/批量查询多只基金等合法操作: 同工具不同参数高频调用
+    不应被判死循环。这是 2026-08-10 修复的核心语义, 防止未来回退到
+    "批量记忆误判"。
+    """
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(session_id=session_id, system_prompt="sys", tools=[])
+            await cm.build_initial(conn)
+            loop = ReactLoop(session_id=session_id, context_manager=cm,
+                             adapter=_MockAdapter([]), tools=[], conn=conn,
+                             cfg={"context": {"status_bar": {"enabled": False}}})
+            # 6 个完全不同的参数(参数种类=6 ≥ 3) → 放行
+            for i in range(6):
+                assert loop._detect_tool_loop("memory_save", {"key": f"stock_{i}"}) is None
         finally:
             await conn.close()
 
