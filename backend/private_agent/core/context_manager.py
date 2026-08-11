@@ -262,7 +262,7 @@ class ContextManager:
                 "stable",
             )
             self.stable_zone.messages.append(
-                {"role": "user", "content": lessons_text, "zone": "stable"}
+                {"role": "user", "content": lessons_text}
             )
         except Exception as e:  # noqa: BLE001 - 经验注入失败不影响会话启动
             logger.warning(
