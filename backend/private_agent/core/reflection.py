@@ -172,12 +172,16 @@ class ReflectionEngine:
 
     @staticmethod
     def _extract_tool_chain(events: list[dict[str, Any]]) -> list[str]:
-        """从 react_events 提取工具调用序列（去重保序）。"""
+        """从 react_events 提取工具调用序列（去重保序）。
+
+        注意: 键名与 ReactLoop._emit_event 的生产 payload 一致
+        (tool_call → payload['tool_name'])。
+        """
         chain: list[str] = []
         seen: set[str] = set()
         for ev in events:
             if ev.get("event_type") == "tool_call":
-                tool = ev.get("payload", {}).get("tool", "")
+                tool = ev.get("payload", {}).get("tool_name", "")
                 if tool and tool not in seen:
                     chain.append(tool)
                     seen.add(tool)
@@ -193,21 +197,25 @@ class ReflectionEngine:
 
     @staticmethod
     def _build_trace_summary(events: list[dict[str, Any]]) -> str:
-        """构建轨迹摘要（每步一行，避免全量注入）。"""
+        """构建轨迹摘要（每步一行，避免全量注入）。
+
+        注意: 键名与 ReactLoop._emit_event 的生产 payload 一致
+        (thinking → reasoning, tool_* → tool_name/output, error → message)。
+        """
         lines: list[str] = []
         for ev in events:
             etype = ev.get("event_type", "")
             turn = ev.get("turn", 0)
             payload = ev.get("payload", {})
             if etype == "thinking":
-                lines.append(f"[turn{turn} 思考] {str(payload.get('content', ''))[:100]}")
+                lines.append(f"[turn{turn} 思考] {str(payload.get('reasoning', ''))[:100]}")
             elif etype == "tool_call":
-                lines.append(f"[turn{turn} 调用工具] {payload.get('tool', '')}")
+                lines.append(f"[turn{turn} 调用工具] {payload.get('tool_name', '')}")
             elif etype == "tool_result":
-                result_str = str(payload.get("result", ""))[:100]
+                result_str = str(payload.get("output", ""))[:100]
                 lines.append(f"[turn{turn} 工具结果] {result_str}")
             elif etype == "error":
-                lines.append(f"[turn{turn} 错误] {str(payload.get('error', ''))[:100]}")
+                lines.append(f"[turn{turn} 错误] {str(payload.get('message', ''))[:100]}")
         return "\n".join(lines) if lines else "(无工具调用)"
 
     @staticmethod

@@ -61,10 +61,16 @@ class _MockAdapter:
         streaming=False, function_calling=True, vision=False, json_mode=False
     )
 
-    def __init__(self, content: str = "已完成任务") -> None:
+    def __init__(self, content: str = "已完成任务", responses: list | None = None) -> None:
         self._content = content
+        self._responses = list(responses) if responses else None
+        self._idx = 0
 
     async def chat(self, messages, tools=None, max_tokens=None, **kwargs) -> ChatResult:
+        if self._responses is not None:
+            r = self._responses[self._idx]
+            self._idx += 1
+            return r
         return ChatResult(content=self._content, used_provider="mock")
 
 
@@ -132,6 +138,70 @@ def test_final_branch_triggers_reflection_with_scope():
     assert info["add_called"] is True
     assert info["reflect_scope"] == "office"
     assert info["reflect_had_error"] is False
+
+
+def test_reflection_receives_production_tool_chain():
+    """回归(2026-08-11 dev-code-review P0): 真实 ReactLoop 的 tool_call 事件
+    payload 使用生产键 tool_name, 反思引擎据此才能提取 tool_chain。"""
+    _setup_schema()
+    from private_agent.tools.builtins import register_all_builtins
+    from private_agent.tools.registry import ToolRegistry
+
+    tool_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "arguments": '{"expression": "2+3"}',
+        },
+    }
+
+    async def _run() -> dict:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn, locked_skill_name="office")
+            registry = ToolRegistry()
+            register_all_builtins(registry)
+            tools = registry.list_tools()
+
+            cm = ContextManager(session_id=session_id, system_prompt="sys", tools=tools)
+            await cm.build_initial(conn)
+
+            reflection = AsyncMock()
+            reflection.reflect = AsyncMock(return_value=None)
+            evolution_repo = AsyncMock()
+
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=_MockAdapter(responses=[
+                    ChatResult(content="", tool_calls=[tool_call], used_provider="mock"),
+                    ChatResult(content="5", used_provider="mock"),
+                ]),
+                tools=tools,
+                conn=conn,
+                reflection_engine=reflection,
+                evolution_repo=evolution_repo,
+            )
+            await loop.run_turn("calculate 2+3")
+            return {
+                "reflect_called": reflection.reflect.called,
+                "react_events": (
+                    reflection.reflect.call_args.kwargs.get("react_events")
+                    if reflection.reflect.called else []
+                ),
+            }
+        finally:
+            await conn.close()
+
+    info = asyncio.run(_run())
+    assert info["reflect_called"] is True
+    tool_calls = [
+        ev for ev in info["react_events"]
+        if ev.get("event_type") == "tool_call"
+    ]
+    assert tool_calls, "反思应收到真实 tool_call 事件"
+    assert tool_calls[0]["payload"]["tool_name"] == "calculator"
 
 
 def test_no_reflection_when_engine_not_injected():

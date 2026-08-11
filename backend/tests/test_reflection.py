@@ -14,15 +14,15 @@ from private_agent.core.reflection import ReflectionEngine, ReflectionResult
 
 
 def _fake_react_events():
-    """模拟一轮对话的 react_events。"""
+    """模拟一轮对话的 react_events(与 ReactLoop._emit_event 生产 payload 一致)。"""
     return [
-        {"event_type": "thinking", "turn": 1, "payload": {"content": "用户要清洗销售数据"}},
-        {"event_type": "tool_call", "turn": 1, "payload": {"tool": "file_read", "args": {"path": "sales.csv"}}},
-        {"event_type": "tool_result", "turn": 1, "payload": {"tool": "file_read", "result": "100 rows"}},
-        {"event_type": "tool_call", "turn": 2, "payload": {"tool": "code_execution", "args": {"code": "df=pd.read_csv(...)"}}},
-        {"event_type": "tool_result", "turn": 2, "payload": {"tool": "code_execution", "result": "cleaned"}},
-        {"event_type": "tool_call", "turn": 3, "payload": {"tool": "file_write", "args": {"path": "output.xlsx"}}},
-        {"event_type": "tool_result", "turn": 3, "payload": {"tool": "file_write", "result": "written"}},
+        {"event_type": "thinking", "turn": 1, "payload": {"reasoning": "用户要清洗销售数据"}},
+        {"event_type": "tool_call", "turn": 1, "payload": {"tool_name": "file_read", "arguments": {"path": "sales.csv"}}},
+        {"event_type": "tool_result", "turn": 1, "payload": {"tool_name": "file_read", "output": "100 rows"}},
+        {"event_type": "tool_call", "turn": 2, "payload": {"tool_name": "code_execution", "arguments": {"code": "df=pd.read_csv(...)"}}},
+        {"event_type": "tool_result", "turn": 2, "payload": {"tool_name": "code_execution", "output": "cleaned"}},
+        {"event_type": "tool_call", "turn": 3, "payload": {"tool_name": "file_write", "arguments": {"path": "output.xlsx"}}},
+        {"event_type": "tool_result", "turn": 3, "payload": {"tool_name": "file_write", "output": "written"}},
         {"event_type": "final", "turn": 3, "payload": {"content": "已完成数据清洗并生成输出文件"}},
     ]
 
