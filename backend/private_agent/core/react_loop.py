@@ -186,6 +186,8 @@ class ReactLoop:
         resume_from_turn: int | None = None,
         pause_controller: Any | None = None,
         vision_adapter: ModelAdapter | None = None,
+        reflection_engine: Any | None = None,
+        evolution_repo: Any | None = None,
     ) -> None:
         self._session_id = session_id
         # 0.5.1(2026-08-10 双链架构): vision_adapter 为多模态链, 发图语境
@@ -294,6 +296,12 @@ class ReactLoop:
         # 每次迭代开始前检查, 暂停则产出 turn_paused 并挂起等待; 区别于
         # cancel(终止)。None 时零回归(测试/兼容)。
         self._pause_controller = pause_controller
+        # Phase 1(2026-08-11): 任务完成后反思(ReflectionEngine + EvolutionRepo),
+        # None 时零回归(未配置反思的会话不执行)。_turn_events 收集本轮
+        # react_event 供反思生成轨迹摘要。
+        self._reflection_engine = reflection_engine
+        self._evolution_repo = evolution_repo
+        self._turn_events: list[dict[str, Any]] = []
 
     # ──────────────────────────────────────────────────────────────────────────
     # State machine
@@ -350,6 +358,9 @@ class ReactLoop:
 
         # 推送到队列(测试消费)
         await self.event_queue.put(event)
+
+        # Phase 1(2026-08-11): 收集本轮事件供反思使用
+        self._turn_events.append(event)
 
         # 实时推送给 WS(流式关键: 事件边产生边推送, 而非 run_turn 结束后批量)
         if self._event_sink is not None:
@@ -410,6 +421,7 @@ class ReactLoop:
                 self._turn_initialized = True
             self._turn += 1
         self._iteration = 0
+        self._turn_events = []  # Phase 1: 本轮事件收集(反思用)
         self._transition(ReactLoopState.THINKING)
 
         # 流畅度优化(方向一): 每轮对 user_message 求值一次工具注入子集,
@@ -652,6 +664,11 @@ class ReactLoop:
                 await self._save_checkpoint()
                 # C-3(A.3.5): 所有退出路径统一尝试压缩, 防止上下文无限增长
                 await self._maybe_compress()
+                await self._maybe_reflect(
+                    user_message=user_message,
+                    final_output=err_text,
+                    had_error=True,
+                )
                 return
 
             # B4 P0-4: 记录对话计费
@@ -1221,6 +1238,11 @@ class ReactLoop:
                 self._transition(ReactLoopState.IDLE)
                 await self._save_checkpoint()
                 await self._maybe_compress()
+                await self._maybe_reflect(
+                    user_message=user_message,
+                    final_output=result.content or "",
+                    had_error=False,
+                )
                 return
 
         # 超出 max_iterations(2026-08-10: 错误零静默 —— 不再输出英文技术文案)
@@ -1233,6 +1255,11 @@ class ReactLoop:
         await self._save_checkpoint()
         # C-3(A.3.5): 迭代上限退出同样触发压缩
         await self._maybe_compress()
+        await self._maybe_reflect(
+            user_message=user_message,
+            final_output="",
+            had_error=True,
+        )
 
     async def _emit_delta(self, text: str) -> None:
         """流式增量回调: 产出 delta 事件(前端逐句/逐字渲染)。"""
@@ -1502,6 +1529,53 @@ class ReactLoop:
                     self._compress_failures,
                 )
             self._logger.warning("compression failed: %s", e)
+
+    async def _maybe_reflect(
+        self,
+        user_message: str,
+        final_output: str,
+        had_error: bool,
+    ) -> None:
+        """Phase 1(2026-08-11): 任务完成后触发反思(对应 EvoSkill Proposer)。
+
+        条件: reflection_engine 与 evolution_repo 均已注入, 且会话有场景
+        (locked_skill_name 非空 —— 无场景归属的经验不沉淀)。反思异常仅
+        告警不中断对话(经验沉淀为旁路能力)。
+        """
+        if self._reflection_engine is None or self._evolution_repo is None:
+            return
+        try:
+            scope = await self._conn.fetchval(
+                "SELECT locked_skill_name FROM sessions WHERE id = $1",
+                self._session_id,
+            )
+        except Exception as e:
+            self._logger.warning("reflection_scope_query_failed: %s", e)
+            return
+        if not scope:
+            return
+        try:
+            result = await self._reflection_engine.reflect(
+                scope=scope,
+                user_message=user_message,
+                react_events=self._turn_events,
+                final_output=final_output,
+                had_error=had_error,
+            )
+            if result is not None:
+                from private_agent.skills.evolution_repo import SkillLesson
+                await self._evolution_repo.add(SkillLesson(
+                    scope=result.scope,
+                    lesson_category=result.lesson_category,
+                    task_summary=result.task_summary,
+                    lesson_type=result.lesson_type,
+                    lesson_content=result.lesson_content,
+                    tool_chain=result.tool_chain,
+                    source_session_id=self._session_id,
+                    importance=result.importance,
+                ))
+        except Exception as e:
+            self._logger.warning("reflection_persist_failed scope=%s error=%s", scope, e)
 
     async def _apply_compression(self, result: dict) -> None:
         """把压缩结果落库 + 更新内存 active_zone。
