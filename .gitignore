@@ -71,3 +71,6 @@ scripts/.gh-token
 # 0.5.1: 本地模型权重缓存 + pip 缓存(不纳入版本库)
 kb-model-cache/
 .pip-cache/
+
+# 损坏的 git 仓库备份(2026-08-10 git 故障遗留, 绝不入库)
+.git-broken*/
