@@ -1687,6 +1687,109 @@ async def delete_memory(memory_id: int):
         )
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 经验管理(plan/2026-08-11 Task 2.2: CoEvoSkills 的 List/Merge/Discard)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class MergeLessonsRequest(BaseModel):
+    """POST /admin/lessons/merge 请求体(Task 2.2)。"""
+    source_id: int
+    target_id: int
+    merged_content: str
+
+
+@router.get("/lessons", response_model=None)
+async def list_lessons(
+    scope: str | None = None,
+    lesson_type: str | None = None,
+    limit: int = 50,
+):
+    """列出经验记录(Task 2.2, 双轨含 lesson_category)。
+
+    Args:
+        scope: 场景过滤(monitor/office/data_analysis/frontend_design/global,可选)。
+        lesson_type: 经验类型过滤(success/failure/correction,可选)。
+        limit: 返回条数上限(默认 50)。
+
+    Returns:
+        200: {"items": [{id, scope, lesson_category, task_summary, lesson_type,
+                         lesson_content, tool_chain, importance, created_at}]}
+        500: {"error": "lessons_list_failed"}
+    """
+    try:
+        from dataclasses import asdict
+
+        from private_agent.skills.evolution_repo import EvolutionRepo
+
+        conn = await db.connect()
+        try:
+            repo = EvolutionRepo(conn)
+            if scope:
+                lessons = await repo.search_by_scope(scope, limit=limit)
+            else:
+                lessons = await repo.search_by_keyword(keyword="", limit=limit)
+            if lesson_type:
+                lessons = [l for l in lessons if l.lesson_type == lesson_type]
+            return {"items": [asdict(l) for l in lessons]}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=500, content={"error": "lessons_list_failed"}
+        )
+
+
+@router.delete("/lessons/{lesson_id}", response_model=None)
+async def discard_lesson(lesson_id: int):
+    """软删除经验记录(Task 2.2): is_active=FALSE。
+
+    Returns:
+        200: {"ok": True}
+        500: {"error": "lesson_discard_failed"}
+    """
+    try:
+        from private_agent.skills.evolution_repo import EvolutionRepo
+
+        conn = await db.connect()
+        try:
+            await EvolutionRepo(conn).discard(lesson_id)
+        finally:
+            await conn.close()
+        return {"ok": True}
+    except Exception:
+        return JSONResponse(
+            status_code=500, content={"error": "lesson_discard_failed"}
+        )
+
+
+@router.post("/lessons/merge", response_model=None)
+async def merge_lessons(body: MergeLessonsRequest):
+    """合并两条经验(Task 2.2): 内容写入 target, source 软删除。
+
+    Returns:
+        200: {"ok": True}
+        500: {"error": "lessons_merge_failed"}
+    """
+    try:
+        from private_agent.skills.evolution_repo import EvolutionRepo
+
+        conn = await db.connect()
+        try:
+            await EvolutionRepo(conn).merge(
+                source_id=body.source_id,
+                target_id=body.target_id,
+                merged_content=body.merged_content,
+            )
+        finally:
+            await conn.close()
+        return {"ok": True}
+    except Exception:
+        return JSONResponse(
+            status_code=500, content={"error": "lessons_merge_failed"}
+        )
+
+
 @router.get("/settings/providers", response_model=None)
 async def get_providers():
     """返回模型 provider 配置状态(蓝图 §2.7, API key 只返回是否已配置)。
