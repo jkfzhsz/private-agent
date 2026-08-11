@@ -22,7 +22,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from private_agent.errors import FrozenHashMismatchError
+from private_agent.observability.logging import setup_logger
 from private_agent.tools.defs import ToolDef
+
+logger = setup_logger(__name__)
 
 # 0.5.0 M2: 场景 KB 自动检索查询词映射(按场景领域关键词触发 keyword 命中;
 # 未列出的场景回退通用查询)。
@@ -71,11 +74,14 @@ class ContextManager:
         scene: str | None = None,
         kb_auto_retrieve: bool = False,
         kb_scenario: str | None = None,
+        evolution_repo: Any | None = None,
     ) -> None:
         self.session_id = session_id
         self._system_prompt = system_prompt
         self._tools = list(tools)
         self._memory_manager = memory_manager
+        # Phase 1(2026-08-11): 经验注入仓库(默认 None 兼容旧调用, 零回归)
+        self._evolution_repo = evolution_repo
         # 0.5.0 M1: 会话场景(locked_skill_name, 记忆注入 scope 用)
         self.scene = scene
         # 0.5.0 M2: 场景 KB 自动检索(auto_retrieve, 会话启动注入 top-N 片段)
@@ -196,6 +202,74 @@ class ContextManager:
             {"role": "user", "content": memories_text}
         ]
 
+    async def _inject_lessons(self, conn: "asyncpg.Connection") -> None:
+        """Phase 2(2026-08-11): 注入历史经验到 Stable Zone(会话启动)。
+
+        双轨注入规则:
+        - scope=monitor → 只注入 lesson_category='project_evolution' 经验
+        - scope=office/data_analysis/frontend_design → 只注入
+          lesson_category='domain_skill' 经验(DB CHECK 已约束, 应用层防御过滤)
+        - 注入预算: 最多 max_lessons 条, 总 token ≤ max_tokens(修订 4),
+          按 importance 降序(EvolutionRepo.search_by_scope 已排序)
+
+        Args:
+            conn: Postgres 连接。
+        """
+        if self._evolution_repo is None or not self.scene:
+            return
+        try:
+            from private_agent.skills.evolution_repo import _SCOPE_CATEGORY_MAP
+
+            expected_category = _SCOPE_CATEGORY_MAP.get(self.scene)
+            if expected_category is None:
+                return  # 未知 scope 不注入
+            lessons = await self._evolution_repo.search_by_scope(self.scene, limit=10)
+            lessons = [
+                l for l in lessons if l.lesson_category == expected_category
+            ]
+            if not lessons:
+                return
+            evo_cfg = self._cfg.get("evolution", {}).get("injection", {})
+            max_lessons = int(evo_cfg.get("max_lessons", 3))
+            max_tokens = int(evo_cfg.get("max_tokens", 500))
+            from private_agent.core.token_estimator import TokenEstimator
+
+            estimator = TokenEstimator()
+            lines = ["[历史经验]"]
+            total_tokens = 0
+            for lesson in lessons[:max_lessons]:
+                entry = (
+                    f"- [{lesson.lesson_type}] {lesson.task_summary}: "
+                    f"{lesson.lesson_content}"
+                )
+                entry_tokens = estimator.estimate(entry)
+                if total_tokens + entry_tokens > max_tokens:
+                    break  # 超预算停止
+                lines.append(entry)
+                total_tokens += entry_tokens
+            if len(lines) <= 1:
+                return
+            lessons_text = "\n".join(lines)
+            await conn.execute(
+                """
+                INSERT INTO messages (session_id, turn, role, content, zone)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                self.session_id,
+                0,
+                "user",
+                lessons_text,
+                "stable",
+            )
+            self.stable_zone.messages.append(
+                {"role": "user", "content": lessons_text, "zone": "stable"}
+            )
+        except Exception as e:  # noqa: BLE001 - 经验注入失败不影响会话启动
+            logger.warning(
+                "lessons_injection_failed scope=%s error=%s", self.scene, e
+            )
+            return
+
     async def inject_kb_chunks(
         self,
         conn: "asyncpg.Connection",
@@ -303,6 +377,7 @@ class ContextManager:
             return
         await self.build_initial(conn)
         await self._inject_memories(conn)
+        await self._inject_lessons(conn)
         # 0.5.0 M2: 场景 KB 自动检索(auto_retrieve 打开时, 会话启动注入
         # 该场景知识库 top-N 片段, 供模型直接参考场景专业知识)
         await self._inject_auto_retrieve_kb(conn)
