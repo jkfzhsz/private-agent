@@ -396,3 +396,37 @@ CREATE TABLE subagents (
 CREATE INDEX idx_subagents_session ON subagents(session_id, parent_turn);
 CREATE INDEX idx_subagents_heartbeat ON subagents(status, last_heartbeat_at)
     WHERE status = 'running';   -- watchdog 扫描"运行中但心跳过期"的子代理
+
+-- ==============================================================================
+-- 15. skill_lessons - Skill 经验沉淀表(自进化经验存储, 2026-08-11 双轨进化)
+--     lesson_category 区分: domain_skill(领域技巧) / project_evolution(项目进化)
+--     / cross_domain(跨领域可迁移, scope='global')
+-- ==============================================================================
+CREATE TABLE skill_lessons (
+    id              BIGSERIAL PRIMARY KEY,
+    scope           VARCHAR(20) NOT NULL,          -- office/data_analysis/frontend_design/monitor/global
+    lesson_category VARCHAR(20) NOT NULL DEFAULT 'domain_skill',  -- domain_skill/project_evolution/cross_domain
+    task_summary    TEXT NOT NULL,                 -- 任务一句话摘要
+    lesson_type     VARCHAR(20) NOT NULL,          -- success/failure/correction
+    lesson_content  TEXT NOT NULL,                 -- 经验内容(成功模式/失败教训/纠正)
+    tool_chain      JSONB DEFAULT '[]',            -- 使用的工具链序列
+    source_session_id BIGINT,                      -- 来源会话
+    source_turn     INT,                           -- 来源轮次
+    is_active       BOOLEAN DEFAULT TRUE,          -- 软删除标记(Discard 用)
+    importance      REAL DEFAULT 0.5,              -- 重要性(0-1, 反思时打分)
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_lesson_type CHECK (lesson_type IN ('success', 'failure', 'correction')),
+    CONSTRAINT chk_lesson_category CHECK (lesson_category IN ('domain_skill', 'project_evolution', 'cross_domain')),
+    -- 双轨规则: monitor 必配 project_evolution; office/data_analysis/frontend_design 必配 domain_skill;
+    --          global 必配 cross_domain(约束在应用层 EvolutionRepo.add() 冗余校验)
+    CONSTRAINT chk_scope_category_consistency CHECK (
+        (scope = 'monitor' AND lesson_category = 'project_evolution') OR
+        (scope IN ('office', 'data_analysis', 'frontend_design') AND lesson_category = 'domain_skill') OR
+        (scope = 'global' AND lesson_category = 'cross_domain')
+    )
+);
+
+CREATE INDEX idx_skill_lessons_scope ON skill_lessons(scope) WHERE is_active = TRUE;
+CREATE INDEX idx_skill_lessons_category ON skill_lessons(lesson_category, scope) WHERE is_active = TRUE;
+CREATE INDEX idx_skill_lessons_created ON skill_lessons(created_at DESC);

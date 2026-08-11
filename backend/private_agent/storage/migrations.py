@@ -191,6 +191,51 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await _migrate_monitor_tables(conn)
     # 0.5.0 P3: sessions.kind 扩容(monitor 主智能体会话)
     await _migrate_sessions_kind_monitor(conn)
+    # 2026-08-11 Phase 1: skill_lessons 经验沉淀表(双轨进化, 幂等)
+    await _migrate_add_skill_lessons(conn)
+
+
+async def _migrate_add_skill_lessons(conn: asyncpg.Connection) -> None:
+    """2026-08-11: 新增 skill_lessons 表用于经验沉淀（双轨进化）。
+
+    老部署补丁; 新部署 schema.sql 已含完整 DDL。幂等: 表已存在时跳过。
+    """
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS skill_lessons (
+            id              BIGSERIAL PRIMARY KEY,
+            scope           VARCHAR(20) NOT NULL,
+            lesson_category VARCHAR(20) NOT NULL DEFAULT 'domain_skill',
+            task_summary    TEXT NOT NULL,
+            lesson_type     VARCHAR(20) NOT NULL,
+            lesson_content  TEXT NOT NULL,
+            tool_chain      JSONB DEFAULT '[]',
+            source_session_id BIGINT,
+            source_turn     INT,
+            is_active       BOOLEAN DEFAULT TRUE,
+            importance      REAL DEFAULT 0.5,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CONSTRAINT chk_lesson_type CHECK (lesson_type IN ('success', 'failure', 'correction')),
+            CONSTRAINT chk_lesson_category CHECK (lesson_category IN ('domain_skill', 'project_evolution', 'cross_domain')),
+            CONSTRAINT chk_scope_category_consistency CHECK (
+                (scope = 'monitor' AND lesson_category = 'project_evolution') OR
+                (scope IN ('office', 'data_analysis', 'frontend_design') AND lesson_category = 'domain_skill') OR
+                (scope = 'global' AND lesson_category = 'cross_domain')
+            )
+        )
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_skill_lessons_scope
+        ON skill_lessons(scope) WHERE is_active = TRUE
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_skill_lessons_category
+        ON skill_lessons(lesson_category, scope) WHERE is_active = TRUE
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_skill_lessons_created
+        ON skill_lessons(created_at DESC)
+    """)
 
 
 async def _migrate_sessions_kind_monitor(conn: asyncpg.Connection) -> None:
