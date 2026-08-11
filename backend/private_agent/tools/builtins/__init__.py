@@ -15,6 +15,7 @@ from private_agent.tools.builtins.memory_save import MEMORY_SAVE_TOOL
 from private_agent.tools.builtins.monitor_tools import MONITOR_TOOLS
 from private_agent.tools.builtins.read_artifact import READ_ARTIFACT_TOOL
 from private_agent.tools.builtins.search_knowledge import SEARCH_KNOWLEDGE_TOOL
+from private_agent.tools.builtins.search_lessons import SEARCH_LESSONS_TOOL
 from private_agent.tools.builtins.web_search import WEB_SEARCH_TOOL
 from private_agent.tools.registry import ToolRegistry
 
@@ -33,6 +34,7 @@ __all__ = [
     "WEB_SEARCH_TOOL",
     "READ_ARTIFACT_TOOL",
     "MONITOR_TOOLS",
+    "SEARCH_LESSONS_TOOL",
 ]
 
 
@@ -69,6 +71,9 @@ def register_all_builtins(registry: ToolRegistry) -> None:
     # 被筛掉 → 白圭"工具列表没有 memory_save"。记忆写入是跨场景基础能力,
     # 用户要求"记住"时必须可用, 与 file_read/file_write 同级常驻。
     MEMORY_SAVE_TOOL.is_kernel = True
+    # Phase 1(2026-08-11): search_lessons 经验检索 —— 非内核, 模型主动调用
+    # (与 memory_search 同模式: 历史经验不常驻, 任务相关时按需检索)。
+    SEARCH_LESSONS_TOOL.is_kernel = False
     tools = [
         CALCULATOR_TOOL,
         CODE_EXECUTION_TOOL,
@@ -81,6 +86,7 @@ def register_all_builtins(registry: ToolRegistry) -> None:
         READ_ARTIFACT_TOOL,
         MEMORY_SEARCH_TOOL,
         MEMORY_SAVE_TOOL,
+        SEARCH_LESSONS_TOOL,
     ]
     for td in tools:
         registry.register_builtin(td.name, td)
@@ -89,7 +95,7 @@ def register_all_builtins(registry: ToolRegistry) -> None:
 def register_monitor_tools(registry: ToolRegistry) -> None:
     """0.5.0 P1: 主智能体监控工具注册(monitor 会话专属白名单)。
 
-    与 register_all_builtins 独立: 不进入通用 10 内置计数,
+    与 register_all_builtins 独立: 不进入通用 12 内置计数,
     仅由 P3 的 kind='monitor' 会话装配时追加, 保证场景会话
     (子瞻/白圭/清和)不会暴露系统级工具。
     """

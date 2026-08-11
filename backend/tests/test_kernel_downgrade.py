@@ -1,7 +1,7 @@
 """阶段三批次3(T3.3) - 内置工具下沉(is_kernel)测试(调研 round2 §4.3.1)。
 
 覆盖:
-- builtins 注册后 7 内核 / 2 下沉标记正确
+- builtins 注册后 8 内核 / 4 下沉标记正确
 - ToolSelector 内核工具作为隐含锚点始终注入
 - 非内核工具靠 top-N 评分竞争
 - Skill 白名单语义不变(registry 强过滤)
@@ -31,23 +31,26 @@ def _mk_tool(name: str, is_kernel: bool = False) -> ToolDef:
 
 
 class TestBuiltinKernelMarkers:
-    def test_seven_kernel_tools(self):
-        """内置 7 个内核工具 is_kernel=True。"""
+    def test_eight_kernel_tools(self):
+        """内置 8 个内核工具 is_kernel=True(0.5.1 新增 memory_save)。"""
         registry = ToolRegistry()
         register_all_builtins(registry)
         kernel = {t.name for t in registry.list_tools() if t.is_kernel}
         assert kernel == {
             "calculator", "code_execution", "datetime", "file_read",
-            "file_write", "http_request", "web_search",
+            "file_write", "http_request", "web_search", "memory_save",
         }
 
     def test_three_downgraded_tools(self):
-        """search_knowledge/read_artifact/memory_search 下沉为 is_kernel=False
-        (0.5.0 M1: memory_search 为记忆按需检索工具, 非内核)。"""
+        """search_knowledge/read_artifact/memory_search/search_lessons 下沉为
+        is_kernel=False (0.5.0 M1: memory_search 为记忆按需检索工具, 非内核;
+        Phase 1: search_lessons 经验检索同模式)。"""
         registry = ToolRegistry()
         register_all_builtins(registry)
         non_kernel = {t.name for t in registry.list_tools() if not t.is_kernel}
-        assert non_kernel == {"search_knowledge", "read_artifact", "memory_search"}
+        assert non_kernel == {
+            "search_knowledge", "read_artifact", "memory_search", "search_lessons",
+        }
 
 
 class TestSelectorKernelAnchors:
@@ -124,5 +127,5 @@ class TestWhitelistUnchanged:
         registry = ToolRegistry()
         register_all_builtins(registry)
         all_tools = registry.list_tools_for_session(None)
-        # 0.5.0 M1: 10 类内置(新增 memory_search)
-        assert len(all_tools) == 10
+        # 0.5.1: 12 类内置(8 内核 + 4 非内核); Phase 1: 新增 search_lessons
+        assert len(all_tools) == 12
