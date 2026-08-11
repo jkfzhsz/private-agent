@@ -7,6 +7,7 @@ from __future__ import annotations
 from private_agent.tools.builtins.calculator import CALCULATOR_TOOL
 from private_agent.tools.builtins.code_execution import CODE_EXECUTION_TOOL
 from private_agent.tools.builtins.datetime import DATETIME_TOOL
+from private_agent.tools.builtins.evolution_tools import EVOLUTION_TOOLS
 from private_agent.tools.builtins.file_read import FILE_READ_TOOL
 from private_agent.tools.builtins.file_write import FILE_WRITE_TOOL
 from private_agent.tools.builtins.http_request import HTTP_REQUEST_TOOL
@@ -35,6 +36,7 @@ __all__ = [
     "READ_ARTIFACT_TOOL",
     "MONITOR_TOOLS",
     "SEARCH_LESSONS_TOOL",
+    "EVOLUTION_TOOLS",
 ]
 
 
@@ -98,6 +100,11 @@ def register_monitor_tools(registry: ToolRegistry) -> None:
     与 register_all_builtins 独立: 不进入通用 12 内置计数,
     仅由 P3 的 kind='monitor' 会话装配时追加, 保证场景会话
     (子瞻/白圭/清和)不会暴露系统级工具。
+
+    Phase 4(2026-08-11): 追加 EVOLUTION_TOOLS(lessons_stats/
+    review_queue_summary), 无涯·项目进化者专属进化调度工具。
     """
     for td in MONITOR_TOOLS:
+        registry.register_builtin(td.name, td)
+    for td in EVOLUTION_TOOLS:
         registry.register_builtin(td.name, td)
