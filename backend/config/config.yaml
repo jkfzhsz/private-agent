@@ -367,5 +367,7 @@ evolution:
   injection:
     max_lessons: 3   # 经验注入条数上限(importance 降序取 top-N)
     max_tokens: 500  # 经验注入总 token 预算(修订 4)
+  reflection:
+    enabled: true  # 反思引擎开关(false → ReactLoop 反思+经验沉淀零回归)
 
 

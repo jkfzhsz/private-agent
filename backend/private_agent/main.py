@@ -17,10 +17,14 @@ from private_agent.config import loader
 from private_agent.core.checkpoint import CheckpointManager
 from private_agent.core.context_manager import ContextManager, FrozenHashMismatchError
 from private_agent.core.react_loop import ReactLoop
+from private_agent.core.reflection import ReflectionEngine
+from private_agent.eval.online_failure_collector import OnlineFailureCollector
+from private_agent.eval.repos import ReviewQueueRepo
 from private_agent.memory.manager import MemoryManager
 from private_agent.memory.memories_repo import MemoriesRepo
 from private_agent.observability.logging import setup_logger
 from private_agent.security.auth import ensure_admin_token, require_admin
+from private_agent.skills.evolution_repo import EvolutionRepo
 from private_agent.storage import db, ws_offset
 
 app = FastAPI(title="Private Agent Sidecar", version="0.1.0")
@@ -1118,6 +1122,8 @@ async def _handle_user_message(
                         kb_scenario = _kb.scenario or session_scene
                 except Exception:  # noqa: BLE001 - KB 配置读取失败不影响会话
                     pass
+            # Phase 1-2(2026-08-11): 经验进化闭环 —— 经验注入 Stable Zone
+            evolution_repo = EvolutionRepo(conn)
             cm = ContextManager(
                 session_id=session_id,
                 system_prompt=await _get_system_prompt(
@@ -1131,6 +1137,8 @@ async def _handle_user_message(
                 # 0.5.0 M2: 场景 KB 自动检索(会话启动注入该场景知识库片段)
                 kb_auto_retrieve=kb_auto_retrieve,
                 kb_scenario=kb_scenario,
+                # Phase 1-2: 经验注入(ensure_initial → _inject_lessons)
+                evolution_repo=evolution_repo,
             )
             try:
                 await cm.ensure_initial(conn)
@@ -1190,6 +1198,19 @@ async def _handle_user_message(
             if session_workspace:
                 cfg = {**cfg, "system": {**cfg.get("system", {}),
                                           "workspace_root": session_workspace}}
+            # Phase 1/3(2026-08-11): 反思引擎 + 失败案例采集器装配
+            # 反思引擎: config evolution.reflection.enabled 门控(默认开)
+            # 失败采集器: ReviewQueueRepo(JSON 文件) + OnlineFailureCollector
+            reflection_engine = None
+            if cfg.get("evolution", {}).get("reflection", {}).get("enabled", True):
+                reflection_engine = ReflectionEngine(adapter)
+            _queue_file = os.path.join(
+                cfg.get("system", {}).get("workspace_root", "."),
+                ".eval_review_queue.json",
+            )
+            failure_collector = OnlineFailureCollector(
+                ReviewQueueRepo(queue_file=_queue_file)
+            )
             loop = ReactLoop(
                 session_id=session_id,
                 context_manager=cm,
@@ -1212,6 +1233,10 @@ async def _handle_user_message(
                 resume_from_turn=resume_from_turn,
                 # V1.5 项-5: 流程级暂停控制器(迭代开始检查, 挂起等待)
                 pause_controller=_get_pause_controller(session_id),
+                # Phase 1/3: 反思 + 经验进化 + 失败采集(None 时零回归)
+                reflection_engine=reflection_engine,
+                evolution_repo=evolution_repo,
+                failure_collector=failure_collector,
             )
             # 阶段三批次1(T1.2/T3.1): 同步会话级权限模式 + Skill 权限规则
             await _sync_permission_manager(
