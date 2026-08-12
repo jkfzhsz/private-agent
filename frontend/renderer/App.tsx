@@ -61,6 +61,23 @@ interface ReactEvent {
   replayed?: boolean;
 }
 
+// 2026-08-12 perf: 预计算的 turn 分组数据 —— render 阶段从 O(turn_events × 11)
+// 次遍历降为 O(1) 解构。delta/thinking 累积更新时 turnGroups useMemo 重算
+// 一次(O(n) 全表遍历), 所有 turn 卡片共享预计算结果, 避免每卡片重复 find/filter。
+interface TurnGroupData {
+  user?: ReactEvent;
+  thinking?: ReactEvent;
+  final?: ReactEvent;
+  error?: ReactEvent;
+  confirmResult?: ReactEvent;
+  toolEvents: ReactEvent[];
+  confirmEvents: ReactEvent[];
+  sandboxText: string;
+  deltaText: string;
+  finalText: string;
+  thinkingText: string;
+}
+
 interface WSMessage {
   type: string;
   session_id?: number;
@@ -435,12 +452,66 @@ export default function App(): JSX.Element {
   const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
 
   // 按 turn 分组事件:同一轮对话合并为一个 AI 回复块
+  // 2026-08-12 perf: turnGroups 预计算所有 render 阶段需要的派生字段
+  // (user/thinking/final/error 事件 + toolEvents/confirmEvents 数组 +
+  // sandboxText/deltaText/thinkingText/finalText 拼接文本)。原 render 阶段
+  // 每个 turn 卡片做 5 次 find + 4 次 filter + 2 次 map+join = O(turn_events × 11),
+  // delta 流式时所有 turn 重算 → 卡顿。预计算后 render 阶段 O(1) 解构。
   const turnGroups = useMemo(() => {
-    const map = new Map<number, ReactEvent[]>();
+    const map = new Map<number, TurnGroupData>();
     for (const ev of events) {
       const t = ev.turn;
-      if (!map.has(t)) map.set(t, []);
-      map.get(t)!.push(ev);
+      let g = map.get(t);
+      if (!g) {
+        g = {
+          toolEvents: [],
+          confirmEvents: [],
+          sandboxText: "",
+          deltaText: "",
+          finalText: "",
+          thinkingText: "",
+        };
+        map.set(t, g);
+      }
+      switch (ev.event_type) {
+        case "user":
+          g.user = ev;
+          break;
+        case "thinking":
+          // thinking 事件可能多条(理论上累积合并为一条, 防御性保留最后一条)
+          g.thinking = ev;
+          g.thinkingText = formatPayload("thinking", ev.payload);
+          break;
+        case "final":
+          g.final = ev;
+          g.finalText = formatPayload("final", ev.payload);
+          break;
+        case "error":
+          g.error = ev;
+          break;
+        case "tool_call":
+        case "tool_result":
+          g.toolEvents.push(ev);
+          break;
+        case "sandbox_output":
+          g.sandboxText += String(ev.payload.chunk ?? "");
+          break;
+        case "tool_confirmation_required":
+          g.confirmEvents.push(ev);
+          break;
+        case "tool_confirmation_result":
+          g.confirmResult = ev;
+          break;
+        case "delta":
+          // delta 累积合并为一条事件(见 lastDeltaIdByTurnRef), 但防御性
+          // 处理多条情况: 累加文本
+          g.deltaText += formatPayload("delta", ev.payload);
+          break;
+      }
+    }
+    // finalText 回退到 deltaText(无 final 时显示流式增量)
+    for (const g of map.values()) {
+      if (!g.finalText) g.finalText = g.deltaText;
     }
     return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
   }, [events]);
@@ -469,6 +540,13 @@ export default function App(): JSX.Element {
   // 2026-08-11 用户反馈: 过程中的中间产物过多, 改为只提取 final 轮最终回答
   // 中提及的文件/图片, 过渡性产物不再显示。
   // 2026-08-10 22:00: fileRe 支持中文文件名([\w\-\u4e00-\u9fff] 替代 \w)
+  // 2026-08-12 perf: 依赖 finalCount 而非 events —— delta/thinking 流式增量
+  // 不产生新产物文件, 无需触发 regex 全表扫描。finalCount 是数字, delta
+  // 不改变其值 → useMemo 跳过重算。
+  const finalCount = useMemo(
+    () => events.reduce((n, e) => n + (e.event_type === "final" ? 1 : 0), 0),
+    [events]
+  );
   const artifacts = useMemo<Artifact[]>(() => {
     const list: Artifact[] = [];
     const fileRe =
@@ -486,7 +564,8 @@ export default function App(): JSX.Element {
       }
     }
     return Array.from(new Map(list.map((a) => [a.url, a])).values());
-  }, [events]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finalCount]);
 
   const [artifactsOpen, setArtifactsOpen] = useState(true);
 
@@ -644,6 +723,13 @@ export default function App(): JSX.Element {
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastTurnRef = useRef<number>(0);
+  // 2026-08-12 perf: 流式 delta/thinking 累积索引 —— turn → 该 turn 当前
+  // 累积中的 delta/thinking 事件 id。WS 收到增量时 O(1) 查 ref 定位 + slice
+  // 单点替换, 替代原 [...prev].reverse().find() + prev.map() 的 O(4n) 全表
+  // 扫描。setEvents([]) 后 ref 索引自然失效(findIndex=-1 走新增分支), 无需
+  // 显式清空; turn 数量有限, Map 内存占用可忽略。
+  const lastDeltaIdByTurnRef = useRef<Map<number, number>>(new Map());
+  const lastThinkingIdByTurnRef = useRef<Map<number, number>>(new Map());
   // 0.5.0 P6(2026-08-09): 单 WS 复用 —— connect/handleMessage 不再依赖
   // sessionId(避免切换会话/窗口触发 WS 断开重建, 重连期间输入框不可用)。
   // sessionIdRef 恒为最新会话 id, WS 事件/重连后用 ref 读当前值发 replay。
@@ -1534,42 +1620,47 @@ export default function App(): JSX.Element {
             return;
           }
           // 流式增量: 追加到该 turn 的最后一条 delta 事件(累积显示, 不刷爆列表)
+          // 2026-08-12 perf: 用 lastDeltaIdByTurnRef O(1) 索引 + slice 单点替换,
+          // 替代 [...prev].reverse().find() + prev.map() 的 O(4n) 全表扫描。
           if (msg.event_type === "delta") {
             const deltaText = String(msg.payload.content ?? "");
             if (deltaText) {
+              const turn = msg.turn as number;
+              const lastId = lastDeltaIdByTurnRef.current.get(turn);
               setEvents((prev) => {
-                const last = [...prev]
-                  .reverse()
-                  .find(
-                    (e) =>
-                      e.turn === msg.turn &&
-                      (e.event_type === "delta" || e.event_type === "final")
-                  );
-                if (last && last.event_type === "delta") {
-                  return prev.map((e) =>
-                    e.id === last.id
-                      ? {
-                          ...e,
+                if (lastId !== undefined) {
+                  // 反向查找(delta 事件通常在数组末尾, 平均 O(1) 最坏 O(n))
+                  for (let i = prev.length - 1; i >= 0; i--) {
+                    if (prev[i].id === lastId) {
+                      const target = prev[i];
+                      if (target.event_type === "delta") {
+                        const next = prev.slice();
+                        next[i] = {
+                          ...target,
                           payload: {
-                            turn: msg.turn,
+                            turn,
                             content:
-                              String(e.payload.content ?? "") + deltaText,
+                              String(target.payload.content ?? "") + deltaText,
                           },
-                        }
-                      : e
-                  );
+                        };
+                        return next;
+                      }
+                      // final 已存在则忽略增量(final 为完整文本)
+                      if (target.event_type === "final") return prev;
+                      break;
+                    }
+                  }
                 }
-                // final 已存在则忽略增量(final 为完整文本)
-                if (last && last.event_type === "final") return prev;
-                const t = msg.turn as number;
+                const newId = ++eventIdRef.current;
+                lastDeltaIdByTurnRef.current.set(turn, newId);
                 return [
                   ...prev,
                   {
-                    id: ++eventIdRef.current,
+                    id: newId,
                     session_id: msg.session_id ?? sessionIdRef.current,
-                    turn: t,
+                    turn,
                     event_type: "delta" as EventType,
-                    payload: { turn: t, content: deltaText },
+                    payload: { turn, content: deltaText },
                     ts: Date.now(),
                   },
                 ];
@@ -1579,37 +1670,44 @@ export default function App(): JSX.Element {
           }
           // 推理增量: 逐 token thinking 事件累积合并到该 turn 最后一条
           // thinking(避免每条都追加 → 渲染抖动/多条"思考中"卡片)
+          // 2026-08-12 perf: 同 delta, 用 lastThinkingIdByTurnRef O(1) 索引。
           if (msg.event_type === "thinking") {
             const reasoning = String(
               msg.payload.reasoning ?? msg.payload.content ?? ""
             );
+            const turn = msg.turn as number;
+            const lastId = lastThinkingIdByTurnRef.current.get(turn);
             setEvents((prev) => {
-              const last = [...prev]
-                .reverse()
-                .find((e) => e.turn === msg.turn && e.event_type === "thinking");
-              if (last) {
-                return prev.map((e) =>
-                  e.id === last.id
-                    ? {
-                        ...e,
+              if (lastId !== undefined) {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  if (prev[i].id === lastId) {
+                    const target = prev[i];
+                    if (target.event_type === "thinking") {
+                      const next = prev.slice();
+                      next[i] = {
+                        ...target,
                         payload: {
-                          turn: msg.turn,
+                          turn,
                           reasoning:
-                            String(e.payload.reasoning ?? "") + reasoning,
+                            String(target.payload.reasoning ?? "") + reasoning,
                         },
-                      }
-                    : e
-                );
+                      };
+                      return next;
+                    }
+                    break;
+                  }
+                }
               }
-              const t = msg.turn as number;
+              const newId = ++eventIdRef.current;
+              lastThinkingIdByTurnRef.current.set(turn, newId);
               return [
                 ...prev,
                 {
-                  id: ++eventIdRef.current,
+                  id: newId,
                   session_id: msg.session_id ?? sessionIdRef.current,
-                  turn: t,
+                  turn,
                   event_type: "thinking" as EventType,
-                  payload: { turn: t, reasoning },
+                  payload: { turn, reasoning },
                   ts: Date.now(),
                 },
               ];
@@ -2406,42 +2504,25 @@ export default function App(): JSX.Element {
             )}
           </div>
         )}
-        {turnGroups.map(([turn, evs]) => {
-          const userEv = evs.find((e) => e.event_type === "user");
-          const thinkingEv = evs.find((e) => e.event_type === "thinking");
-          const finalEv = evs.find((e) => e.event_type === "final");
-          const errorEv = evs.find((e) => e.event_type === "error");
-          const toolEvents = evs.filter(
-            (e) => e.event_type === "tool_call" || e.event_type === "tool_result"
-          );
-          // V2 P1: 沙箱终端流式输出(按 turn 合并全部 chunk, 等宽字体终端效果)
-          const sandboxText = evs
-            .filter((e) => e.event_type === "sandbox_output")
-            .map((e) => String(e.payload.chunk ?? ""))
-            .join("");
-          // V2 P1: 权限确认请求(渲染确认卡片, 同意/拒绝按钮)
-          const confirmEvents = evs.filter(
-            (e) => e.event_type === "tool_confirmation_required"
-          );
-          const confirmResultEv = evs.find(
-            (e) => e.event_type === "tool_confirmation_result"
-          );
-          // 流式增量(无 final 时显示累积的 delta 文本, 有 final 用完整文本)
-          const deltaText = evs
-            .filter((e) => e.event_type === "delta")
-            .map((e) => formatPayload("delta", e.payload))
-            .join("");
-          const finalText = finalEv
-            ? formatPayload("final", finalEv.payload)
-            : deltaText;
+        {turnGroups.map(([turn, g]) => {
+          // 2026-08-12 perf: 所有派生字段已在 turnGroups useMemo 预计算,
+          // render 阶段 O(1) 解构, 不再每卡片做 find/filter/map+join。
+          const {
+            user: userEv,
+            thinking: thinkingEv,
+            final: finalEv,
+            error: errorEv,
+            confirmResult: confirmResultEv,
+            toolEvents,
+            confirmEvents,
+            sandboxText,
+            deltaText,
+            finalText,
+            thinkingText,
+          } = g;
           // 有用户消息但还没有最终文本 → AI 正在思考
           const isPending = !!userEv && !finalText && !errorEv;
           const thinkingOpen = openThinkingTurns.has(turn);
-          // 推理过程: 拼接该 turn 全部 thinking 事件(reasoning 逐段增量)
-          const thinkingText = evs
-            .filter((e) => e.event_type === "thinking")
-            .map((e) => formatPayload("thinking", e.payload))
-            .join("");
 
           return (
             <div key={turn} style={{ marginBottom: 14 }}>
