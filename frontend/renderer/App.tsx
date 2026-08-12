@@ -465,15 +465,17 @@ export default function App(): JSX.Element {
     });
   };
 
-  // 右栏产物: 从 tool_result 提取图片 + 文件(去重)
+  // 右栏产物: 从 final 事件提取图片 + 文件(去重)
+  // 2026-08-11 用户反馈: 过程中的中间产物过多, 改为只提取 final 轮最终回答
+  // 中提及的文件/图片, 过渡性产物不再显示。
   // 2026-08-10 22:00: fileRe 支持中文文件名([\w\-\u4e00-\u9fff] 替代 \w)
   const artifacts = useMemo<Artifact[]>(() => {
     const list: Artifact[] = [];
     const fileRe =
       /(?:\/?outputs\/)?[\w\-\u4e00-\u9fff]+\.(?:xlsx|docx|csv|html|md|pdf|json|txt|pptx|zip)/gi;
     for (const ev of events) {
-      if (ev.event_type !== "tool_result") continue;
-      const text = formatPayload("tool_result", ev.payload);
+      if (ev.event_type !== "final") continue;
+      const text = formatPayload("final", ev.payload);
       for (const p of extractImagePaths(text)) {
         list.push({ type: "image", url: imagePathToUrl(p), name: p });
       }
@@ -1660,7 +1662,14 @@ export default function App(): JSX.Element {
 
       // ── V1.5 项-1(ADR-012 §3.4 M3): 子代理事件(仅即时刷新 state;
       // 可靠性兜底 = fetchSubagents DB 轮询, 见 ws.onopen) ──
+      // 2026-08-11 用户反馈: 子代理事件串窗(白圭的子代理出现在子瞻窗口)。
+      // 后端已在 subagent_* 事件补 session_id, 前端按 session_id 过滤:
+      // 非当前活动窗口的子代理事件直接丢弃(子代理 state 是全局唯一,
+      // 不按窗口分片, 故只渲染当前窗口的子代理)。
       case "subagent_start": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
         if (msg.subagent_id) {
           setSubagents((prev) => ({
             ...prev,
@@ -1674,6 +1683,9 @@ export default function App(): JSX.Element {
         break;
       }
       case "subagent_heartbeat": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
         if (msg.subagent_id) {
           const id = msg.subagent_id as number;
           setSubagents((prev) =>
@@ -1685,6 +1697,9 @@ export default function App(): JSX.Element {
         break;
       }
       case "subagent_event": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
         if (msg.subagent_id && msg.event_type) {
           const id = msg.subagent_id as number;
           const et = String(msg.event_type);
@@ -1722,6 +1737,9 @@ export default function App(): JSX.Element {
         break;
       }
       case "subagent_stalled": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
         if (msg.subagent_id) {
           const id = msg.subagent_id as number;
           setSubagents((prev) =>
@@ -1733,6 +1751,9 @@ export default function App(): JSX.Element {
         break;
       }
       case "subagent_result": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
         if (msg.subagent_id) {
           const id = msg.subagent_id as number;
           setSubagents((prev) =>
@@ -1752,6 +1773,9 @@ export default function App(): JSX.Element {
         break;
       }
       case "subagent_error": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
         if (msg.subagent_id) {
           const id = msg.subagent_id as number;
           setSubagents((prev) =>

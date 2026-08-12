@@ -262,6 +262,7 @@ class SubagentRunner:
                 await self._push({
                     "type": "subagent_result",
                     "subagent_id": self._subagent_id,
+                    "session_id": self._parent_session_id,
                     "status": "succeeded",
                     "result": self._final_content,
                 })
@@ -271,6 +272,7 @@ class SubagentRunner:
                 await self._push({
                     "type": "subagent_error",
                     "subagent_id": self._subagent_id,
+                    "session_id": self._parent_session_id,
                     "status": "failed",
                     "error": err,
                 })
@@ -281,6 +283,7 @@ class SubagentRunner:
             await self._push({
                 "type": "subagent_error",
                 "subagent_id": self._subagent_id,
+                "session_id": self._parent_session_id,
                 "status": "cancelled",
                 "error": "cancelled",
             })
@@ -430,6 +433,7 @@ class SubagentRunner:
         wrapped = {
             "type": "subagent_event",
             "subagent_id": self._subagent_id,
+            "session_id": self._parent_session_id,
             "event_type": ev_type,
             "payload": payload,
         }
@@ -472,6 +476,7 @@ class SubagentRunner:
                 await self._push({
                     "type": "subagent_heartbeat",
                     "subagent_id": self._subagent_id,
+                    "session_id": self._parent_session_id,
                     "phase": self._phase,
                 })
             except asyncio.CancelledError:

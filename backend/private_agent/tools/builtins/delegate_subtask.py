@@ -194,6 +194,7 @@ async def _delegate_handler(
         await _safe_push(event_sink, {
             "type": "subagent_start",
             "subagent_id": int(sid),
+            "session_id": session_id,
             "task_id": st["id"],
             "prompt": st["prompt"],
         })
@@ -313,6 +314,7 @@ async def _watchdog_wait(
             await _safe_push(event_sink, {
                 "type": "subagent_stalled",
                 "subagent_id": sid,
+                "session_id": parent_session_id,
                 "stale_sec": sc["heartbeat_timeout_sec"],
             })
             await _emit_obs(
@@ -327,6 +329,7 @@ async def _watchdog_wait(
                 await _safe_push(event_sink, {
                     "type": "subagent_error",
                     "subagent_id": sid,
+                    "session_id": parent_session_id,
                     "status": "failed",
                     "error": "heartbeat_timeout",
                 })
@@ -349,6 +352,7 @@ async def _watchdog_wait(
                 await _safe_push(event_sink, {
                     "type": "subagent_error",
                     "subagent_id": sid,
+                    "session_id": parent_session_id,
                     "status": "failed",
                     "error": "max_lifetime_exceeded",
                 })
