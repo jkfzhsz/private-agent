@@ -190,3 +190,75 @@ async def test_kb_reindex(client, schema):
 
     resp = await client.post("/admin/knowledge/reindex", json={"scenario": " "})
     assert resp.status_code == 400
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-08-12 方案1: RAG 高级配置(extra_python_path / model_path)读写
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_kb_rag_config_get_returns_defaults(client, schema):
+    """GET /admin/knowledge/rag-config 返回当前 model_path/extra_python_path。
+
+    未配置时返回空字符串(打包版默认行为, RAG 走 mock 降级)。
+    """
+    resp = await client.get("/admin/knowledge/rag-config")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "model_path" in data
+    assert "extra_python_path" in data
+    # 默认值应为字符串(空或配置文件值), 不应为 None
+    assert isinstance(data["model_path"], str)
+    assert isinstance(data["extra_python_path"], str)
+
+
+@pytest.mark.asyncio
+async def test_kb_rag_config_put_persists_extra_python_path(client, schema):
+    """PUT /admin/knowledge/rag-config 写入 extra_python_path → 下次 GET 反映。
+
+    场景: 用户在设置页填本地 ML 依赖目录, 持久化到 config_runtime,
+    下次启动 / 设置页重载时自动读回。
+    """
+    test_path = "/custom/ml/deps/site-packages"
+    resp = await client.put("/admin/knowledge/rag-config", json={
+        "extra_python_path": test_path,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "ok"
+
+    # 重新 GET 应反映
+    resp = await client.get("/admin/knowledge/rag-config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["extra_python_path"] == test_path
+
+
+@pytest.mark.asyncio
+async def test_kb_rag_config_put_persists_model_path(client, schema):
+    """PUT /admin/knowledge/rag-config 写入 model_path → 下次 GET 反映。"""
+    test_path = "D:/custom/bge-model"
+    resp = await client.put("/admin/knowledge/rag-config", json={
+        "model_path": test_path,
+    })
+    assert resp.status_code == 200, resp.text
+
+    resp = await client.get("/admin/knowledge/rag-config")
+    data = resp.json()
+    assert data["model_path"] == test_path
+
+
+@pytest.mark.asyncio
+async def test_kb_rag_config_put_empty_string_clears(client, schema):
+    """PUT 空字符串清空配置(用户删除路径恢复默认)。"""
+    # 先写入
+    await client.put("/admin/knowledge/rag-config", json={
+        "extra_python_path": "/tmp/deps",
+    })
+    # 清空
+    resp = await client.put("/admin/knowledge/rag-config", json={
+        "extra_python_path": "",
+    })
+    assert resp.status_code == 200
+    resp = await client.get("/admin/knowledge/rag-config")
+    assert resp.json()["extra_python_path"] == ""

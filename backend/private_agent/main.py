@@ -1547,6 +1547,30 @@ def _configure_logger(cfg: dict) -> None:
         _logger.warning(f"FileHandler setup failed, fallback to stdout only: {e}")
 
 
+def _inject_rag_paths(cfg: dict) -> None:
+    """2026-08-12 方案1: 从合并配置读取 extra_python_path 并注入 sys.path。
+
+    打包版 venv 不含 torch/FlagEmbedding 等重型 ML 依赖。用户在设置页
+    填入本地 ML 依赖目录后, 启动时通过此函数注入 sys.path, 后续
+    _embed_worker_fn / _rerank_worker_fn 的 `from FlagEmbedding import ...`
+    即可命中。
+
+    必须在 uvicorn.run 之前调用 —— ProcessPoolExecutor spawn 模式会
+    继承主进程 sys.path, 主进程注入后 worker 自然能命中。
+
+    Args:
+        cfg: 合并后的配置 dict(含 config_runtime 覆盖)。
+    """
+    emb_cfg = (cfg.get("knowledge") or {}).get("embedding") or {}
+    extra_path = emb_cfg.get("extra_python_path", "")
+    if extra_path:
+        from private_agent.knowledge.embedding_service import apply_extra_python_path
+
+        apply_extra_python_path(extra_path)
+        if _logger:
+            _logger.info(f"RAG extra_python_path applied: {extra_path}")
+
+
 @app.on_event("shutdown")
 async def _on_shutdown() -> None:
     """关闭钩子:停止 scheduler + 关闭 MCP 客户端 + 关闭连接池。"""
@@ -1574,6 +1598,25 @@ def run_sidecar() -> None:
         ensure_admin_token()
     except Exception:  # noqa: BLE001
         _logger.warning("admin token ensure failed (fallback to env)", exc_info=True)
+    # 2026-08-12 方案1: 注入用户配置的 RAG ML 依赖路径(打包版 venv 缺 torch 等)
+    # 必须在 uvicorn.run 之前 —— ProcessPoolExecutor spawn 继承主进程 sys.path
+    try:
+        import asyncio
+
+        from private_agent.storage import db
+
+        async def _load_merged_cfg() -> dict:
+            conn = await db.connect()
+            try:
+                return await loader.load_config_with_overrides(conn)
+            finally:
+                await conn.close()
+
+        merged_cfg = asyncio.run(_load_merged_cfg())
+        _inject_rag_paths(merged_cfg)
+    except Exception:  # noqa: BLE001
+        _logger.warning("RAG extra_python_path inject failed (fallback to yaml-only)", exc_info=True)
+        _inject_rag_paths(cfg)
     host = cfg["server"]["http"]["host"]
     http_port = cfg["server"]["http"]["port"]
     _logger.info(f"Sidecar started: host={host} http_port={http_port}")

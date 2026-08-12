@@ -182,13 +182,29 @@ export default function KnowledgeView({
   const [cfgMsg, setCfgMsg] = useState<string | null>(null);
   const [reindexing, setReindexing] = useState<string | null>(null);
 
+  // 2026-08-12 方案1: RAG 高级配置(model_path / extra_python_path)
+  // 打包版 venv 不含 torch/FlagEmbedding, 用户可填本地已装好这些依赖的
+  // site-packages 目录, 后端启动时注入 sys.path, RAG 检索恢复完整能力。
+  const [ragModelPath, setRagModelPath] = useState("");
+  const [ragExtraPath, setRagExtraPath] = useState("");
+  const [ragSaving, setRagSaving] = useState(false);
+  const [ragMsg, setRagMsg] = useState<string | null>(null);
+
   const loadConfig = useCallback(async (): Promise<void> => {
     setCfgLoading(true);
     try {
-      const resp = await adminFetch(`${API_BASE}/knowledge/config`);
-      if (resp.ok) {
-        const data = await resp.json();
+      const [chunkResp, ragResp] = await Promise.all([
+        adminFetch(`${API_BASE}/knowledge/config`),
+        adminFetch(`${API_BASE}/knowledge/rag-config`),
+      ]);
+      if (chunkResp.ok) {
+        const data = await chunkResp.json();
         setChunking(data.chunking ?? {});
+      }
+      if (ragResp.ok) {
+        const rag = await ragResp.json();
+        setRagModelPath(rag.model_path ?? "");
+        setRagExtraPath(rag.extra_python_path ?? "");
       }
     } catch {
       /* 静默 */
@@ -213,6 +229,27 @@ export default function KnowledgeView({
       setCfgMsg("切片配置已保存(下次上传/重索引生效)");
     } catch (e) {
       setCfgMsg(`保存失败: ${String(e)}`);
+    }
+  };
+
+  const saveRagConfig = async (): Promise<void> => {
+    setRagMsg(null);
+    setRagSaving(true);
+    try {
+      const resp = await adminFetch(`${API_BASE}/knowledge/rag-config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model_path: ragModelPath,
+          extra_python_path: ragExtraPath,
+        }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setRagMsg("RAG 配置已保存(重启后端生效)");
+    } catch (e) {
+      setRagMsg(`保存失败: ${String(e)}`);
+    } finally {
+      setRagSaving(false);
     }
   };
 
@@ -539,6 +576,61 @@ export default function KnowledgeView({
               </label>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* 2026-08-12 方案1: RAG 高级配置(model_path / extra_python_path) */}
+      <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em" }}>RAG 高级配置</div>
+          <button
+            className="btn-primary"
+            style={{ padding: "6px 16px", fontSize: 12 }}
+            onClick={() => void saveRagConfig()}
+            disabled={ragSaving}
+          >
+            保存配置
+          </button>
+        </div>
+        {ragMsg && (
+          <div style={{ fontSize: 12, color: ragMsg.startsWith("保存失败") ? "#dc2626" : "#059669", marginBottom: 8 }}>
+            {ragMsg}
+          </div>
+        )}
+        <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 12, lineHeight: 1.6 }}>
+          打包版为瘦身不含 torch/FlagEmbedding 等重型 ML 依赖, 导致向量检索降级为 mock。
+          若本机已安装这些依赖(如开发机 venv 或独立 conda env), 填入对应 site-packages
+          目录即可恢复完整 RAG 检索能力。配置后需重启后端生效。
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
+            <span style={{ minWidth: 120, color: "var(--text-primary)" }}>ML 依赖目录</span>
+            <input
+              type="text"
+              value={ragExtraPath}
+              onChange={(e) => setRagExtraPath(e.target.value)}
+              placeholder="例如: D:/Private agent/backend/.venv/Lib/site-packages"
+              style={{
+                flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 12,
+                border: "1px solid rgba(148,163,184,0.3)",
+                background: "var(--panel-bg)", color: "var(--text-primary)",
+              }}
+            />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
+            <span style={{ minWidth: 120, color: "var(--text-primary)" }}>模型目录(可选)</span>
+            <input
+              type="text"
+              value={ragModelPath}
+              onChange={(e) => setRagModelPath(e.target.value)}
+              placeholder="留空自动探测 HF 缓存; 或填本地 bge 模型目录"
+              style={{
+                flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 12,
+                border: "1px solid rgba(148,163,184,0.3)",
+                background: "var(--panel-bg)", color: "var(--text-primary)",
+              }}
+            />
+          </label>
         </div>
       </div>
     </div>

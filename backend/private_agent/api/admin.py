@@ -492,6 +492,66 @@ async def update_knowledge_config(body: KnowledgeConfigRequest):
     return {"status": "ok"}
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-08-12 方案1: RAG 高级配置(model_path / extra_python_path)
+# 持久化到 config_runtime, 启动时 main.py 读取并注入 sys.path
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class KnowledgeRagConfigRequest(BaseModel):
+    """PUT /admin/knowledge/rag-config 请求体(2026-08-12 方案1)。
+
+    extra_python_path: 用户本地已装 torch/FlagEmbedding 的 site-packages 目录,
+                       打包版 venv 不含这些重型 ML 依赖, 通过此路径注入。
+    model_path: 本地 bge 模型目录(直接模型目录, 跳过 HF 缓存探测)。
+    仅更新传入的字段; 不传 = 不更新。
+    """
+
+    extra_python_path: str | None = None
+    model_path: str | None = None
+
+
+@router.get("/knowledge/rag-config", response_model=None)
+async def get_knowledge_rag_config():
+    """读取 RAG 高级配置(yaml + config_runtime 合并, 2026-08-12 方案1)。
+
+    返回:
+        {"model_path": str, "extra_python_path": str}
+    """
+    cfg = await _load_cfg()
+    emb_cfg = (cfg.get("knowledge") or {}).get("embedding") or {}
+    return {
+        "model_path": str(emb_cfg.get("model_path", "")),
+        "extra_python_path": str(emb_cfg.get("extra_python_path", "")),
+    }
+
+
+@router.put("/knowledge/rag-config", response_model=None)
+async def update_knowledge_rag_config(body: KnowledgeRagConfigRequest):
+    """修改 RAG 高级配置(写入 config_runtime, 下次启动生效, 2026-08-12 方案1)。
+
+    extra_python_path / model_path 写入 config_runtime 点分 key:
+      knowledge.embedding.extra_python_path
+      knowledge.embedding.model_path
+    空字符串视为清空(DELETE 后 INSERT, 与 provider key 清空行为一致)。
+    """
+    conn = await db.connect()
+    try:
+        if body.extra_python_path is not None:
+            await _set_runtime(
+                conn, "knowledge.embedding.extra_python_path",
+                body.extra_python_path,
+            )
+        if body.model_path is not None:
+            await _set_runtime(
+                conn, "knowledge.embedding.model_path",
+                body.model_path,
+            )
+    finally:
+        await conn.close()
+    return {"status": "ok"}
+
+
 class KnowledgeReindexRequest(BaseModel):
     """POST /admin/knowledge/reindex 请求体(V1.3-7.3): 批量重向量化。
 

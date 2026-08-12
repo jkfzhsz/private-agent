@@ -19,6 +19,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import sys
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -278,6 +279,41 @@ def get_embedding_pool() -> concurrent.futures.ProcessPoolExecutor:
             max_workers=1
         )
     return _embedding_pool
+
+
+def apply_extra_python_path(extra_path: str) -> None:
+    """将用户配置的本地 ML 依赖目录注入 sys.path(方案1, 2026-08-12)。
+
+    打包版 venv 不含 torch/FlagEmbedding 等重型 ML 依赖(见 build-electron.bat
+    2026-08-12 排除规则)。用户可在设置页填入本地已装好这些依赖的
+    site-packages 目录(如开发机 venv 的 site-packages, 或 conda env 的
+    site-packages), 后端启动时调用本函数注入, 后续 _embed_worker_fn /
+    _rerank_worker_fn 的 `from FlagEmbedding import ...` 即可命中。
+
+    安全约束:
+    - 空字符串/None: 直接返回(未配置, 走 mock 降级)
+    - 目录不存在: 记录 warning 并返回(不崩溃, 走 mock 降级)
+    - 目录存在: insert 到 sys.path[0](优先级高于打包 venv 的 site-packages)
+    - 已存在: 不重复插入(避免 sys.path 累积污染)
+
+    注: ProcessPoolExecutor spawn 模式会继承主进程 sys.path, 故主进程启动
+    时注入即可, worker 不需要再注入。
+    """
+    if not extra_path:
+        return
+    p = Path(extra_path)
+    if not p.is_dir():
+        logger.warning(
+            "extra_python_path configured but not a directory: %s, "
+            "RAG will degrade to mock embeddings",
+            extra_path,
+        )
+        return
+    sp = str(p)
+    if sp in sys.path:
+        return
+    sys.path.insert(0, sp)
+    logger.info("extra_python_path injected to sys.path[0]: %s", sp)
 
 
 def _find_cache_root(base: str | None, repo_dir: str) -> str | None:
