@@ -22,6 +22,21 @@ from private_agent.knowledge.reranker_service import RerankerService
 logger = logging.getLogger(__name__)
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    """JSONB 值统一转 dict(asyncpg 未注册 JSONB 类型码时返回 str, 用前必须解析)。"""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = __import__("json").loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 class KnowledgeBaseService:
     """知识库服务编排层(蓝图 §4.6/§4.14/§4.15/§4.16)。
 
@@ -217,6 +232,203 @@ class KnowledgeBaseService:
             "vector_dim": self._get_vector_dim(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 2026-08-15(M2 P2-15): KB 版本快照 / 对比 / 回滚
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def build_snapshot_payload(self) -> dict[str, Any]:
+        """收集当前知识库完整内容(文档 + 分块含 embedding)为可回滚快照。
+
+        payload 结构:
+        {
+          embedding_model, vector_dim, timestamp, note,
+          documents: [
+            {doc_id, source, content, scenario, metadata, hash,
+             chunks: [{chunk_text, scenario, source, metadata, embedding_text}]}
+          ]
+        }
+        embedding_text 为 pgvector 文本("[a,b,...]"), 回滚时直接复用,
+        无需重新 embedding(精确恢复)。
+        """
+        docs = await self._kb_repo.list_all_documents()
+        documents = []
+        for d in docs:
+            chunks = await self._kb_repo.list_chunks_with_embedding(d["id"])
+            documents.append({
+                "doc_id": d["id"],
+                "source": d["source"],
+                "content": d["content"],
+                "scenario": d["scenario"],
+                "metadata": _as_dict(d["metadata"]),
+                "hash": d["hash"],
+                "chunks": [
+                    {
+                        "chunk_text": c["chunk_text"],
+                        "scenario": c["scenario"],
+                        "source": c["source"],
+                        "metadata": _as_dict(c["metadata"]),
+                        "embedding_text": c["embedding_text"],
+                    }
+                    for c in chunks
+                ],
+            })
+        return {
+            "embedding_model": self._get_embedding_model(),
+            "vector_dim": self._get_vector_dim(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "documents": documents,
+        }
+
+    async def save_snapshot(
+        self,
+        snapshot_repo,
+        *,
+        version: str | None = None,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """保存知识库版本快照(scope='kb')。
+
+        Args:
+            snapshot_repo: VersionSnapshotRepo 实例。
+            version: 版本号(默认 UTC 时间戳 %Y%m%d%H%M%S)。
+            note: 备注(如"自动: upload xxx.pdf")。
+
+        Returns:
+            {"version": str, "documents": int, "chunks": int}
+        """
+        if version is None:
+            version = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        payload = await self.build_snapshot_payload()
+        payload["note"] = note
+        snapshot_id = await snapshot_repo.save(
+            scope="kb", version=version, payload=payload
+        )
+        total_chunks = sum(len(d["chunks"]) for d in payload["documents"])
+        return {
+            "id": snapshot_id,
+            "version": version,
+            "documents": len(payload["documents"]),
+            "chunks": total_chunks,
+        }
+
+    async def compare_versions(
+        self,
+        snapshot_repo,
+        from_version: str,
+        to_version: str,
+    ) -> dict[str, Any]:
+        """对比两个 KB 版本快照(文档级 diff)。
+
+        Returns:
+            {"from": v1, "to": v2,
+             "added": [source...], "removed": [source...], "modified": [source...],
+             "unchanged": n, "summary": "新增 N · 删除 M · 修改 K"}
+        """
+        v1 = await snapshot_repo.get(scope="kb", version=from_version)
+        v2 = await snapshot_repo.get(scope="kb", version=to_version)
+        if v1 is None or v2 is None:
+            raise ValueError("snapshot_not_found")
+
+        def _index(payload: dict) -> dict[str, dict]:
+            return {
+                d["source"]: d
+                for d in (payload or {}).get("documents", [])
+            }
+
+        # 注: VersionSnapshotRepo.get 返回 payload 本身(非 {payload: ...} 包装)
+        idx1, idx2 = _index(v1), _index(v2)
+        added = [s for s in idx2 if s not in idx1]
+        removed = [s for s in idx1 if s not in idx2]
+        modified = [
+            s for s in idx1
+            if s in idx2 and idx1[s].get("hash") != idx2[s].get("hash")
+        ]
+        unchanged = [s for s in idx1 if s in idx2 and idx1[s].get("hash") == idx2[s].get("hash")]
+        return {
+            "from": from_version,
+            "to": to_version,
+            "added": added,
+            "removed": removed,
+            "modified": modified,
+            "unchanged": len(unchanged),
+            "summary": f"新增 {len(added)} · 删除 {len(removed)} · 修改 {len(modified)}",
+        }
+
+    async def rollback_to(
+        self,
+        snapshot_repo,
+        version: str,
+        *,
+        conn=None,
+    ) -> dict[str, Any]:
+        """回滚知识库到指定版本快照。
+
+        事务内: 清空当前全部文档/分块 → 按快照重建(含 embedding 文本直插,
+        不重新 embedding)。快照查找失败或 payload 缺 documents 时抛 ValueError。
+
+        Args:
+            snapshot_repo: VersionSnapshotRepo 实例。
+            version: 目标版本号。
+            conn: 复用连接(事务由调用方控制; 为 None 时内部开启事务)。
+
+        Returns:
+            {"version": str, "documents": int, "chunks": int}
+        """
+        snap = await snapshot_repo.get(scope="kb", version=version)
+        if snap is None:
+            raise ValueError("snapshot_not_found")
+        # 注: get 返回 payload 本身
+        payload = snap or {}
+        documents = payload.get("documents", [])
+        if not isinstance(documents, list):
+            raise ValueError("snapshot_payload_invalid")
+
+        if conn is None:
+            conn = self._kb_repo._conn
+            async with conn.transaction():
+                await self._kb_repo.truncate_all()
+                return await self._apply_snapshot(documents)
+        # 调用方已开事务(conn 传入): 直接应用
+        await self._kb_repo.truncate_all()
+        return await self._apply_snapshot(documents)
+
+    async def _apply_snapshot(self, documents: list[dict]) -> dict[str, Any]:
+        """将快照 documents 重建到 kb_documents/kb_chunks(须在事务内)。"""
+        total_chunks = 0
+        for d in documents:
+            doc = Document(
+                source=d.get("source") or "",
+                content=d.get("content"),
+                scenario=d.get("scenario"),
+                metadata=_as_dict(d.get("metadata")),
+                hash=d.get("hash"),
+            )
+            doc_id = await self._kb_repo.insert_document(doc)
+            for c in d.get("chunks", []):
+                embed_text = c.get("embedding_text")
+                if not embed_text:
+                    continue  # 缺 embedding 的分块跳过(与插入侧全 0 语义一致)
+                vec_text = (
+                    embed_text
+                    if embed_text.startswith("[")
+                    else f"[{embed_text}]"
+                )
+                await self._kb_repo._conn.execute(
+                    """
+                    INSERT INTO kb_chunks (doc_id, scenario, source, chunk_text,
+                                           metadata, embedding)
+                    VALUES ($1, $2, $3, $4, $5, $6::vector)
+                    """,
+                    doc_id,
+                    c.get("scenario"),
+                    c.get("source"),
+                    c.get("chunk_text") or "",
+                    __import__("json").dumps(_as_dict(c.get("metadata"))),
+                    vec_text,
+                )
+                total_chunks += 1
+        return {"documents": len(documents), "chunks": total_chunks}
 
     def _get_embedding_model(self) -> str:
         """获取当前 embedding 模型名称。"""

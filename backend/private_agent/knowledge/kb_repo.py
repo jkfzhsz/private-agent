@@ -333,6 +333,42 @@ class KnowledgeBaseRepo:
         )
         return [self._row_to_chunk(r) for r in rows]
 
+    # ══════════════════════════════════════════════════════════════════════
+    # 2026-08-15(M2 P2-15): KB 版本快照/回滚 查询辅助
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def list_all_documents(self) -> list[asyncpg.Record]:
+        """全部活跃文档(快照收集用, 含 id/source/content/scenario/metadata/hash)。"""
+        return await self._conn.fetch(
+            """
+            SELECT id, source, content, scenario, metadata, hash
+            FROM kb_documents
+            WHERE is_active = TRUE
+            ORDER BY id
+            """
+        )
+
+    async def list_chunks_with_embedding(self, doc_id: int) -> list[asyncpg.Record]:
+        """某文档全部活跃分块(含 embedding 文本, 供快照精确保存)。
+
+        embedding::text → "[0.1,0.2,...]" 字符串, 回滚时直接复用。
+        """
+        return await self._conn.fetch(
+            """
+            SELECT chunk_text, scenario, source, metadata,
+                   embedding::text AS embedding_text
+            FROM kb_chunks
+            WHERE doc_id = $1 AND is_active = TRUE
+            ORDER BY id
+            """,
+            doc_id,
+        )
+
+    async def truncate_all(self) -> None:
+        """清空知识库全部文档与分块(回滚前调用, 事务内)。"""
+        await self._conn.execute("DELETE FROM kb_chunks")
+        await self._conn.execute("DELETE FROM kb_documents")
+
     async def get_chunk_count(self, doc_id: int | None = None) -> int:
         """统计活跃分块数。
 

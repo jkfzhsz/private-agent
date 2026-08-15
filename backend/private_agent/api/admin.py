@@ -416,6 +416,8 @@ async def knowledge_upload(
                 filename=filename,
                 scenario=scenario,
             )
+            # 2026-08-15(M2 P2-15): 变更后自动快照(失败不阻塞主操作)
+            await _auto_kb_snapshot(conn, note=f"auto: upload {filename}")
             return {"doc_id": doc_id, "chunks": len(chunks)}
         finally:
             await conn.close()
@@ -481,11 +483,134 @@ async def delete_knowledge_base(scenario: str):
             for d in docs:
                 if d.id:
                     await repo.deactivate_document(d.id)
+            # 2026-08-15(M2 P2-15): 变更后自动快照(失败不阻塞主操作)
+            await _auto_kb_snapshot(conn, note=f"auto: delete scenario={scenario}")
             return {"ok": True, "scenario": scenario, "deleted_documents": len(docs)}
         finally:
             await conn.close()
     except Exception:
         return JSONResponse(status_code=503, content={"error": "kb_delete_failed"})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-08-15(M2 P2-15): KB 版本快照 —— 保存 / 列表 / 对比 / 回滚
+# ══════════════════════════════════════════════════════════════════════════
+
+async def _auto_kb_snapshot(conn, *, note: str) -> None:
+    """KB 变更后自动保存快照(失败仅记日志, 不阻塞主操作)。"""
+    try:
+        from private_agent.eval.repos import VersionSnapshotRepo
+        from private_agent.knowledge.factory import build_kb_service
+
+        cfg = await _load_cfg()
+        svc = build_kb_service(conn, cfg)
+        await svc.save_snapshot(VersionSnapshotRepo(conn), note=note)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.get("/knowledge/versions", response_model=None)
+async def list_kb_versions(limit: int = 20):
+    """KB 版本快照列表(scope='kb', 倒序)。"""
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.eval.repos import VersionSnapshotRepo
+
+            repo = VersionSnapshotRepo(conn)
+            rows = await repo.list_by_scope("kb", limit=min(max(int(limit), 1), 50))
+            return [
+                {
+                    "id": r["id"],
+                    "version": r["version"],
+                    "created_at": r["created_at"].isoformat()
+                    if r["created_at"] else None,
+                    "documents": len((r["payload"] or {}).get("documents", [])),
+                    "note": (r["payload"] or {}).get("note", ""),
+                    "embedding_model": (r["payload"] or {}).get("embedding_model"),
+                }
+                for r in rows
+            ]
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "kb_versions_failed"})
+
+
+@router.post("/knowledge/versions", response_model=None)
+async def save_kb_version(note: str = ""):
+    """手动保存 KB 版本快照。"""
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.eval.repos import VersionSnapshotRepo
+            from private_agent.knowledge.factory import build_kb_service
+
+            cfg = await _load_cfg()
+            svc = build_kb_service(conn, cfg)
+            result = await svc.save_snapshot(
+                VersionSnapshotRepo(conn), note=note or "manual"
+            )
+            return result
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "kb_version_save_failed"})
+
+
+@router.get("/knowledge/versions/compare", response_model=None)
+async def compare_kb_versions(from_version: str, to_version: str):
+    """对比两个 KB 版本(文档级 diff)。"""
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.eval.repos import VersionSnapshotRepo
+            from private_agent.knowledge.factory import build_kb_service
+
+            cfg = await _load_cfg()
+            svc = build_kb_service(conn, cfg)
+            result = await svc.compare_versions(
+                VersionSnapshotRepo(conn), from_version, to_version
+            )
+            return result
+        finally:
+            await conn.close()
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "kb_compare_failed"})
+
+
+@router.post("/knowledge/versions/{version}/rollback", response_model=None)
+async def rollback_kb_version(version: str):
+    """回滚 KB 到指定版本快照(事务内清空重建)。"""
+    try:
+        conn = await db.connect()
+        try:
+            from private_agent.eval.repos import VersionSnapshotRepo
+            from private_agent.knowledge.factory import build_kb_service
+
+            cfg = await _load_cfg()
+            svc = build_kb_service(conn, cfg)
+            async with conn.transaction():
+                result = await svc.rollback_to(
+                    VersionSnapshotRepo(conn), version, conn=conn
+                )
+            # 回滚本身是变更, 记一条新快照(时间戳版本, 防误回滚)
+            try:
+                await svc.save_snapshot(
+                    VersionSnapshotRepo(conn),
+                    note=f"auto: rollback to {version}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": True, "version": version, **result}
+        finally:
+            await conn.close()
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "kb_rollback_failed"})
 
 
 @router.get("/knowledge/{scenario}/documents", response_model=None)
@@ -720,6 +845,8 @@ async def reindex_knowledge(body: KnowledgeReindexRequest):
                     skip_dedup=True,
                 )
                 total_chunks += len(chunks)
+            # 2026-08-15(M2 P2-15): 重索引后自动快照(失败不阻塞)
+            await _auto_kb_snapshot(conn, note=f"auto: reindex scenario={scenario}")
             return {"ok": True, "documents": len(docs), "chunks": total_chunks}
         finally:
             await conn.close()
