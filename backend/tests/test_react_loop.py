@@ -258,13 +258,20 @@ def test_run_turn_persists_react_events_to_db_with_incrementing_turn():
             await conn.close()
 
     rows = asyncio.run(_run())
-    assert len(rows) == 3
-    assert rows[0]["event_type"] == "thinking"
-    assert rows[1]["event_type"] == "final"
-    assert rows[2]["event_type"] == "checkpoint"
+    # 2026-08-15 更新: 状态栏注入审计(context_injected)新增事件, 过滤后
+    # 与原事件序列比对; 额外断言审计事件存在(新行为)。
+    event_types = [r["event_type"] for r in rows]
+    assert "context_injected" in event_types, (
+        f"expect status_bar context_injected audit, got {event_types}"
+    )
+    core_events = [t for t in event_types if t != "context_injected"]
+    assert core_events == ["thinking", "final", "checkpoint"], core_events
+    assert rows[0]["event_type"] == "thinking" or rows[1]["event_type"] == "thinking"
     # turn 递增(同一轮内 thinking 和 final 共享 turn=1)
-    assert rows[0]["turn"] == 1
-    assert rows[1]["turn"] == 1
+    thinking_row = next(r for r in rows if r["event_type"] == "thinking")
+    final_row = next(r for r in rows if r["event_type"] == "final")
+    assert thinking_row["turn"] == 1
+    assert final_row["turn"] == 1
 
 
 def test_run_turn_calls_adapter_chat_with_built_messages():
@@ -647,7 +654,15 @@ def test_run_turn_with_tool_calls_persists_all_events_to_db():
             await conn.close()
 
     types = asyncio.run(_run())
-    assert types == ["thinking", "tool_call", "tool_result", "final", "checkpoint"]
+    # 2026-08-15 更新: 状态栏注入审计(context_injected)新增事件, 过滤后
+    # 与原事件序列比对(thinking/tool_call/tool_result/final/checkpoint)。
+    assert "context_injected" in types, (
+        f"expect status_bar context_injected audit, got {types}"
+    )
+    core_events = [t for t in types if t != "context_injected"]
+    assert core_events == ["thinking", "tool_call", "tool_result", "final", "checkpoint"], (
+        core_events
+    )
 
 
 def test_run_turn_persists_assistant_message_with_tool_calls():

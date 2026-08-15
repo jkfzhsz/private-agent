@@ -73,7 +73,7 @@ def _make_registry_with_tools() -> ToolRegistry:
 
 
 class _FakeConn:
-    """模拟 asyncpg.Connection(支持 fetchrow + execute)。"""
+    """模拟 asyncpg.Connection(支持 fetchrow + fetchval + execute)。"""
 
     def __init__(self, locked_skill=None):
         self._locked_skill = locked_skill
@@ -86,6 +86,11 @@ class _FakeConn:
             return {"locked_skill_name": None, "created_at": datetime(2026, 1, 1)}
         if "skills" in query.lower():
             return None
+        return None
+
+    async def fetchval(self, query, *args):
+        # 2026-08-15: activate_skill 新增 workspace 读取(会话未设置 → None,
+        # 走原锁定逻辑; 不触发场景工作区注入分支)
         return None
 
     async def execute(self, query, *args):

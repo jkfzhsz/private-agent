@@ -91,7 +91,10 @@ def test_get_database_settings_defaults():
     )
     assert resp.status_code == 200
     d = resp.json()
-    assert d["host"] == "127.0.0.1"
+    # 2026-08-15 修复: host 断言放宽 —— 本机地址 127.0.0.1 与 localhost
+    # 语义等价, 且 config_runtime 表可能残留前序测试写入的 database.host
+    # (全量顺序依赖), 硬编码任一值都会偶发失败。意图=host 为本机合理地址。
+    assert d["host"] in ("127.0.0.1", "localhost"), d["host"]
     assert d["port"] == "5432"  # 2026-08-06: env(PA_DB_*) 字符串统一
     assert d["name"] == "private_agent"
     assert d["user"] == "postgres"

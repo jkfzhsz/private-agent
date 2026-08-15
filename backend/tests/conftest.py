@@ -32,3 +32,35 @@ def _isolate_appdata(monkeypatch, tmp_path_factory):
     master key)不污染真实用户目录。APPDATA 跨测试稳定 → master key 继承稳定。"""
     appdata = tmp_path_factory.mktemp("pa-appdata")
     monkeypatch.setenv("APPDATA", str(appdata))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_db_pool():
+    """2026-08-15 修复(全量连锁失败根因): 每个测试前重置全局连接池。
+
+    污染机制: db._pool 是模块级单例, 用池连接的测试会缓存 prepared
+    statement(指向 sessions 等表); 后续测试执行 DROP SCHEMA CASCADE 后,
+    缓存的 prepared statement 指向已删除的表 → 再复用池连接抛
+    UndefinedTableError → 全量混跑时连锁失败(单文件独立跑不触发)。
+
+    修复: 每测试前关闭旧池, 强制所有测试从全新连接开始(重新 prepared,
+    指向当前 schema)。asyncpg.connect 直连的测试不受影响。
+    """
+    import asyncio
+
+    from private_agent.storage import db
+
+    def _reset_pool() -> None:
+        async def _close() -> None:
+            if db._pool is not None:
+                try:
+                    await db._pool.close()
+                except Exception:  # noqa: BLE001 - 池关闭失败不阻断测试
+                    pass
+                db._pool = None
+
+        asyncio.run(_close())
+
+    _reset_pool()
+    yield
+    _reset_pool()

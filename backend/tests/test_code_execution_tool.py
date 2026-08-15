@@ -86,8 +86,17 @@ class TestCodeExecutionHandler:
         assert "No code provided" in result.error
 
     @pytest.mark.asyncio
-    async def test_handler_no_config(self) -> None:
-        """无配置时返回错误。"""
+    async def test_handler_no_config(self, monkeypatch) -> None:
+        """无配置时返回错误。
+
+        2026-08-15 修复: 全量顺序下 main 启动装配(main.py:1037
+        set_sandbox_config(cfg.get("sandbox")))会设置模块级全局
+        _sandbox_config → "无配置"分支不触发 → 误执行成功。此处显式
+        重置全局为 None(monkeypatch 自动恢复), 测试自包含。
+        """
+        import private_agent.tools.builtins.code_execution as ce_mod
+
+        monkeypatch.setattr(ce_mod, "_sandbox_config", None)
         result = await code_execution_handler({"code": "print('hello')"})
         assert isinstance(result, ToolResult)
         assert result.error is not None

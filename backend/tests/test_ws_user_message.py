@@ -105,6 +105,13 @@ def _patch_adapter_and_tools(monkeypatch, responses, tools):
     def _fake_build_session_adapter(cfg, model_id=None):
         return _MockAdapter(responses=responses)
 
+    # 2026-08-15 修复(回归): 双链架构 _build_contextual_adapter 引入后
+    # 未 patch → 真实 build_fallback_chain 读测试 cfg 的 models.providers
+    # → KeyError → user_message 处理失败 → WS 无 turn_end。
+    def _fake_build_contextual_adapter(cfg, model_id=None):
+        mock = _MockAdapter(responses=responses)
+        return mock, mock
+
     async def _fake_get_frozen_tools(cfg, session_id, conn):
         return list(tools)
 
@@ -114,6 +121,9 @@ def _patch_adapter_and_tools(monkeypatch, responses, tools):
     monkeypatch.setattr(main_mod, "_build_adapter", _fake_build_adapter)
     monkeypatch.setattr(
         main_mod, "_build_session_adapter", _fake_build_session_adapter
+    )
+    monkeypatch.setattr(
+        main_mod, "_build_contextual_adapter", _fake_build_contextual_adapter
     )
     monkeypatch.setattr(
         main_mod, "_get_frozen_tools", _fake_get_frozen_tools

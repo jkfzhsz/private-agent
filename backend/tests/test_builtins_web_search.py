@@ -1,6 +1,7 @@
 """测试 web_search 内置工具。"""
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,7 +12,12 @@ from private_agent.tools.builtins.web_search import web_search_handler
 class TestWebSearch:
     """web_search 工具:HTTP 搜索 API 封装。"""
 
-    async def test_search_returns_results(self) -> None:
+    async def test_search_returns_results(self, monkeypatch) -> None:
+        # 2026-08-15 修复: 显式锁定 bing 后端 —— _pick_backend 读
+        # env > config.yaml > duckduckgo, 全量顺序下 config_runtime 可能
+        # 残留其他 backend, 导致 mock(只配 bing HTML)走 duckduckgo JSON
+        # 分支 → output 为 MagicMock。测试自包含, 不依赖全局默认。
+        monkeypatch.setenv("PA_WEB_SEARCH_BACKEND", "bing")
         # 默认后端已是 bing(908ee2e 后 PA_WEB_SEARCH_BACKEND=bing):
         # mock 需提供 bing HTML(.text) 而非 duckduckgo JSON(.json)
         bing_html = (
