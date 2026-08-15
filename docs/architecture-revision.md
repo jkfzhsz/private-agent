@@ -207,4 +207,5 @@ _session_tasks: dict[int, set[asyncio.Task]] = {}
 - [x] T-3 task 集合（批次 2，待提交）
 - [x] C-5 重放 Zone 过滤（批次 3，待提交）
 - [x] T-4 MCP 安全加固（批次 3，待提交）
-- [ ] C-4 事件级去重（批次 3）
+- [x] C-4 事件级去重（批次 3，2026-08-15 完成，提交 d93264f）
+  - event_id 复用 DB 自增 id（实时推送与 replay 重放同源）；replay 支持 last_event_id 事件级精确补发；前端已见 id 去重（修复 delta 重复累积）；full=True 忽略 event_id；未提供回退 turn 粒度向后兼容

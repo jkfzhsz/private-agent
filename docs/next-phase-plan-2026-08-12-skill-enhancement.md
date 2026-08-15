@@ -1,6 +1,7 @@
 # 技能功能扩展与优化实施方案
 
 > 2026-08-12 蒋先生提出，Plan 模式（先不执行）
+> **实施状态（2026-08-15 全面审视确认）**：已实施——需求1（/ 召唤技能，session_supplementary_skills 'slash'）、需求2（上传 zip 一键识别安装，test_admin_skill_upload_zip）、需求3（切换→选择多技能，supplementary 机制）；提交 d93264f。
 
 ## 一、背景与目标
 

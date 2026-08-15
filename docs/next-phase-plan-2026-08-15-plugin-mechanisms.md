@@ -181,7 +181,7 @@ SCOPE_EXPERIENCE_CATEGORY = {
 - [x] "模型看到了什么"可完全从 react_events 取证（context_injected 覆盖五注入点）
 - **ScenePreset registry 改造已取消**（场景固定，无新增需求，风险大于收益）
 - **重复定义收敛**：reflection/evolution_repo 经验类别共享 core/scene_meta.py 常量（如做 A-2）
-- [ ] 全量测试基线通过（后端 pytest 全量回归进行中）
+- [ ] 全量测试基线通过（**2026-08-15 实测受阻**：全量套件存在既有测试缺陷——test_admin_database:94 断言默认值与环境不符、测试间 schema 污染累积。已记入 docs/project-health-review-2026-08-15.md §B.1，作为独立治理项）
 - [x] 权限门节点化、B 方案触发条件（DSH 生态市场验证）写入本文档备查
 
 ## 8. B 方案挂起备忘（触发条件）
