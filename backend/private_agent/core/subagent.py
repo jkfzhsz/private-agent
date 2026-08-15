@@ -270,6 +270,9 @@ class SubagentRunner:
             # 重启次数未达上限 → 同一子 session 续跑(新 turn); 副作用工具
             # 可能重复执行 —— 默认关闭, 开启为用户显式选择(spec 记录限制)。
             while True:
+                # 2026-08-15(M2 P2-20): 任务级暂停挂起点 —— 每轮(ReactLoop
+                # 完整执行)之间协作式检查; paused → 挂起轮询, cancelled → 中断
+                await self._maybe_pause()
                 try:
                     await self._run_react_loop()
                     break  # 正常完成
@@ -407,6 +410,28 @@ class SubagentRunner:
         self._sub_session_id = int(sid)
         return self._sub_session_id
 
+    async def _maybe_pause(self) -> None:
+        """2026-08-15(M2 P2-20): 任务级暂停挂起点(协作式)。
+
+        每轮 ReactLoop 之间检查 subagents.status:
+        - running/终态 → 立即返回
+        - paused → 循环轮询(间隔 2s), 直到恢复 running 或转终态
+        - cancelled → 抛 asyncio.CancelledError(由 run() 统一处置)
+
+        安全边界: ReactLoop 单轮为原子段(模型调用/工具执行不中断),
+        暂停仅在轮间生效 —— 避免半途状态与副作用工具重复执行。
+        """
+        while True:
+            status = await self._conn.fetchval(
+                "SELECT status FROM subagents WHERE id = $1",
+                self._subagent_id,
+            )
+            if status not in ("paused",):
+                if status == "cancelled":
+                    raise asyncio.CancelledError()
+                return
+            await asyncio.sleep(2)
+
     async def _run_react_loop(self) -> None:
         """构建 ContextManager + ReactLoop 并执行一轮(复用主会话完整机制)。
 
@@ -516,7 +541,7 @@ class SubagentRunner:
             try:
                 updated = await self._hb_conn.execute(
                     "UPDATE subagents SET last_heartbeat_at=now() "
-                    "WHERE id=$1 AND status='running'",
+                    "WHERE id=$1 AND status IN ('running','paused')",
                     self._subagent_id,
                 )
                 if _rowcount(updated) == 0:

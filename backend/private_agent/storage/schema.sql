@@ -380,7 +380,7 @@ CREATE TABLE subagents (
     prompt        TEXT NOT NULL,             -- 委派指令(模型生成)
     model_id      VARCHAR(50),               -- 子代理模型(默认继承主会话)
     status        VARCHAR(20) NOT NULL DEFAULT 'pending'
-                  CHECK (status IN ('pending','running','succeeded','failed','cancelled')),
+                  CHECK (status IN ('pending','running','paused','succeeded','failed','cancelled')),
     result        TEXT,                      -- 最终结果(final content / error)
     tool_calls    INT NOT NULL DEFAULT 0,    -- 子代理工具调用次数(统计)
     error         TEXT,                      -- 失败原因枚举(§3.6): heartbeat_timeout /

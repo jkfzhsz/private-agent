@@ -3483,6 +3483,86 @@ async def list_subagents(session_id: int, parent_turn: int | None = None):
         )
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-08-15(M2 P2-20): 任务级暂停/恢复 —— subagents.status=paused
+# (协作式: 子代理在每轮 ReactLoop 之间检查状态挂起; 模型调用/工具执行不中断)
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.post("/subagents/{subagent_id}/pause", response_model=None)
+async def pause_subagent(subagent_id: int):
+    """暂停子代理任务(running → paused)。
+
+    仅 running 可暂停; 已终态返回 409。生效时机: 当前轮 ReactLoop
+    结束后(协作式挂起), 已发出的模型调用/工具执行不中断。
+
+    Returns:
+        200: {"ok": True, "id": int, "status": "paused"}
+        404: 任务不存在
+        409: 状态不允许(非 running)
+    """
+    try:
+        conn = await db.connect()
+        try:
+            updated = await conn.execute(
+                "UPDATE subagents SET status='paused', updated_at=now() "
+                "WHERE id=$1 AND status='running'",
+                subagent_id,
+            )
+            if updated == "UPDATE 0":
+                row = await conn.fetchrow(
+                    "SELECT status FROM subagents WHERE id=$1", subagent_id
+                )
+                if row is None:
+                    return JSONResponse(
+                        status_code=404, content={"error": "subagent_not_found"}
+                    )
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": "subagent_not_pausable", "status": row["status"]},
+                )
+            return {"ok": True, "id": subagent_id, "status": "paused"}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "subagent_pause_failed"})
+
+
+@router.post("/subagents/{subagent_id}/resume", response_model=None)
+async def resume_subagent(subagent_id: int):
+    """恢复暂停的子代理任务(paused → running)。
+
+    Returns:
+        200: {"ok": True, "id": int, "status": "running"}
+        404: 任务不存在
+        409: 状态不允许(非 paused)
+    """
+    try:
+        conn = await db.connect()
+        try:
+            updated = await conn.execute(
+                "UPDATE subagents SET status='running', updated_at=now() "
+                "WHERE id=$1 AND status='paused'",
+                subagent_id,
+            )
+            if updated == "UPDATE 0":
+                row = await conn.fetchrow(
+                    "SELECT status FROM subagents WHERE id=$1", subagent_id
+                )
+                if row is None:
+                    return JSONResponse(
+                        status_code=404, content={"error": "subagent_not_found"}
+                    )
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": "subagent_not_resumable", "status": row["status"]},
+                )
+            return {"ok": True, "id": subagent_id, "status": "running"}
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "subagent_resume_failed"})
+
+
 class WorkspaceRequest(BaseModel):
     """PUT /sessions/{id}/workspace 请求体: 会话工作区目录(画地为牢)。"""
 

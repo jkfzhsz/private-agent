@@ -204,6 +204,8 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
         "ALTER TABLE subagents ADD COLUMN IF NOT EXISTS "
         "task_type VARCHAR(20) NOT NULL DEFAULT 'other'"
     )
+    # 2026-08-15(M2 P2-20): 任务级暂停/恢复 —— subagents.status 加 'paused'
+    await _migrate_subagents_status_check(conn)
 
 
 async def _migrate_add_session_supplementary_skills(conn: asyncpg.Connection) -> None:
@@ -455,5 +457,32 @@ async def _migrate_version_snapshots_scope_check(conn: asyncpg.Connection) -> No
             """
             ALTER TABLE version_snapshots ADD CONSTRAINT version_snapshots_scope_check
             CHECK (scope IN ('prompt', 'skill', 'harness', 'config', 'kb', 'stable_zone'))
+            """
+        )
+
+
+async def _migrate_subagents_status_check(conn: asyncpg.Connection) -> None:
+    """2026-08-15(M2 P2-20): 幂等扩容 subagents.status CHECK, 加入 'paused'
+    (任务级暂停/恢复)。老部署已有表不含 paused → 重建 CHECK; 新部署
+    schema.sql 已含 → 检测到即跳过。
+    """
+    rows = await conn.fetch(
+        """
+        SELECT conname, pg_get_constraintdef(oid) AS def
+        FROM pg_constraint
+        WHERE conrelid = 'subagents'::regclass AND contype = 'c'
+        """
+    )
+    for r in rows:
+        def_text = r["def"] or ""
+        if "paused" in def_text:
+            continue
+        conname = r["conname"]
+        await conn.execute(f'ALTER TABLE subagents DROP CONSTRAINT "{conname}"')
+        await conn.execute(
+            """
+            ALTER TABLE subagents ADD CONSTRAINT subagents_status_check
+            CHECK (status IN
+                ('pending','running','paused','succeeded','failed','cancelled'))
             """
         )

@@ -836,3 +836,152 @@ def test_list_sessions_filters_sub():
     sessions = resp.json()
     assert any(s.get("title") == "main-sess" for s in sessions)
     assert not any(s.get("title") == "sub-sess" for s in sessions)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2026-08-15(M2 P2-20): 任务级暂停/恢复 —— status=paused + 协作式挂起
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_migration_status_check_includes_paused():
+    """migrate_all 幂等后 subagents.status CHECK 含 'paused'。"""
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            await migrations.migrate_all(conn)
+            # 插入 paused 行不违反 CHECK(老部署扩容后成立)
+            parent = await _new_parent_session(conn)
+            sid = await conn.fetchval(
+                "INSERT INTO subagents (session_id, parent_turn, parent_task, "
+                "prompt, model_id, status) "
+                "VALUES ($1, 1, 't1', 'p', 'mock', 'paused') RETURNING id",
+                parent,
+            )
+            st = await conn.fetchval(
+                "SELECT status FROM subagents WHERE id=$1", sid
+            )
+            assert st == "paused"
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_maybe_pause_blocks_until_resume():
+    """协作式挂起: paused 时 _maybe_pause 挂起, 恢复 running 后返回。"""
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            parent = await _new_parent_session(conn)
+            sid = await _insert_pending_subagent(conn, parent)
+            adapter = _MockAdapter(
+                responses=[ChatResult(content="ok", used_provider="mock")]
+            )
+            runner = _make_runner(
+                conn=conn, cfg=_test_cfg(), subagent_id=sid, prompt="p",
+                parent_session_id=parent, parent_turn=1, adapter=adapter,
+            )
+            runner._conn = conn
+            # paused → 挂起(1s 内不返回, 触发 asyncio.TimeoutError)
+            await conn.execute(
+                "UPDATE subagents SET status='paused' WHERE id=$1", sid
+            )
+            try:
+                await asyncio.wait_for(runner._maybe_pause(), timeout=1)
+                raise AssertionError("_maybe_pause should block while paused")
+            except asyncio.TimeoutError:
+                pass
+            # 恢复 running → 返回
+            await conn.execute(
+                "UPDATE subagents SET status='running' WHERE id=$1", sid
+            )
+            await asyncio.wait_for(runner._maybe_pause(), timeout=2)
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_maybe_pause_raises_on_cancelled():
+    """paused 期间被取消 → _maybe_pause 抛 CancelledError(由 run 统一处置)。"""
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            parent = await _new_parent_session(conn)
+            sid = await _insert_pending_subagent(conn, parent)
+            adapter = _MockAdapter(
+                responses=[ChatResult(content="ok", used_provider="mock")]
+            )
+            runner = _make_runner(
+                conn=conn, cfg=_test_cfg(), subagent_id=sid, prompt="p",
+                parent_session_id=parent, parent_turn=1, adapter=adapter,
+            )
+            runner._conn = conn
+            await conn.execute(
+                "UPDATE subagents SET status='cancelled' WHERE id=$1", sid
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await runner._maybe_pause()
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+async def test_pause_resume_admin_endpoints(monkeypatch):
+    """admin 端点: pause(running→paused) / resume(paused→running) / 非法状态 409。
+
+    async 风格 + AsyncClient(ASGITransport): 与既有 HTTP 端点测试同构,
+    避免 Windows 上 TestClient(Proactor loop)与 asyncio.run 连接跨 loop 冲突。
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from private_agent.main import app
+    from private_agent.storage import db as storage_db
+
+    async def _fake_connect(cfg=None):
+        return await asyncpg.connect(TEST_DSN)
+
+    monkeypatch.setattr(storage_db, "connect", _fake_connect)
+    monkeypatch.setattr(db, "connect", _fake_connect)
+
+    conn = await asyncpg.connect(TEST_DSN)
+    try:
+        parent = await _new_parent_session(conn)
+        sid = await _insert_pending_subagent(conn, parent)
+        await conn.execute(
+            "UPDATE subagents SET status='running' WHERE id=$1", sid
+        )
+        sid2 = await conn.fetchval(
+            "INSERT INTO subagents (session_id, parent_turn, parent_task, "
+            "prompt, model_id, status) "
+            "VALUES ($1, 1, 't2', 'p2', 'mock', 'succeeded') RETURNING id",
+            parent,
+        )
+    finally:
+        await conn.close()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        h = {"X-Admin-Token": "test-admin-token"}
+
+        r = await client.post(f"/admin/subagents/{sid}/pause", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "paused"
+
+        r = await client.post(f"/admin/subagents/{sid}/pause", headers=h)
+        assert r.status_code == 409, r.text  # paused 不可再暂停
+
+        r = await client.post(f"/admin/subagents/{sid}/resume", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "running"
+
+        r = await client.post(f"/admin/subagents/{sid2}/pause", headers=h)
+        assert r.status_code == 409, r.text  # 终态不可暂停
+
+        r = await client.post("/admin/subagents/999999/pause", headers=h)
+        assert r.status_code == 404, r.text
