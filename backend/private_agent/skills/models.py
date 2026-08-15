@@ -106,6 +106,11 @@ class SkillManifest(BaseModel):
     # 用户 2026-08-08 确认: reasonix 15 技能本轮全部留空(三场景通用),
     # 机制保留供后续确有需要时按场景分流。
     scene_scope: list[str] = Field(default_factory=list)
+    # 2026-08-15(蒋先生需求): 场景工作区 —— 该场景智能体的产物(文件/
+    # 脚本/输出)默认落在自己的工作区目录。新会话创建时写入
+    # sessions.workspace(ReactLoop 据此路由 file_write/sandbox 等)。
+    # 空 = 使用全局默认 workspace_root。
+    workspace: str = ""
     dependencies: SkillDependencies = Field(default_factory=SkillDependencies)
     permissions: SkillPermissions = Field(default_factory=SkillPermissions)
     prompt_vars: list[str] = Field(default_factory=list)

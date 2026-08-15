@@ -31,14 +31,16 @@ def _mk_tool(name: str, is_kernel: bool = False) -> ToolDef:
 
 
 class TestBuiltinKernelMarkers:
-    def test_eight_kernel_tools(self):
-        """内置 8 个内核工具 is_kernel=True(0.5.1 新增 memory_save)。"""
+    def test_nine_kernel_tools(self):
+        """内置 9 个内核工具 is_kernel=True(0.5.1 新增 memory_save;
+        2026-08-13 新增 system_capabilities 自我认知入口)。"""
         registry = ToolRegistry()
         register_all_builtins(registry)
         kernel = {t.name for t in registry.list_tools() if t.is_kernel}
         assert kernel == {
             "calculator", "code_execution", "datetime", "file_read",
             "file_write", "http_request", "web_search", "memory_save",
+            "system_capabilities",
         }
 
     def test_three_downgraded_tools(self):
@@ -127,5 +129,6 @@ class TestWhitelistUnchanged:
         registry = ToolRegistry()
         register_all_builtins(registry)
         all_tools = registry.list_tools_for_session(None)
-        # 0.5.1: 12 类内置(8 内核 + 4 非内核); Phase 1: 新增 search_lessons
-        assert len(all_tools) == 12
+        # 0.5.1: 12 类内置(8 内核 + 4 非内核); Phase 1: 新增 search_lessons;
+        # 2026-08-13: 新增 system_capabilities(内核) → 13
+        assert len(all_tools) == 13

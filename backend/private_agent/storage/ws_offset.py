@@ -20,35 +20,52 @@ from typing import Any
 import asyncpg
 
 
-async def fetch_react_events_since_turn(
+async def fetch_react_events_since(
     conn: asyncpg.Connection,
     *,
     session_id: int,
     last_turn: int,
+    last_event_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """查询 turn > last_turn 的 react_events,按 (turn, id) 升序返回(蓝图 §2.3 line 449)。
+    """查询补发事件(蓝图 §2.3 line 449 + 0.5.1 A-1 事件级去重)。
 
-    用于客户端断线重连时补发遗漏事件。
+    两种粒度:
+    - last_event_id 提供时(新协议): 查 id > last_event_id —— 事件级精确补发,
+      修复 turn N 中途断线重连时该轮事件全量重放的前端重复(增量锚点单调)。
+    - 否则(旧协议向后兼容): 查 turn > last_turn —— 轮级补发。
 
     Args:
         conn: Postgres 连接。
         session_id: 会话 ID(补发按会话隔离)。
-        last_turn: 客户端最大已接收 turn 值(返回 turn > last_turn 的事件)。
+        last_turn: 客户端最大已接收 turn 值(旧协议, 返回 turn > last_turn 的事件)。
+        last_event_id: 客户端最大已接收事件 id(新协议, 返回 id > last_event_id 的事件)。
 
     Returns:
         事件 dict 列表,每个 dict 含 id/session_id/turn/event_type/payload/created_at 字段。
         payload 解析为 Python 原生 dict(asyncpg JSONB 默认返回 JSON 字符串)。
     """
-    rows = await conn.fetch(
-        """
-        SELECT id, session_id, turn, event_type, payload, created_at
-        FROM react_events
-        WHERE session_id = $1 AND turn > $2
-        ORDER BY turn ASC, id ASC
-        """,
-        session_id,
-        last_turn,
-    )
+    if last_event_id is not None:
+        rows = await conn.fetch(
+            """
+            SELECT id, session_id, turn, event_type, payload, created_at
+            FROM react_events
+            WHERE session_id = $1 AND id > $2
+            ORDER BY id ASC
+            """,
+            session_id,
+            last_event_id,
+        )
+    else:
+        rows = await conn.fetch(
+            """
+            SELECT id, session_id, turn, event_type, payload, created_at
+            FROM react_events
+            WHERE session_id = $1 AND turn > $2
+            ORDER BY turn ASC, id ASC
+            """,
+            session_id,
+            last_turn,
+        )
     return [
         {
             "id": r["id"],
@@ -142,12 +159,11 @@ async def build_replay_messages(
     session_id: int,
     last_turn: int,
     full: bool = False,
+    last_event_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """构造 WS replay 消息序列(蓝图 §2.3 line 449 + M1 服务端权威)。
+    """构造 WS replay 消息序列(蓝图 §2.3 line 449 + M1 服务端权威 + A-1 事件级)。
 
-    优先读 config_runtime 的 ws_offset:{session_id}(服务端权威),
-    effective_offset = max(config_runtime_offset, last_turn),
-    查询 turn > effective_offset 的事件补发。
+    补发粒度: 新协议(last_event_id)按事件 id; 旧协议按 turn。
 
     Args:
         conn: Postgres 连接。
@@ -156,6 +172,8 @@ async def build_replay_messages(
         full: 全量加载(切换历史会话场景)。True 时忽略服务端 ws_offset,
             从 last_turn(客户端传 0)开始拉取, 并把 messages 表的 user 消息
             合并为 user 事件补进事件流(react_events 不存 user 事件)。
+        last_event_id: 客户端最大已接收事件 id(0.5.1 A-1, 事件级去重锚点)。
+            提供时优先于 turn 粒度; user 消息补发按其对应 turn 对齐。
 
     Returns:
         WS 消息 dict 列表:
@@ -164,12 +182,27 @@ async def build_replay_messages(
     """
     if full:
         # 全量: 忽略服务端权威 offset, 客户端 last_turn=0 即从第一轮拉
+        # 0.5.1 A-1: 同时忽略 last_event_id —— 切历史会话全量加载时, 客户端
+        # 已收事件 id 属于其他会话, 跨会话不连续, 按 id 过滤会丢新会话早于
+        # 该 id 的事件(用户消息/事件全部重放, 前端按 event_id 去重兜底)。
         effective_offset = last_turn
+        last_event_id = None
     else:
         config_offset = await get_ws_offset(conn, session_id=session_id)
         effective_offset = max(config_offset, last_turn)
-    events = await fetch_react_events_since_turn(
+    # 事件级补发(user 消息对齐下界: last_event_id 对应事件的 turn)
+    user_offset = effective_offset
+    if last_event_id is not None:
+        row = await conn.fetchrow(
+            "SELECT turn FROM react_events WHERE session_id = $1 AND id = $2",
+            session_id,
+            last_event_id,
+        )
+        if row is not None:
+            user_offset = row["turn"]
+    events = await fetch_react_events_since(
         conn, session_id=session_id, last_turn=effective_offset,
+        last_event_id=last_event_id,
     )
     # 包装为 WS react_event 消息(原始 events 无 type 字段)
     # 2026-08-10 22:00: ① 过滤 tool_confirmation_required —— 历史会话的权限确认
@@ -183,6 +216,9 @@ async def build_replay_messages(
             "turn": e["turn"],
             "event_type": e["event_type"],
             "payload": e["payload"],
+            # 0.5.1 A-1(C-4): 重放事件带 DB id(event_id), 前端据此去重 ——
+            # 与实时推送的 event_id 同源(react_loop._emit_event 回填)
+            "event_id": e["id"],
             "replayed": True,
         }
         for e in events
@@ -199,7 +235,7 @@ async def build_replay_messages(
         ORDER BY id ASC
         """,
         session_id,
-        effective_offset,
+        user_offset,
     )
     user_events = [
         {

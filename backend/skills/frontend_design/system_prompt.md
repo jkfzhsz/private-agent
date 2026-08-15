@@ -72,3 +72,9 @@
 - CDN 限制:沙箱 network 关闭,引入库用 CDN 链接(用户手动下载)
 - 健康边界:不做诊疗结论,强调咨询专业医师
 - 语言:代码注释与回复中文,标识符英文
+
+## 版式增强规范（design-stylist 对齐, 2026-08-15）
+
+- **引用 design-stylist 规范**：极简样式、卡片柔和圆角、低透明度阴影、响应式、可选暗色模式；4 风格预设色板（business-minimal / tech-dark / academic-clean / light-luxury）
+- **资产 vendored**：生成物内嵌图表/样式资产（mermaid.js / chart.js 等）一律本地化，CDN 仅作回退（沙箱默认禁网，实测网络需显式放行）
+- **信息层级**：标题→摘要→正文→注释用间距分割，少用边框；彩色总数 ≤4

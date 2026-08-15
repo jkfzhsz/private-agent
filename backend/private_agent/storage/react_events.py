@@ -37,6 +37,10 @@ _VALID_EVENT_TYPES = frozenset(
         # V1.5 项-1(ADR-012 M4): 子代理可观测事件(stalled/kill/zombie/心跳
         # 故障, 具体类型见 payload.kind)
         "subagent",
+        # 0.5.1 A-1(2026-08-15): 上下文注入审计 —— 凡进入模型视野的注入
+        # (Stable Zone 记忆/KB、hook additionalContext、状态栏、system_capabilities)
+        # 落 context_injected 事件, 实现 DSH "model-visible means logged"。
+        "context_injected",
     }
 )
 

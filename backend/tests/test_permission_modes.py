@@ -241,7 +241,8 @@ class TestConfirmationEventEnrichment:
             ev = collector.events[0]
             assert ev["risk_level"] == "high"  # .env 启发式升 high
             assert ev["mode"] == "default"
-            assert "系统默认" in ev["reason"]
+            # 2026-08-15 通俗化: "系统默认 elevated 权限确认" → 人话说明
+            assert "出于安全" in ev["reason"]
 
         asyncio.run(run())
 
@@ -254,8 +255,9 @@ class TestConfirmationEventEnrichment:
             tool = _tool("http_request", "elevated")
             await pm.check_and_confirm(1, tool, {"url": "https://x.com"}, collector.emit)
             ev = collector.events[0]
-            assert "规则 ask:http_request" in ev["reason"]
+            # 2026-08-15 通俗化: 规则来源保留 source 语义
             assert "skill" in ev["reason"]
+            assert "需要你确认" in ev["reason"]
 
         asyncio.run(run())
 

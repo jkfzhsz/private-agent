@@ -224,13 +224,23 @@ class PermissionManager:
             risk_level = getattr(tool_def, "risk_level", "medium")
         reason = self._explain_reason(tool_def, args)
 
+        # 2026-08-15: 确认卡片人性化(蒋先生反馈"英文+术语看不懂, 授权等于盲签")
+        # display 生成失败兜底为空, 绝不阻塞确认流程
+        try:
+            from private_agent.tools.confirmation_display import humanize_confirmation
+
+            display = humanize_confirmation(tool_def.name, args)
+        except Exception:  # noqa: BLE001
+            display = {"title": tool_def.name, "summary": [], "tool_label": tool_def.name}
+
         await emit_fn(
             {
                 "event_type": "tool_confirmation_required",
                 "confirmation_id": confirmation_id,
                 "tool_name": tool_def.name,
                 "args_summary": self._summarize_args(args),
-                "message": f"Allow tool '{tool_def.name}' to execute?",
+                "message": f"AI 请求: {display['title']}, 是否允许?",
+                "display": display,
                 "mode": self._mode,
                 "risk_level": risk_level,
                 "reason": reason,
@@ -273,24 +283,24 @@ class PermissionManager:
         return outcome
 
     def _explain_reason(self, tool_def, args: dict | None = None) -> str:
-        """生成确认卡片的来源解释(B-8: "该工具为何需要确认")。
+        """生成确认卡片的来源解释(B-8 + 2026-08-15 通俗化: 少术语)。
 
         优先级: 命中规则(session/skill/config) > 默认 safety_level。
         """
         args = args or {}
         for rule in self._rules:
             if rule.action in ("ask", "deny") and rule.matches(tool_def.name, args):
-                return f"规则 {rule.pattern} (来源: {rule.source})"
+                return f"按『{rule.source}』的设定, 这类操作需要你确认"
         level = getattr(tool_def, "safety_level", "none")
         if level == "dangerous":
             return "危险工具默认拦截"
         if level == "elevated":
             if self._mode == "plan":
-                return "plan 模式: 写操作需每次确认"
+                return "当前处于『先计划后执行』模式, 所有写操作都需逐次确认"
             if self._mode == "cautious":
-                return "cautious 模式: 每次确认不缓存"
-            return "系统默认 elevated 权限确认"
-        return f"safety_level={level}"
+                return "当前处于『谨慎』模式, 每次操作都单独确认"
+            return "这类操作会改动你的文件或系统设置, 出于安全默认需要你同意"
+        return f"安全级别: {level}"
 
     def resolve(self, confirmation_id: str, approved: bool) -> bool:
         """WS 收到用户确认后唤醒等待(蓝图 §5.12 用户点击后执行)。

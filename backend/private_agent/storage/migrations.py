@@ -43,9 +43,11 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
             and "tool_loop_detected" in def_text
             # V1.5 项-1(ADR-012 M4): subagent 事件类型(新部署 schema.sql 已含)
             and "subagent" in def_text
+            # 0.5.1 A-1(2026-08-15): context_injected 上下文注入审计
+            and "context_injected" in def_text
         ):
             continue
-        # 旧 CHECK, DROP 后 ADD 新 CHECK(19 种, 含子代理可观测事件)
+        # 旧 CHECK, DROP 后 ADD 新 CHECK(20 种, 含子代理可观测事件 + 注入审计)
         conname = r["conname"]
         await conn.execute(f'ALTER TABLE react_events DROP CONSTRAINT "{conname}"')
         await conn.execute(
@@ -59,7 +61,8 @@ async def migrate_react_events_event_type_check(conn: asyncpg.Connection) -> Non
                 'tool_error', 'delta',
                 'tool_confirmation_required', 'tool_confirmation_result',
                 'tool_loop_detected',
-                'subagent'
+                'subagent',
+                'context_injected'
             ))
             """
         )
@@ -193,6 +196,36 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await _migrate_sessions_kind_monitor(conn)
     # 2026-08-11 Phase 1: skill_lessons 经验沉淀表(双轨进化, 幂等)
     await _migrate_add_skill_lessons(conn)
+    # 2026-08-12 Phase 2: 会话附加技能表(多技能调用 —— 主技能 locked_skill_name
+    # 不变, 附加技能可叠加; 供 _get_system_prompt/_get_frozen_tools 合并注入)
+    await _migrate_add_session_supplementary_skills(conn)
+    # 2026-08-13 类型感知限流: subagents.task_type 列(任务类型标注, 可观测/过滤)
+    await conn.execute(
+        "ALTER TABLE subagents ADD COLUMN IF NOT EXISTS "
+        "task_type VARCHAR(20) NOT NULL DEFAULT 'other'"
+    )
+
+
+async def _migrate_add_session_supplementary_skills(conn: asyncpg.Connection) -> None:
+    """2026-08-12 Phase 2: 新增 session_supplementary_skills 表(多技能叠加)。
+
+    老部署补丁; 新部署 schema.sql 已含完整 DDL。幂等: 表已存在时跳过。
+    """
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_supplementary_skills (
+            id          BIGSERIAL PRIMARY KEY,
+            session_id  BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            skill_name  VARCHAR(100) NOT NULL,
+            added_turn  INT NOT NULL DEFAULT 0,
+            added_by    VARCHAR(20) NOT NULL DEFAULT 'picker',
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(session_id, skill_name)
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sss_session "
+        "ON session_supplementary_skills(session_id)"
+    )
 
 
 async def _migrate_add_skill_lessons(conn: asyncpg.Connection) -> None:

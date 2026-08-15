@@ -76,6 +76,16 @@ def _patch_main(monkeypatch, responses):
     def _fake_build_session_adapter(cfg, model_id=None):
         return _MockAdapter(responses=responses)
 
+    # 2026-08-15 修复(回归): main.py 双链架构(_build_contextual_adapter)
+    # 引入后, 测试未 patch 该函数 → 真实 build_fallback_chain 读测试 cfg
+    # 的 models.providers → KeyError → user_message 处理失败 → 不推
+    # turn_end → ws.receive_json() 无限等待挂死(拖垮全量回归, 2 次)。
+    # 返回同一 mock 实例(text/vision 共享 responses 序列, 避免双链
+    # 各自消费导致第二轮 exhausted)。
+    def _fake_build_contextual_adapter(cfg, model_id=None):
+        mock = _MockAdapter(responses=responses)
+        return mock, mock
+
     async def _fake_get_frozen_tools(cfg, session_id, conn):
         return []
 
@@ -85,6 +95,9 @@ def _patch_main(monkeypatch, responses):
     monkeypatch.setattr(main_mod, "_build_adapter", _fake_build_adapter)
     monkeypatch.setattr(
         main_mod, "_build_session_adapter", _fake_build_session_adapter
+    )
+    monkeypatch.setattr(
+        main_mod, "_build_contextual_adapter", _fake_build_contextual_adapter
     )
     monkeypatch.setattr(main_mod, "_get_frozen_tools", _fake_get_frozen_tools)
     monkeypatch.setattr(main_mod, "_get_tools", _fake_get_tools)
@@ -172,11 +185,17 @@ def test_auto_execute_disabled_single_round(monkeypatch):
             "session_id": sid,
             "content": "普通消息",
         })
+        # 2026-08-15: 有限接收保护 —— 原实现 while not ends 无限等待,
+        # 后端异常不推 turn_end 时挂死整个测试进程(拖垮全量回归)。
         ends = []
-        while not ends:
+        for _ in range(200):
             m = ws.receive_json()
             if m.get("type") == "turn_end":
                 ends.append(m)
+                break
+            if m.get("type") in ("error", "turn_cancelled"):
+                break
+        assert ends, "expect turn_end within 200 WS messages (后端可能未响应)"
         # 之后再等一小段, 确保没有第二轮事件
         assert ends[0]["turn"] == 1
 

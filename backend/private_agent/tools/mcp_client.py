@@ -65,6 +65,12 @@ class MCPClientConfig:
     auth_token: str = ""  # Bearer token(http 模式认证, 请求带 Authorization 头)
     # V1.2-6.2: 额外环境变量(stdio 模式启动子进程时注入, 如 API Key)
     env: dict[str, str] = field(default_factory=dict)
+    # 2026-08-13 类型感知限流(方案 §4.3): 进程级类型并发上限。
+    # MCP client 是进程级单例, 全会话共享同一子进程 —— 类型信号量在此限流,
+    # 防多会话并发打爆共享 stdio 管道 + 外部网站反爬限流。
+    type_limits: dict[str, int] = field(
+        default_factory=lambda: {"search": 1, "analysis": 3, "code": 3, "other": 5}
+    )
 
 
 @dataclass
@@ -129,6 +135,9 @@ class MCPClient:
         # 会交错请求行, server 收到无效 JSON → 无响应 → 超时/空结果
         # (mempalace/searchpin 并行调用失败的根因; http 无共享管道不受影响)
         self._write_lock: asyncio.Lock = asyncio.Lock()
+        # 2026-08-13 类型感知限流(方案 §4.3): 类型信号量(懒初始化)。
+        # search 类全局并发 ≤ type_limits.search(防反爬/通道打爆)。
+        self._type_sems: dict[str, asyncio.Semaphore] = {}
         self._latency_ms: float = 0.0
         # 自动协商状态
         self._negotiated: str | None = None   # 协商后的协议版本(进程内)
@@ -303,21 +312,32 @@ class MCPClient:
         if not self._connected:
             raise RuntimeError(f"MCP server '{self._config.server_id}' not connected")
 
-        if self._config.server_type == "http":
-            return await self._http_post(
-                "tools/call", {"name": name, "arguments": arguments}, name=name
-            )
+        # 2026-08-13 类型感知限流(方案 §4.3): 按工具类型取进程级信号量,
+        # 同类型并发受限(search 全局≤1, 反爬/共享通道保护)。超限排队等待(不取消)。
+        from private_agent.core.task_types import classify_tool
 
-        response = await self._send_request({
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        })
-        # 2026-08-06: server 返回 JSON-RPC error(非 result)时透传 isError,
-        # 避免被 mcp_result_to_text 静默吞成"空结果"(排查 MCP 空返回根因)
-        result = response.get("result", {})
-        if "error" in response and not result:
-            return {"isError": True, "error": response.get("error")}
-        return result
+        typ = classify_tool(name)
+        limits = self._config.type_limits or {}
+        sem = self._type_sems.get(typ)
+        if sem is None:
+            sem = asyncio.Semaphore(int(limits.get(typ, 5)))
+            self._type_sems[typ] = sem
+        async with sem:
+            if self._config.server_type == "http":
+                return await self._http_post(
+                    "tools/call", {"name": name, "arguments": arguments}, name=name
+                )
+
+            response = await self._send_request({
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            })
+            # 2026-08-06: server 返回 JSON-RPC error(非 result)时透传 isError,
+            # 避免被 mcp_result_to_text 静默吞成"空结果"(排查 MCP 空返回根因)
+            result = response.get("result", {})
+            if "error" in response and not result:
+                return {"isError": True, "error": response.get("error")}
+            return result
 
     # --------------------------------------------------------------------------
     # 双探活:ping / health_check / liveness_loop

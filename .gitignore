@@ -74,3 +74,8 @@ kb-model-cache/
 
 # 损坏的 git 仓库备份(2026-08-10 git 故障遗留, 绝不入库)
 .git-broken*/
+
+# 运行时产物(2026-08-15 补充, 不入库)
+.eval_review_queue.json
+backend/${PA_USER_DATA}/
+.claude/artifacts/

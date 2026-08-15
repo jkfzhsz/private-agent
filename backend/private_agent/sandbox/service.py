@@ -96,6 +96,7 @@ class SandboxService:
         session_id: str = "",
         on_output: OnOutput | None = None,
         allow_network: bool = False,
+        workspace_env: str | None = None,
     ) -> SandboxResult:
         """端到端执行代码(AC-8, AC-14)。
 
@@ -108,6 +109,10 @@ class SandboxService:
             allow_network: 0.5.1 技能级联网放行 —— code_execution 工具
                 显式声明(LLM 置 network=true)时绕过沙箱代理隔离; 默认
                 False 保持禁网(disable_network 注入死代理)。
+            workspace_env: 2026-08-15 会话工作区 env 覆盖 —— 非 None 时
+                将子进程环境变量 WORKSPACE 覆盖为会话选定工作区(与
+                ReactLoop 的 cfg.system.workspace_root 一致), 防止模型在
+                沙箱内读取到后端全局目录而把产物写错位置。
 
         Returns:
             SandboxResult 包含执行结果和元数据。
@@ -140,6 +145,10 @@ class SandboxService:
         # 强制 UTF-8 模式 —— Windows 默认 GBK 解码 UTF-8 输出会 UnicodeDecodeError
         safe_env.setdefault("PYTHONUTF8", "1")
         safe_env.setdefault("PYTHONIOENCODING", "utf-8")
+        # 2026-08-15: 会话工作区 env 对齐 —— 覆盖 WORKSPACE 为会话选定
+        # 工作区(有值才覆盖, 避免污染未设定工作区会话的默认行为)
+        if workspace_env:
+            safe_env["WORKSPACE"] = workspace_env
 
         # 5. 执行
         try:

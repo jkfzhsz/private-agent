@@ -88,11 +88,11 @@ class _MockAdapter:
 
 
 class TestBuiltinToolLifecycle:
-    """AC-8 分支①: ToolRegistry + 12 类内置工具 → ReactLoop 调用。"""
+    """AC-8 分支①: ToolRegistry + 13 类内置工具 → ReactLoop 调用。"""
 
-    def test_tool_registry_contains_all_12_builtins(self):
-        """ToolRegistry 注册全部 12 类内置工具(0.5.1 含 memory_save;
-        Phase 1 新增 search_lessons)。"""
+    def test_tool_registry_contains_all_13_builtins(self):
+        """ToolRegistry 注册全部 13 类内置工具(0.5.1 含 memory_save;
+        Phase 1 新增 search_lessons; 2026-08-13 新增 system_capabilities)。"""
         registry = ToolRegistry()
         register_all_builtins(registry)
         tools = registry.list_tools()
@@ -101,8 +101,8 @@ class TestBuiltinToolLifecycle:
             "calculator", "code_execution", "datetime", "file_read",
             "file_write", "http_request", "search_knowledge",
             "web_search", "read_artifact", "memory_search",
-            "memory_save", "search_lessons",
-        }, f"expected 12 builtins, got {names}"
+            "memory_save", "search_lessons", "system_capabilities",
+        }, f"expected 13 builtins, got {names}"
 
     def test_react_loop_calls_builtin_calculator_via_tool_registry(self):
         """ReactLoop 通过 ToolRegistry 加载内置工具并执行 calculator。"""

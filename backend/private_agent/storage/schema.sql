@@ -114,7 +114,9 @@ CREATE TABLE react_events (
         'tool_confirmation_required', 'tool_confirmation_result',
         'tool_loop_detected',
         -- V1.5 项-1(ADR-012 M4): 子代理可观测事件(stalled/kill/zombie/心跳故障)
-        'subagent'
+        'subagent',
+        -- 0.5.1 A-1(2026-08-15): 上下文注入审计(context_injected)
+        'context_injected'
     )),
     payload     JSONB NOT NULL,
     created_at  TIMESTAMPTZ DEFAULT now()
@@ -389,6 +391,8 @@ CREATE TABLE subagents (
     stalled_at        TIMESTAMPTZ,           -- watchdog 判 stale 时写入(grace 宽限起点)
     finished_at       TIMESTAMPTZ,           -- 终态时刻(统一记录)
     restart_attempts  INT NOT NULL DEFAULT 0,
+    -- 2026-08-13 类型感知限流: 任务类型标注(search/analysis/code/other, 可观测/过滤)
+    task_type         VARCHAR(20) NOT NULL DEFAULT 'other',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -430,3 +434,20 @@ CREATE TABLE skill_lessons (
 CREATE INDEX idx_skill_lessons_scope ON skill_lessons(scope) WHERE is_active = TRUE;
 CREATE INDEX idx_skill_lessons_category ON skill_lessons(lesson_category, scope) WHERE is_active = TRUE;
 CREATE INDEX idx_skill_lessons_created ON skill_lessons(created_at DESC);
+
+-- ==============================================================================
+-- 2026-08-12 Phase 2: 会话附加技能表(多技能调用)
+--   主技能由 sessions.locked_skill_name 锁定; 附加技能可叠加(多选/斜杠召唤),
+--   供 _get_system_prompt / _get_frozen_tools 合并注入, 互不冲突。
+-- ==============================================================================
+CREATE TABLE session_supplementary_skills (
+    id          BIGSERIAL PRIMARY KEY,
+    session_id  BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    skill_name  VARCHAR(100) NOT NULL,
+    added_turn  INT NOT NULL DEFAULT 0,          -- 挂载时的轮次(/召唤)或 0(弹层选择)
+    added_by    VARCHAR(20) NOT NULL DEFAULT 'picker',  -- slash | picker
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_sss_session_skill UNIQUE (session_id, skill_name)
+);
+
+CREATE INDEX idx_sss_session ON session_supplementary_skills(session_id);

@@ -413,8 +413,10 @@ def test_delegate_parallel_two_subtasks():
             result = await asyncio.wait_for(
                 tool.handler({
                     "subtasks": [
+                        # 2026-08-13 类型感知限流: 同类型只开 1 个 → 用不同
+                        # 类型(search + analysis)验证并行, 避免触发同轮去重
                         {"id": "t1", "prompt": "调研 A"},
-                        {"id": "t2", "prompt": "调研 B"},
+                        {"id": "t2", "prompt": "分析 B 的数据特征", "type": "analysis"},
                     ]
                 }),
                 timeout=45,

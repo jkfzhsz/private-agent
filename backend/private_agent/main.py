@@ -310,6 +310,23 @@ def _build_hook_runner(cfg):
     return HookRunner(hooks=configs, mcp_call=mcp_call)
 
 
+async def _get_supplementary_skill_names(conn, session_id: int) -> list[str]:
+    """读取会话附加技能名列表(2026-08-12 Phase 2 多技能叠加)。"""
+    rows = await conn.fetch(
+        "SELECT skill_name FROM session_supplementary_skills "
+        "WHERE session_id = $1 ORDER BY id",
+        session_id,
+    )
+    return [r["skill_name"] for r in rows]
+
+
+# 跨场景基础记忆工具: 不受 skill 白名单过滤(始终可用)。
+# 2026-08-13 修复: memory_save 因不在各 skill.yaml 白名单被过滤, 用户反馈
+# "工具列表没有 memory_save"。记忆写入/检索是跨场景基础能力(与 file_read/
+# file_write 同级), 应始终可用 —— 此处作为白名单强约束的明确例外 union 豁免。
+_ALWAYS_AVAILABLE_TOOLS = {"memory_save", "memory_search", "system_capabilities"}
+
+
 async def _get_frozen_tools(cfg, session_id: int, conn):
     """内置工具按 skill 白名单过滤(与 activate_skill 完全同源)。
 
@@ -318,6 +335,7 @@ async def _get_frozen_tools(cfg, session_id: int, conn):
 
     - session 未 activate → 全部内置工具
     - session 已 activate → skill manifest.dependencies.tools 白名单过滤(AC-3)
+    - 2026-08-12 Phase 2: 附加技能工具白名单取并集(主技能 ∪ 附加技能)
     """
     from private_agent.skills.loader import SkillLoader
     from private_agent.tools.builtins import register_all_builtins
@@ -331,12 +349,36 @@ async def _get_frozen_tools(cfg, session_id: int, conn):
         session_id,
     )
     if not locked_skill:
-        return registry.list_tools()
+        # 未激活主技能: 附加技能单独存在时仅附加技能白名单
+        supp = await _get_supplementary_skill_names(conn, session_id)
+        if not supp:
+            return registry.list_tools()
+        whitelist: set[str] = set()
+        loader = SkillLoader.from_cfg(cfg)
+        for sname in supp:
+            try:
+                skill = await loader.load(sname, conn)
+                whitelist.update(
+                    t.name for t in skill.manifest.dependencies.tools if t.enabled
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        whitelist |= _ALWAYS_AVAILABLE_TOOLS
+        return registry.list_tools_for_session(sorted(whitelist))
 
     loader = SkillLoader.from_cfg(cfg)
     skill = await loader.load(locked_skill, conn)
-    whitelist = [t.name for t in skill.manifest.dependencies.tools if t.enabled]
-    return registry.list_tools_for_session(whitelist)
+    whitelist = {t.name for t in skill.manifest.dependencies.tools if t.enabled}
+    # 2026-08-12 Phase 2: 附加技能白名单并集
+    supp = await _get_supplementary_skill_names(conn, session_id)
+    for sname in supp:
+        try:
+            s = await loader.load(sname, conn)
+            whitelist.update(t.name for t in s.manifest.dependencies.tools if t.enabled)
+        except Exception:  # noqa: BLE001
+            continue
+    whitelist |= _ALWAYS_AVAILABLE_TOOLS
+    return registry.list_tools_for_session(sorted(whitelist))
 
 
 async def _get_tools(cfg, session_id: int, conn):
@@ -440,7 +482,10 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         "SELECT kind FROM sessions WHERE id = $1", session_id
     )
     if session_kind == "monitor":
-        base_prompt = _monitor_system_prompt(cfg, session_id, conn)
+        # 2026-08-13 fix: _monitor_system_prompt 是 async, 此前缺 await →
+        # base_prompt 变成 coroutine repr, monitor 会话(无涯)系统提示词损坏
+        # (session-35 导出可见 "<coroutine object _monitor_system_prompt>")
+        base_prompt = await _monitor_system_prompt(cfg, session_id, conn)
     elif not locked_skill:
         base_prompt = "You are a helpful assistant."
     else:
@@ -456,6 +501,33 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         base_prompt = await mgr.build_system_prompt(
             skill, locked_skill, session_id, conn
         )
+
+    # 2026-08-12 Phase 2: 附加技能 system_prompt 合并(多技能叠加)。
+    # 只注入精简段(核心指令 + 工具说明), 不注入完整模板/少样本, 防 prompt 过长。
+    supp_names = await _get_supplementary_skill_names(conn, session_id)
+    if supp_names:
+        loader = SkillLoader.from_cfg(cfg)
+        sections: list[str] = []
+        for sname in supp_names:
+            try:
+                s = await loader.load(sname, conn)
+                display = (
+                    s.manifest.display_name or s.manifest.scene_name or s.name
+                )
+                prompt = s.system_prompt.strip()
+                # 精简: 取前 1200 字符作为核心指令(技能自身模板变量未替换,
+                # 附加技能通常无需会话级变量)
+                snippet = prompt[:1200]
+                sections.append(
+                    f"### 附加技能「{display}」({s.name})\n{snippet}"
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        if sections:
+            base_prompt += (
+                "\n\n---\n\n# 附加技能(按需使用以下能力, 与主技能互不冲突)\n\n"
+                + "\n\n".join(sections)
+            )
 
     # V2 P2: MCP 工具速查指南(读已装配的 tools cache, 不重复连接)
     # 项目优化(Hermes SOUL.md 借鉴): 身份段置于 system prompt 最前
@@ -562,10 +634,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 await ws.send_json({"type": "pong"})
             elif msg_type == "replay":
                 # ws_offset 补发(蓝图 §2.3 line 449)
+                # 0.5.1 A-1(C-4 事件级去重): 客户端可带 last_event_id(已收
+                # 最大事件 id), 后端按 id 精确补发; 未提供则回退 turn 粒度。
                 try:
                     session_id = int(msg["session_id"])
                     last_turn = int(msg.get("last_turn", 0))
                     full = bool(msg.get("full", False))
+                    raw_event_id = msg.get("last_event_id")
+                    last_event_id = int(raw_event_id) if raw_event_id is not None else None
                 except (KeyError, ValueError, TypeError):
                     await ws.send_json({
                         "type": "error",
@@ -585,7 +661,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     try:
                         messages = await ws_offset.build_replay_messages(
                             conn, session_id=session_id, last_turn=last_turn,
-                            full=full,
+                            full=full, last_event_id=last_event_id,
                         )
                     finally:
                         await conn.close()
@@ -659,14 +735,21 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 # V2 P1(B2 修复): create_task 异步执行 —— run_turn 阻塞期间
                 # 主循环仍可接收 tool_confirmation 等消息(权限确认链路前置条件)
                 # V1.3-7.2: 透传可选 auto_execute/max_rounds(会话级覆盖)
+                # 2026-08-12 Phase 2: 透传 supplementary_skills(/召唤的附加技能)
                 _auto = msg.get("auto_execute")
                 _rounds = msg.get("max_rounds")
+                _supp = msg.get("supplementary_skills")
+                if _supp is not None and not isinstance(_supp, list):
+                    _supp = None
                 _spawn_user_message_task(
                     ws,
                     session_id,
                     content,
                     bool(_auto) if _auto is not None else None,
                     int(_rounds) if _rounds is not None else None,
+                    supplementary_skills=(
+                        [str(s) for s in _supp if str(s)] if _supp else None
+                    ),
                 )
             elif msg_type == "regenerate":
                 # V1.1-3.3 消息重生成: 按 turn 重放该轮 user 消息
@@ -888,6 +971,7 @@ def _spawn_user_message_task(
     auto_execute: bool | None = None,
     max_rounds: int | None = None,
     resume: bool = False,
+    supplementary_skills: list[str] | None = None,
 ) -> asyncio.Task:
     """V1.1-3.3: 用户消息/重生成共用的任务注册(create_task + task 集合管理)。
 
@@ -896,10 +980,12 @@ def _spawn_user_message_task(
     V1.3-7.2: 透传 auto_execute/max_rounds(会话级自动连续执行覆盖)。
     V1.5 项-4: resume=True 时以断点恢复模式执行(查 checkpoint → 回滚残留 →
     原地续跑中断轮)。
+    2026-08-12 Phase 2: supplementary_skills=/召唤的附加技能, 先挂载后执行。
     """
     task = asyncio.create_task(
         _handle_user_message(
-            ws, session_id, content, auto_execute, max_rounds, resume
+            ws, session_id, content, auto_execute, max_rounds, resume,
+            supplementary_skills,
         )
     )
     _session_tasks.setdefault(session_id, set()).add(task)
@@ -922,6 +1008,7 @@ async def _handle_user_message(
     auto_execute: bool | None = None,
     max_rounds: int | None = None,
     resume: bool = False,
+    supplementary_skills: list[str] | None = None,
 ) -> None:
     """AC-1: 用户消息触发 ReAct 循环(蓝图 §2.4/§2.6)。
 
@@ -964,6 +1051,34 @@ async def _handle_user_message(
                     "INSERT INTO sessions (id) VALUES ($1)",
                     session_id,
                 )
+            # 2026-08-12 Phase 2: /召唤的附加技能 → 挂载到会话(幂等, 不改变
+            # locked_skill_name)。挂载后 system_prompt/工具白名单自动合并。
+            if supplementary_skills:
+                for sname in supplementary_skills:
+                    if not sname or sname == "null":
+                        continue
+                    try:
+                        await conn.execute(
+                            "INSERT INTO session_supplementary_skills "
+                            "(session_id, skill_name, added_by) VALUES ($1, $2, 'slash') "
+                            "ON CONFLICT (session_id, skill_name) DO NOTHING",
+                            session_id, sname,
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
+            # 会话工作区(画地为牢): 用户选定目录 > 默认 workspace_root。
+            # 2026-08-15 修复: 覆盖必须提前到 system_prompt 构建(下方
+            # _get_system_prompt/ContextManager)之前 —— 原逻辑放在 ReactLoop
+            # 构造前才覆盖, 导致 system prompt 的运行时约定告诉模型全局
+            # workspace_root(backend), 而 file_read 校验用会话 workspace,
+            # 两处不一致 → 模型把产物写到 backend/outputs(清和验收复现:
+            # .eval_review_queue.json 落 qinghe 但产物落 backend)。
+            session_workspace = await conn.fetchval(
+                "SELECT workspace FROM sessions WHERE id = $1", session_id
+            )
+            if session_workspace:
+                cfg = {**cfg, "system": {**cfg.get("system", {}),
+                                          "workspace_root": session_workspace}}
             # V1.5 项-4: 断点恢复前置处理(必须在 reload_from_db 之前清理
             # 中断轮残留, 否则内存上下文会加载半轮消息)
             # 流程: 读最新 checkpoint → 回滚中断轮(清 assistant/tool 残留 +
@@ -1191,13 +1306,6 @@ async def _handle_user_message(
                         }
             except Exception:  # noqa: BLE001
                 pass  # skill 参数注入失败不影响主流程
-            # 会话工作区(画地为牢): 用户选定目录 > 默认 workspace_root
-            session_workspace = await conn.fetchval(
-                "SELECT workspace FROM sessions WHERE id = $1", session_id
-            )
-            if session_workspace:
-                cfg = {**cfg, "system": {**cfg.get("system", {}),
-                                          "workspace_root": session_workspace}}
             # Phase 1/3(2026-08-11): 反思引擎 + 失败案例采集器装配
             # 反思引擎: config evolution.reflection.enabled 门控(默认开)
             # 失败采集器: ReviewQueueRepo(JSON 文件) + OnlineFailureCollector

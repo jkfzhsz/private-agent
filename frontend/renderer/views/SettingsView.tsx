@@ -108,6 +108,9 @@ const AGENT_NAME_ROWS = [
 function AgentNameSection(): JSX.Element {
   const [mainName, setMainName] = useState<string>("私人智能体");
   const [sceneNames, setSceneNames] = useState<Record<string, string>>({});
+  // 2026-08-15(蒋先生需求): 场景工作区 —— 每个场景智能体的产物
+  // 默认落在自己的工作区目录(空=全局默认 workspace_root)
+  const [sceneWorkspaces, setSceneWorkspaces] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -127,12 +130,17 @@ function AgentNameSection(): JSX.Element {
       if (skillsResp.ok) {
         const list = await skillsResp.json();
         const names: Record<string, string> = {};
+        const workspaces: Record<string, string> = {};
         for (const s of list ?? []) {
           if (typeof s.name === "string" && s.display_name) {
             names[s.name] = s.display_name;
           }
+          if (typeof s.name === "string" && typeof s.workspace === "string") {
+            workspaces[s.name] = s.workspace;
+          }
         }
         setSceneNames(names);
+        setSceneWorkspaces(workspaces);
       }
     } catch {
       /* 读取失败保留默认 */
@@ -160,17 +168,19 @@ function AgentNameSection(): JSX.Element {
     }
   };
 
-  const saveScene = async (name: string, value: string): Promise<void> => {
+  const saveScene = async (name: string, value: string, wsValue: string): Promise<void> => {
     const trimmed = value.trim();
+    const wsTrimmed = wsValue.trim();
     try {
       const resp = await adminFetch(`${API_BASE}/skills/${name}/meta`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ display_name: trimmed }),
+        body: JSON.stringify({ display_name: trimmed, workspace: wsTrimmed }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       setSceneNames((prev) => ({ ...prev, [name]: trimmed }));
-      setMsg(`「${AGENT_NAME_ROWS.find((r) => r.key === name)?.label ?? name}」名称已保存`);
+      setSceneWorkspaces((prev) => ({ ...prev, [name]: wsTrimmed }));
+      setMsg(`「${AGENT_NAME_ROWS.find((r) => r.key === name)?.label ?? name}」已保存`);
     } catch (e) {
       setMsg(`保存失败: ${String(e)}`);
     }
@@ -179,7 +189,7 @@ function AgentNameSection(): JSX.Element {
   return (
     <CollapsibleSection
       title="智能体名称配置"
-      subtitle="主智能体 + 三场景智能体名称统一管理(标识符不变, 仅显示名)"
+      subtitle="主智能体 + 三场景智能体名称与场景工作区管理(标识符不变, 仅显示名与工作目录)"
       count={4}
     >
       {loading ? (
@@ -189,44 +199,116 @@ function AgentNameSection(): JSX.Element {
           {AGENT_NAME_ROWS.map((row) => {
             const isMain = row.key === "main";
             const value = isMain ? mainName : (sceneNames[row.key] ?? row.sub.split(" (")[0]);
+            const wsValue = isMain ? "" : (sceneWorkspaces[row.key] ?? "");
+            // 2026-08-15(蒋先生反馈): 每行改两行式(名称行 / 工作区行),
+            // 避免单行 4 元素(名称+工作区+保存)在窄窗口撑出画面。
             return (
-              <div key={row.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ width: 130, flexShrink: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{row.label}</div>
-                  <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{row.sub}</div>
+              <div
+                key={row.key}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                  padding: 8,
+                  borderRadius: 8,
+                  background: "var(--panel-bg)",
+                  border: "1px solid rgba(148,163,184,0.12)",
+                }}
+              >
+                {/* 第一行: 名称 + 保存 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 120, flexShrink: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{row.label}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{row.sub}</div>
+                  </div>
+                  <input
+                    value={value}
+                    onChange={(e) => {
+                      if (isMain) setMainName(e.target.value);
+                      else setSceneNames((prev) => ({ ...prev, [row.key]: e.target.value }));
+                    }}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      padding: "6px 10px",
+                      borderRadius: 6,
+                      border: "1px solid rgba(148,163,184,0.3)",
+                      fontSize: 12,
+                      background: "var(--panel-bg)",
+                      color: "var(--text-primary)",
+                    }}
+                  />
+                  <button
+                    onClick={() => (isMain ? void saveMain() : void saveScene(row.key, value, wsValue))}
+                    style={{
+                      fontSize: 12,
+                      padding: "6px 14px",
+                      borderRadius: 6,
+                      border: "1px solid var(--border-strong)",
+                      background: "var(--button-ghost-bg)",
+                      color: "var(--text-primary)",
+                      cursor: "pointer",
+                      flexShrink: 0,
+                    }}
+                  >
+                    保存
+                  </button>
                 </div>
-                <input
-                  value={value}
-                  onChange={(e) => {
-                    if (isMain) setMainName(e.target.value);
-                    else setSceneNames((prev) => ({ ...prev, [row.key]: e.target.value }));
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: "6px 10px",
-                    borderRadius: 6,
-                    border: "1px solid rgba(148,163,184,0.3)",
-                    fontSize: 12,
-                    background: "var(--panel-bg)",
-                  }}
-                />
-                <button
-                  onClick={() => (isMain ? void saveMain() : void saveScene(row.key, value))}
-                  style={{
-                    fontSize: 12,
-                    padding: "6px 14px",
-                    borderRadius: 6,
-                    border: "1px solid var(--border-strong)",
-                    background: "var(--button-ghost-bg)",
-                    color: "var(--text-primary)",
-                    cursor: "pointer",
-                  }}
-                >
-                  保存
-                </button>
+                {/* 2026-08-15(蒋先生需求): 场景工作区 —— 第二行: 输入 + 浏览选择 */}
+                {!isMain && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, paddingLeft: 130 }}>
+                    <input
+                      value={wsValue}
+                      onChange={(e) =>
+                        setSceneWorkspaces((prev) => ({ ...prev, [row.key]: e.target.value }))
+                      }
+                      placeholder="工作区目录(空=全局默认)"
+                      title="该场景智能体的文件/脚本/输出默认落在此目录"
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        padding: "6px 10px",
+                        borderRadius: 6,
+                        border: "1px solid rgba(148,163,184,0.3)",
+                        fontSize: 12,
+                        background: "var(--panel-bg)",
+                        color: wsValue ? "var(--text-primary)" : "var(--text-tertiary)",
+                      }}
+                    />
+                    <button
+                      onClick={async () => {
+                        const dir = await window.pa?.pickDirectory?.();
+                        if (dir) {
+                          setSceneWorkspaces((prev) => ({ ...prev, [row.key]: dir }));
+                        }
+                      }}
+                      title={
+                        window.pa?.pickDirectory
+                          ? "打开系统目录选择器"
+                          : "当前环境不支持目录选择器, 请手动输入路径"
+                      }
+                      style={{
+                        fontSize: 12,
+                        padding: "6px 12px",
+                        borderRadius: 6,
+                        border: "1px solid var(--border-strong)",
+                        background: "var(--button-ghost-bg)",
+                        color: "var(--text-primary)",
+                        cursor: window.pa?.pickDirectory ? "pointer" : "not-allowed",
+                        flexShrink: 0,
+                        opacity: window.pa?.pickDirectory ? 1 : 0.5,
+                      }}
+                    >
+                      浏览…
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })}
+          <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+            场景工作区: 该场景智能体新建会话时自动使用, 产物(文件/脚本/输出)落各自目录; 留空则使用全局默认工作区。
+          </div>
           {msg && (
             <div style={{ fontSize: 12, color: msg.startsWith("保存失败") ? "#dc2626" : "#059669" }}>
               {msg}
@@ -679,7 +761,8 @@ function DatabaseSection(): JSX.Element {
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
         PostgreSQL 连接配置(打包版首次使用必配; 密码仅写入本地用户配置, 不回显)
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+      {/* 2026-08-15(蒋先生反馈): 固定 4 列在窄窗口溢出 → auto-fit 自动换行 */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, marginBottom: 8 }}>
         {[
           { label: "主机", value: host, set: setHost, ph: "127.0.0.1" },
           { label: "端口", value: port, set: setPort, ph: "5432" },
@@ -702,7 +785,8 @@ function DatabaseSection(): JSX.Element {
         ))}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
-        <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+        {/* 2026-08-15: minWidth 0 防 input intrinsic 宽度撑破 */}
+        <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 0 }}>
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
             密码
             {/* 2026-08-06: 密码配置状态徽标(空框不再误导) */}
@@ -1001,6 +1085,21 @@ function SkillsSection(): JSX.Element {
   // 2026-08-04: zip 一键上传
   const [zipBusy, setZipBusy] = useState(false);
   const [zipMsg, setZipMsg] = useState<string | null>(null);
+  // 2026-08-12 Phase1: 上传结果结构化展示(安装卡片/失败原因)
+  const [zipResult, setZipResult] = useState<{
+    ok: boolean;
+    mode?: string;
+    installed?: {
+      name: string;
+      display_name?: string;
+      description?: string;
+      scenario?: string;
+      tools?: string[];
+      files?: number;
+    }[];
+    failed?: { name: string; errors: { field: string; reason: string }[] }[];
+    note?: string;
+  } | null>(null);
   const zipRef = useRef<HTMLInputElement | null>(null);
   // V1.2-6.1: 提示词编辑器
   const [promptEditor, setPromptEditor] = useState<{
@@ -1116,6 +1215,7 @@ function SkillsSection(): JSX.Element {
       return;
     }
     setZipBusy(true);
+    setZipResult(null);
     setZipMsg("上传中...");
     try {
       const fd = new FormData();
@@ -1129,11 +1229,36 @@ function SkillsSection(): JSX.Element {
         const detail = data.detail ?? data.error ?? `HTTP ${resp.status}`;
         throw new Error(String(detail));
       }
-      // 2026-08-04: 支持集合包/素材库自动技能化返回(skills 数组)
-      if (Array.isArray(data.skills) && data.skills.length > 0) {
+      // 2026-08-12 Phase1: 增强返回结构(ok/installed/failed) — 安装卡片 + 失败原因
+      if (data && typeof data === "object" && "installed" in data) {
+        setZipResult(data);
+        const okCount = Array.isArray(data.installed) ? data.installed.length : 0;
+        const failCount = Array.isArray(data.failed) ? data.failed.length : 0;
+        if (okCount > 0 && failCount === 0) {
+          setZipMsg(`✅ 成功安装 ${okCount} 个技能`);
+        } else if (okCount > 0) {
+          setZipMsg(`⚠️ 安装 ${okCount} 个, ${failCount} 个失败(详见下方)`);
+        } else {
+          setZipMsg(`❌ ${failCount} 个技能全部校验失败(详见下方)`);
+        }
+      } else if (Array.isArray(data.skills) && data.skills.length > 0) {
+        // 兼容旧返回(素材库自动技能化 skills 数组)
+        setZipResult({
+          ok: true,
+          mode: data.mode,
+          installed: data.skills.map((s: { name: string }) => ({ name: s.name })),
+          failed: [],
+        });
         const names = data.skills.map((s: { name: string }) => s.name).join(", ");
         setZipMsg(`✅ 已导入 ${data.skills.length} 个技能: ${names}`);
       } else {
+        // 兼容旧返回(单技能 {name,path,files})
+        setZipResult({
+          ok: true,
+          mode: "single",
+          installed: [{ name: data.name, display_name: data.name, files: data.files }],
+          failed: [],
+        });
         setZipMsg(`✅ 技能「${data.name}」上传成功(${data.files} 个文件)`);
       }
       await load();
@@ -1370,6 +1495,70 @@ function SkillsSection(): JSX.Element {
               </span>
             )}
           </div>
+          {/* 2026-08-12 Phase1: 上传结果卡片(安装技能信息 / 失败原因) */}
+          {zipResult && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
+              {zipResult.installed && zipResult.installed.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {zipResult.installed.map((s) => (
+                    <div
+                      key={s.name}
+                      style={{
+                        padding: "12px 14px", borderRadius: 10,
+                        background: "rgba(5,150,105,0.07)", border: "1px solid rgba(5,150,105,0.3)",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 14, fontWeight: 700 }}>✅ {s.display_name || s.name}</span>
+                        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                          {s.name} · {s.files ?? 0} 个文件
+                        </span>
+                      </div>
+                      {s.description && (
+                        <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 4 }}>
+                          简介: {s.description}
+                        </div>
+                      )}
+                      {s.scenario && (
+                        <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2 }}>
+                          适用场景: {s.scenario}
+                        </div>
+                      )}
+                      {Array.isArray(s.tools) && s.tools.length > 0 && (
+                        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+                          工具: {s.tools.join(", ")}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {zipResult.failed && zipResult.failed.length > 0 && (
+                <div
+                  style={{
+                    padding: "12px 14px", borderRadius: 10,
+                    background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.3)",
+                  }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#d32f2f", marginBottom: 6 }}>
+                    ❌ {zipResult.failed.length} 个技能安装失败
+                  </div>
+                  {zipResult.failed.map((f) => (
+                    <div key={f.name} style={{ marginBottom: 6 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
+                        技能「{f.name}」
+                      </div>
+                      {f.errors.map((er) => (
+                        <div key={er.field} style={{ fontSize: 12, color: "#d32f2f", marginLeft: 8 }}>
+                          • {er.field}: {er.reason}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 上传新技能(高级: 手动填写) */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1840,7 +2029,7 @@ function ProviderRow({
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               placeholder="https://..."
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1849,7 +2038,7 @@ function ProviderRow({
               value={modelName}
               onChange={(e) => setModelName(e.target.value)}
               placeholder="model-name"
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1859,7 +2048,7 @@ function ProviderRow({
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={provider.api_key_configured ? "已配置(留空不修改)" : "输入新 Key"}
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2353,7 +2542,8 @@ function McpRow({
   };
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "var(--panel-bg)" }}>
+    // 2026-08-15(蒋先生反馈): 单行 9 元素窄窗口溢出 → flexWrap 换行
+    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "var(--panel-bg)" }}>
       <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{server.id}</span>
       <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--info-bg)", color: "var(--info-text)", flexShrink: 0 }}>
         {server.type}
@@ -2660,7 +2850,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="server 名称(唯一)"
-          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+          style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
         />
         <div style={{ display: "flex", gap: 4 }}>
           {(["http", "stdio"] as const).map((t) => (
@@ -2687,7 +2877,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="http://127.0.0.1:port/mcp"
-            style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+            style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
           />
         </div>
       ) : (
@@ -2698,7 +2888,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               placeholder="npx"
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2707,7 +2897,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
               value={args}
               onChange={(e) => setArgs(e.target.value)}
               placeholder="空格分隔, 如 -y @modelcontextprotocol/server-filesystem C:/tmp"
-              style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
           </div>
         </>
@@ -2719,7 +2909,7 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           value={authToken}
           onChange={(e) => setAuthToken(e.target.value)}
           placeholder="可选, 服务器要求 Bearer 认证时填写(AES 加密存储)"
-          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+          style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
         />
       </div>
       {/* V1.2-6.2: 环境变量配置(stdio 子进程注入) */}
@@ -3753,10 +3943,13 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
         图片文件原样保存、绝不裁剪; 缩放/移动/旋转只改变背景中显示的图片区域,
         超出背景容器的部分依然存在只是不显示
       </div>
-      <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+      {/* 2026-08-15(蒋先生反馈): 240px 预览图 + minWidth 260 控件列同行,
+          窄窗口溢出 → flexWrap 换行 + 预览图 maxWidth 100% */}
+      <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div
           style={{
             width: 240,
+            maxWidth: "100%",
             height: 136,
             borderRadius: "var(--radius-sm)",
             overflow: "hidden",

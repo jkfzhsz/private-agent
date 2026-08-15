@@ -6,6 +6,11 @@ Source: plan/m0-implementation step 3 (蓝图 §2.3 line 445-450 + §9.6 step3)
 - config_runtime 表存储 ws_offset:{session_id} = 客户端最大已接收 turn 值
 - 服务端推送事件时携带 turn 字段
 - 重连时客户端发送上次 offset,服务端从 react_events 表查询 turn > offset 的事件补发
+
+0.5.1 A-1(C-4 事件级去重): 新增 last_event_id 事件级增量锚点 ——
+- fetch_react_events_since(last_event_id): 查 id > last_event_id(事件级精确补发)
+- build_replay_messages(last_event_id): 重放事件带 event_id(与实时推送同源),
+  前端据此去重(修复 turn N 中途断线重连时该轮事件全量重放的重复渲染)
 """
 import asyncio
 import os
@@ -57,7 +62,7 @@ def test_fetch_react_events_since_turn_returns_events_after_offset():
                 "INSERT INTO sessions DEFAULT VALUES RETURNING id"
             )
             await _seed_three_events(conn, session_id)
-            return await ws_offset.fetch_react_events_since_turn(
+            return await ws_offset.fetch_react_events_since(
                 conn, session_id=session_id, last_turn=1,
             )
         finally:
@@ -80,7 +85,7 @@ def test_fetch_react_events_since_turn_returns_all_when_offset_zero():
                 "INSERT INTO sessions DEFAULT VALUES RETURNING id"
             )
             await _seed_three_events(conn, session_id)
-            return await ws_offset.fetch_react_events_since_turn(
+            return await ws_offset.fetch_react_events_since(
                 conn, session_id=session_id, last_turn=0,
             )
         finally:
@@ -102,7 +107,7 @@ def test_fetch_react_events_since_turn_returns_empty_when_offset_at_max():
                 "INSERT INTO sessions DEFAULT VALUES RETURNING id"
             )
             await _seed_three_events(conn, session_id)
-            return await ws_offset.fetch_react_events_since_turn(
+            return await ws_offset.fetch_react_events_since(
                 conn, session_id=session_id, last_turn=3,
             )
         finally:
@@ -128,7 +133,7 @@ def test_fetch_react_events_since_turn_isolates_by_session():
             await _seed_three_events(conn, sid_a)
             await _seed_three_events(conn, sid_b)
             # 查 sid_a 的补发,不应返回 sid_b 的
-            events = await ws_offset.fetch_react_events_since_turn(
+            events = await ws_offset.fetch_react_events_since(
                 conn, session_id=sid_a, last_turn=0,
             )
             return events, sid_a
@@ -153,7 +158,7 @@ def test_fetch_react_events_since_turn_includes_required_fields():
                 "INSERT INTO sessions DEFAULT VALUES RETURNING id"
             )
             await _seed_three_events(conn, session_id)
-            events = await ws_offset.fetch_react_events_since_turn(
+            events = await ws_offset.fetch_react_events_since(
                 conn, session_id=session_id, last_turn=0,
             )
             return events[0]
@@ -427,3 +432,150 @@ def test_build_replay_messages_filters_confirmation_and_marks_replayed():
     replay_evts = [m for m in msgs if m["type"] == "react_event"]
     assert len(replay_evts) == 3
     assert all(m["replayed"] is True for m in replay_evts)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 0.5.1 A-1(C-4 事件级去重): fetch_react_events_since 按 event_id 增量补发
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def _seed_same_turn_events(conn: "asyncpg.Connection", session_id: int) -> None:
+    """同一 turn 内插入多条事件(模拟 turn N 中途断线场景)。"""
+    for event_type in ["thinking", "delta", "delta", "tool_call", "final"]:
+        await insert_react_event(
+            conn, session_id=session_id, turn=1,
+            event_type=event_type, payload={"turn": 1},
+        )
+
+
+def test_fetch_react_events_since_by_event_id_returns_strict_superset():
+    """last_event_id 提供时: 返回 id > last_event_id 的事件(事件级精确补发)。
+
+    回归 C-4 缺口②: turn 粒度补发(turn > offset)在 turn N 中途断线时
+    要么全量重放该轮(前端重复渲染), 要么 offset 已推进后永久丢失。
+    事件级补发(id 锚点单调)精确返回客户端缺失的事件。
+    """
+    _setup_schema()
+
+    async def _run() -> tuple[list[dict], list[int]]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions DEFAULT VALUES RETURNING id"
+            )
+            await _seed_same_turn_events(conn, session_id)
+            # 取前两条的 id(客户端已收 thinking + 第 1 条 delta)
+            ids = [
+                r["id"] for r in await conn.fetch(
+                    "SELECT id FROM react_events "
+                    "WHERE session_id=$1 ORDER BY id ASC LIMIT 2",
+                    session_id,
+                )
+            ]
+            last_event_id = ids[1]
+            events = await ws_offset.fetch_react_events_since(
+                conn, session_id=session_id, last_turn=0,
+                last_event_id=last_event_id,
+            )
+            return events, ids
+        finally:
+            await conn.close()
+
+    events, ids = asyncio.run(_run())
+    # 返回 id > last_event_id 的剩余 3 条(同一 turn=1 内的后 3 条事件)
+    assert len(events) == 3
+    assert all(e["id"] > ids[1] for e in events)
+    assert all(e["turn"] == 1 for e in events)
+
+
+def test_fetch_react_events_since_falls_back_to_turn_when_no_event_id():
+    """未提供 last_event_id 时回退 turn 粒度(旧协议向后兼容)。"""
+    _setup_schema()
+
+    async def _run() -> list[dict]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions DEFAULT VALUES RETURNING id"
+            )
+            await _seed_three_events(conn, session_id)
+            return await ws_offset.fetch_react_events_since(
+                conn, session_id=session_id, last_turn=1,
+            )
+        finally:
+            await conn.close()
+
+    events = asyncio.run(_run())
+    assert [e["turn"] for e in events] == [2, 3]
+
+
+def test_build_replay_messages_with_event_id_anchor():
+    """last_event_id 增量 replay: 事件带 event_id 且只补发缺失事件。"""
+    _setup_schema()
+
+    async def _run() -> list[dict]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions DEFAULT VALUES RETURNING id"
+            )
+            await _seed_same_turn_events(conn, session_id)
+            ids = [
+                r["id"] for r in await conn.fetch(
+                    "SELECT id FROM react_events "
+                    "WHERE session_id=$1 ORDER BY id ASC",
+                    session_id,
+                )
+            ]
+            last_event_id = ids[2]  # 已收前 3 条(thinking + 2 条 delta)
+            msgs = await ws_offset.build_replay_messages(
+                conn, session_id=session_id, last_turn=1,
+                last_event_id=last_event_id,
+            )
+            return msgs
+        finally:
+            await conn.close()
+
+    msgs = asyncio.run(_run())
+    replay_evts = [m for m in msgs if m["type"] == "react_event"]
+    # 缺失的后 2 条(tool_call + final), 同 turn 内精确补发
+    assert len(replay_evts) == 2
+    assert [m["event_type"] for m in replay_evts] == ["tool_call", "final"]
+    # 重放事件带 event_id(前端去重锚点)
+    assert all(isinstance(m["event_id"], int) for m in replay_evts)
+    # replay_end 正常
+    assert msgs[-1]["type"] == "replay_end"
+
+
+def test_build_replay_messages_full_ignores_event_id():
+    """full=True(切历史会话全量加载)时忽略 last_event_id。
+
+    跨会话事件 id 不连续, 按 id 过滤会丢新会话早于该 id 的事件。
+    """
+    _setup_schema()
+
+    async def _run() -> list[dict]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions DEFAULT VALUES RETURNING id"
+            )
+            await _seed_same_turn_events(conn, session_id)
+            ids = [
+                r["id"] for r in await conn.fetch(
+                    "SELECT id FROM react_events "
+                    "WHERE session_id=$1 ORDER BY id ASC",
+                    session_id,
+                )
+            ]
+            msgs = await ws_offset.build_replay_messages(
+                conn, session_id=session_id, last_turn=0,
+                full=True, last_event_id=ids[3],
+            )
+            return msgs
+        finally:
+            await conn.close()
+
+    msgs = asyncio.run(_run())
+    replay_evts = [m for m in msgs if m["type"] == "react_event"]
+    assert len(replay_evts) == 5  # full 模式全量, 不受 event_id 限制

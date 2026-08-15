@@ -287,6 +287,30 @@ async def test_monitor_session_prompt(schema):
         await conn.close()
 
 
+async def test_monitor_get_system_prompt_is_string(schema, monkeypatch):
+    """2026-08-13 fix 回归: _get_system_prompt 对 monitor 会话此前缺 await,
+    base_prompt 变成 '<coroutine object _monitor_system_prompt ...>' repr,
+    monitor 会话(无涯)系统提示词损坏(见 session-35 导出第 14 行)。
+    修复后返回真实提示词字符串。"""
+    from private_agent.main import _get_system_prompt, _identity_prompt
+
+    # 简化依赖: identity 返回空(避免受环境配置影响); MCP guide 构建失败会降级
+    monkeypatch.setattr("private_agent.main._identity_prompt", lambda cfg: "")
+
+    conn = await asyncpg.connect(TEST_DSN)
+    try:
+        sid = await conn.fetchval(
+            "INSERT INTO sessions (title, model_id, kind) "
+            "VALUES ('monitor-fix', 'mock', 'monitor') RETURNING id"
+        )
+        prompt = await _get_system_prompt({}, sid, conn)
+        assert isinstance(prompt, str), f"monitor prompt 应为 str, got {type(prompt)}"
+        assert "coroutine" not in prompt.lower()
+        assert "系统监控" in prompt or "主智能体" in prompt
+    finally:
+        await conn.close()
+
+
 async def test_monitor_tools_registered_only_for_monitor(conn):
     """监控工具仅在 monitor 会话注册, 通用内置 10 个不含监控工具。"""
     from private_agent.tools.builtins import (

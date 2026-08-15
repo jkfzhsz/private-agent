@@ -90,6 +90,10 @@ interface WSMessage {
   // 2026-08-10 22:00: 后端 replay 重放的历史事件带此标记, 前端据此跳过
   // 确认弹窗等实时副作用(历史工具调用已执行完毕, 不应再次触发权限确认)
   replayed?: boolean;
+  // 0.5.1 A-1(C-4 事件级去重): 后端 react_events 自增 id, 实时推送与
+  // replay 重放同源。前端据此去重(修复: turn N 中途断线重连, 该轮事件
+  // 全量重放导致 delta 重复累积 / 事件重复渲染)
+  event_id?: number;
   // V1.5 项-1(M3): 子代理事件(后端 delegate_subtask / runner 推送)
   subagent_id?: number;
   task_id?: string;
@@ -313,6 +317,8 @@ export default function App(): JSX.Element {
     risk?: string;
     reason?: string;
     argsPreview?: string;
+    // 2026-08-15: 后端人性化描述(title/summary 人话要点, 未登录老事件无此字段)
+    display?: { title?: string; summary?: string[]; tool_label?: string };
   } | null>(null);
   // 确认弹窗倒计时(秒)。比后端超时(60s)提前 5s 关闭 —— 避免用户在
   // 超时边界点击"同意"时后端 confirmation_id 已过期 → unknown confirmation_id
@@ -342,10 +348,18 @@ export default function App(): JSX.Element {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // 生成中状态(显示"停止"按钮)
   const [isGenerating, setIsGenerating] = useState(false);
-  // 对话中切换技能弹层
+  // 对话中切换技能弹层(2026-08-12 Phase 2: 多选挂载附加技能)
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
+  // 2026-08-12 Phase 3: 对话中 / 召唤技能 —— 输入框斜杠浮层
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
+  const [slashIndex, setSlashIndex] = useState(0);
+  // 2026-08-12 Phase 2: 弹层内临时多选(打开时初始化为已挂载列表)
+  const [pickerSelected, setPickerSelected] = useState<string[]>([]);
+  // 2026-08-12 Phase 2: 会话附加技能(多技能调用) —— 已挂载技能名列表
+  const [supplementarySkills, setSupplementarySkills] = useState<string[]>([]);
   const [availableSkills, setAvailableSkills] = useState<
-    { name: string; version: string; enabled: boolean; description?: string; model_scope?: string[] }[]
+    { name: string; version: string; enabled: boolean; description?: string; display_name?: string; model_scope?: string[] }[]
   >([]);
   const [sessionId, setSessionId] = useState<number>(() => getSessionIdFromUrl());
   const [realSessionId, setRealSessionId] = useState<number | null>(null);
@@ -755,6 +769,11 @@ export default function App(): JSX.Element {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventIdRef = useRef<number>(0);
   const manualCloseRef = useRef<boolean>(false);
+  // 0.5.1 A-1(C-4 事件级去重): 已见事件 id 集合 + 最大 id 锚点。
+  // event_id 是 react_events 全局自增 id(跨会话唯一), Set 全局安全;
+  // maxEventId 供 replay 增量请求(last_event_id)。
+  const seenEventIdsRef = useRef<Set<number>>(new Set());
+  const maxEventIdRef = useRef<number>(0);
 
   // 0.5.0 P2(2026-08-08): 四窗口并发 —— 窗口状态缓存。
   // 4 个固定窗口: 0=监控(主智能体) / 1=子瞻 / 2=白圭 / 3=清和。
@@ -799,8 +818,17 @@ export default function App(): JSX.Element {
     setSlotsVersion((v) => v + 1);
   }, []);
   // 各 slot 活跃对话状态(红=无对话/绿=有对话): 派生自 windowCacheRef
+  // 2026-08-12 13:20 修复: 快照 skill 必须与 slot 预期场景匹配才算"有对话"。
+  // 原实现只查 sessionId 是否存在 —— saveWindowSnapshot 的懒初始化会为
+  // 从未挂载的 slot(如默认 activeSlot=1 子瞻)凭空创建占位快照, 导致点
+  // 白圭/清和/无涯后首页"子瞻"绿灯误亮。占位快照 skill=null, 与 slot
+  // 预期场景(office/data_analysis/frontend_design)不匹配 → 不再误判。
   const slotHasSession = useCallback(
-    (slot: number): boolean => !!windowCacheRef.current[slot]?.sessionId,
+    (slot: number): boolean => {
+      const snap = windowCacheRef.current[slot];
+      if (!snap?.sessionId) return false;
+      return snap.skill === WINDOW_SLOT_SKILL[slot];
+    },
     []
   );
   void slotsVersion; // 依赖 slotsVersion 使组件在 bump 后重渲染(派生圆点)
@@ -815,7 +843,11 @@ export default function App(): JSX.Element {
         model: sessionModel,
         lastTurn: lastTurnRef.current,
       };
-    } else {
+    } else if (view !== "home") {
+      // 2026-08-12 13:20 修复: 首页(view=home)不做懒初始化 —— 打开 PA 时
+      // activeSlot 默认为 1(子瞻)但用户从未进入子瞻对话, 原 else 分支会为
+      // 该 slot 凭空创建占位快照(sessionId=当前会话), 导致首页"子瞻"状态
+      // 圆点误亮。仅对话/历史会话视图才有窗口状态需要保存。
       windowCacheRef.current[activeSlot] = {
         sessionId: realSessionId ?? sessionId,
         skill: activeSkill,
@@ -825,7 +857,7 @@ export default function App(): JSX.Element {
         lastTurn: lastTurnRef.current,
       };
     }
-  }, [activeSlot, realSessionId, sessionId, activeSkill, events, input, sessionModel]);
+  }, [activeSlot, realSessionId, sessionId, activeSkill, events, input, sessionModel, view]);
   // 0.5.0 P3: 进入监控窗口(主智能体) —— 无快照时创建/复用 monitor 会话
   const enterMonitorWindow = useCallback(async (): Promise<void> => {
     saveWindowSnapshot();
@@ -1125,7 +1157,12 @@ export default function App(): JSX.Element {
       const resp = await adminFetch("http://127.0.0.1:8765/admin/files/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: file.name || "pasted-image.png", content_base64: b64 }),
+        // 2026-08-15 P2: 带 session_id → 文件落会话工作区 uploads(画地为牢一致)
+        body: JSON.stringify({
+          filename: file.name || "pasted-image.png",
+          content_base64: b64,
+          session_id: realSessionId ?? sessionId,
+        }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as { name: string; path: string };
@@ -1135,7 +1172,7 @@ export default function App(): JSX.Element {
       // eslint-disable-next-line no-alert
       window.alert(`图片上传失败: ${String(e)}`);
     }
-  }, []);
+  }, [realSessionId, sessionId]);
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent): void => {
@@ -1444,16 +1481,17 @@ export default function App(): JSX.Element {
     }
   }, [realSessionId, sessionId]);
 
-  // 技能切换弹层: 打开时加载技能列表; 选择 → 新会话激活(handlePickMode)
+  // 技能切换弹层: 打开时加载技能列表; 多选 → 挂载为附加技能(不新建会话)
   useEffect(() => {
     if (!skillPickerOpen) return;
     let cancelled = false;
+    setPickerSelected(supplementarySkills); // 打开时预勾选已挂载
     void (async () => {
       try {
         const resp = await adminFetch("http://127.0.0.1:8765/admin/skills");
         const data = (await resp.json()) as {
           name: string; version: string; enabled: boolean;
-          description?: string; model_scope?: string[];
+          description?: string; display_name?: string; model_scope?: string[];
         }[];
         if (!cancelled) setAvailableSkills(Array.isArray(data) ? data : []);
       } catch {
@@ -1464,6 +1502,68 @@ export default function App(): JSX.Element {
       cancelled = true;
     };
   }, [skillPickerOpen]);
+
+  // 2026-08-12 Phase 2: 会话附加技能加载(进入对话/切换会话时拉取已挂载列表)
+  const loadSupplementarySkills = useCallback(async (): Promise<void> => {
+    const sid = realSessionId ?? sessionId;
+    if (!sid || sid <= 0) return;
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/sessions/${sid}/supplementary-skills`
+      );
+      if (!resp.ok) return;
+      const data = (await resp.json()) as { skills?: { name: string }[] };
+      setSupplementarySkills(
+        Array.isArray(data.skills) ? data.skills.map((s) => s.name) : []
+      );
+    } catch {
+      /* 加载失败保持现状 */
+    }
+  }, [realSessionId, sessionId]);
+  useEffect(() => {
+    void loadSupplementarySkills();
+  }, [loadSupplementarySkills, view]);
+
+  // 2026-08-12 Phase 2: 挂载附加技能(多选确认)
+  const addSupplementarySkills = useCallback(
+    async (names: string[]): Promise<void> => {
+      const sid = realSessionId ?? sessionId;
+      if (!sid || sid <= 0 || names.length === 0) return;
+      try {
+        const resp = await adminFetch(
+          `http://127.0.0.1:8765/admin/sessions/${sid}/supplementary-skills`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ skill_names: names, added_by: "picker" }),
+          }
+        );
+        if (!resp.ok) return;
+        await loadSupplementarySkills();
+      } catch {
+        /* 忽略 */
+      }
+    },
+    [realSessionId, sessionId, loadSupplementarySkills]
+  );
+
+  // 2026-08-12 Phase 2: 移除附加技能
+  const removeSupplementarySkill = useCallback(
+    async (name: string): Promise<void> => {
+      const sid = realSessionId ?? sessionId;
+      if (!sid || sid <= 0) return;
+      try {
+        await adminFetch(
+          `http://127.0.0.1:8765/admin/sessions/${sid}/supplementary-skills/${name}`,
+          { method: "DELETE" }
+        );
+        setSupplementarySkills((prev) => prev.filter((n) => n !== name));
+      } catch {
+        /* 忽略 */
+      }
+    },
+    [realSessionId, sessionId]
+  );
 
   // ── 处理收到的 WS 消息 ──────────────────────────────────────────────────────
   // 0.5.0 P6(2026-08-09): 后台会话事件写入该窗口快照(独立状态切片)。
@@ -1552,6 +1652,17 @@ export default function App(): JSX.Element {
         break;
 
       case "react_event": {
+        // 0.5.1 A-1(C-4 事件级去重): 已见 event_id 直接丢弃 —— 断线重连
+        // 按 turn 粒度补发时, 该轮已收到的事件会全量重放; 不去重会导致
+        // delta 重复累积、thinking/tool_result 重复渲染。注意: 去重必须在
+        // 一切副作用(权限弹窗/快照/累积)之前, 已见事件不重复触发。
+        if (typeof msg.event_id === "number") {
+          if (seenEventIdsRef.current.has(msg.event_id)) return;
+          seenEventIdsRef.current.add(msg.event_id);
+          if (msg.event_id > maxEventIdRef.current) {
+            maxEventIdRef.current = msg.event_id;
+          }
+        }
         // 0.5.1 A: 权限确认请求 → 全局置顶弹窗(与事件归属/当前窗口无关,
         // 避免确认卡片埋在对话流内被错过 → 60s 超时 → 对话卡死)。
         // 2026-08-10 22:00: 加 !msg.replayed —— 切回历史会话时后端 replay
@@ -1561,23 +1672,30 @@ export default function App(): JSX.Element {
           const p = msg.payload as {
             confirmation_id?: string;
             message?: string;
-            risk?: string;
+            risk_level?: string;
             reason?: string;
-            args_preview?: string;
+            args_summary?: Record<string, unknown>;
+            display?: { title?: string; summary?: string[]; tool_label?: string };
           };
           if (p.confirmation_id) {
+            // 2026-08-15: 修正字段名不匹配(此前读 p.risk/p.args_preview,
+            // 后端实际是 risk_level/args_summary → 弹窗风险/参数一直为空)
+            const argsPreview = p.args_summary
+              ? JSON.stringify(p.args_summary).slice(0, 200)
+              : undefined;
             setPendingConfirm({
               confirmation_id: p.confirmation_id,
               session_id:
                 (msg.session_id as number) ??
                 (realSessionIdRef.current ?? sessionIdRef.current),
               message: String(p.message ?? "需要确认"),
-              risk: p.risk,
+              risk: p.risk_level,
               reason: p.reason,
-              argsPreview: p.args_preview,
+              argsPreview,
+              display: p.display,
             });
             // 系统通知(后台/其他窗口时也能提醒)
-            notifyUser("需要你的确认", String(p.message ?? "工具执行需确认"));
+            notifyUser("需要你的确认", String(p.display?.title ?? p.message ?? "工具执行需确认"));
           }
         }
         if (msg.event_type && msg.turn !== undefined && msg.payload) {
@@ -1985,6 +2103,8 @@ export default function App(): JSX.Element {
           session_id: sessionIdRef.current,
           last_turn: lastTurnRef.current,
           full: fullReloadRef.current,
+          // 0.5.1 A-1(C-4): 事件级增量锚点(已收最大 event_id, 0 表示无)
+          last_event_id: maxEventIdRef.current || undefined,
         });
         // V1.5 项-1(M3 R7): 重连后从 DB 重建子代理卡片(WS 丢事件兜底)
         fetchSubagents();
@@ -2059,7 +2179,12 @@ export default function App(): JSX.Element {
         const resp = await adminFetch("http://127.0.0.1:8765/admin/files/upload", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filename: file.name, content_base64: b64 }),
+          // 2026-08-15 P2: 带 session_id → 文件落会话工作区 uploads(画地为牢一致)
+          body: JSON.stringify({
+            filename: file.name,
+            content_base64: b64,
+            session_id: realSessionId ?? sessionId,
+          }),
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
@@ -2072,7 +2197,7 @@ export default function App(): JSX.Element {
         window.alert(`上传失败: ${String(e)}`);
       }
     },
-    []
+    [realSessionId, sessionId]
   );
 
   const sendMessage = useCallback((): void => {
@@ -2103,6 +2228,22 @@ export default function App(): JSX.Element {
     if (pendingImage) {
       content = `[用户粘贴图片: ${pendingImage.name} 路径: ${pendingImage.path}]\n${content}`;
     }
+    // 2026-08-12 Phase 3: 解析 /技能名 标记 → 附带 supplementary_skills(后端挂载)
+    // 仅匹配行首或空白后的 /(避免误匹配 http:// 等路径)
+    const slashMentioned: string[] = [];
+    {
+      const re = /(?:^|\s)\/([a-z0-9_]+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(content)) !== null) {
+        const sname = m[1].toLowerCase();
+        if (
+          availableSkills.some((s) => s.name === sname && s.enabled) &&
+          !slashMentioned.includes(sname)
+        ) {
+          slashMentioned.push(sname);
+        }
+      }
+    }
     sendWs({
       type: "user_message",
       session_id: sessionId,
@@ -2110,6 +2251,10 @@ export default function App(): JSX.Element {
       // V1.3-7.2 工作流自动化: 携带会话级自动执行配置(后端优先取显式传参)
       auto_execute: autoExec || undefined,
       max_rounds: autoExec ? autoRounds : undefined,
+      // 2026-08-12 Phase 3: /召唤的附加技能
+      ...(slashMentioned.length > 0
+        ? { supplementary_skills: slashMentioned }
+        : {}),
     });
     // 用户消息立即上屏(右侧气泡)
     setEvents((prev) => [
@@ -2127,7 +2272,39 @@ export default function App(): JSX.Element {
     setPendingUpload(null); // 发送后清除文件引用(一次一文件)
     setPendingImage(null); // 发送后清除图片引用
     setIsGenerating(true); // 生成中(显示"停止"按钮)
-  }, [input, sessionId, sendWs, pendingUpload, pendingImage, editingOriginal, realSessionId, autoExec, autoRounds]);
+  }, [input, sessionId, sendWs, pendingUpload, pendingImage, editingOriginal, realSessionId, autoExec, autoRounds, availableSkills]);
+
+  // 2026-08-12 Phase 3: /召唤技能 —— 浮层过滤列表(按斜杠后关键字模糊匹配)
+  const slashFilteredSkills = useMemo(() => {
+    if (!slashOpen) return [] as (typeof availableSkills)[number][];
+    return availableSkills
+      .filter((s) => s.enabled)
+      .filter((s) => {
+        if (!slashQuery) return true;
+        const q = slashQuery.toLowerCase();
+        return (
+          s.name.toLowerCase().includes(q) ||
+          (s.description ?? "").toLowerCase().includes(q) ||
+          (s.display_name ?? "").toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 8);
+  }, [slashOpen, slashQuery, availableSkills]);
+
+  // 2026-08-12 Phase 3: 选中技能 → 替换输入框尾部 /xx 为 /技能名
+  const insertSlashSkill = useCallback((name: string): void => {
+    setInput((prev) => {
+      const m = /(?:^|\s)\/([a-z0-9_]*)$/.exec(prev);
+      if (m) {
+        const keep = prev.slice(0, m.index + m[0].length - m[1].length);
+        return `${keep}${name} `;
+      }
+      return prev;
+    });
+    setSlashOpen(false);
+    setSlashQuery("");
+    inputRef.current?.focus();
+  }, []);
 
   // 0.5.0 P6(2026-08-09): 单 WS 复用 —— sessionId 变化时不再断开重建连接,
   // 直接通过既有 WS 发送 replay 切换会话(后端按 session_id 路由)。
@@ -2143,6 +2320,8 @@ export default function App(): JSX.Element {
         session_id: sessionId,
         last_turn: lastTurnRef.current,
         full: fullReloadRef.current,
+        // 0.5.1 A-1(C-4): 事件级增量锚点(已收最大 event_id, 0 表示无)
+        last_event_id: maxEventIdRef.current || undefined,
       });
       fetchSubagents();
     }
@@ -2188,6 +2367,34 @@ export default function App(): JSX.Element {
       cancelled = true;
     };
   }, []);
+
+  // 2026-08-15 修复: 会话工作区回读 —— 切换会话/窗口时拉取该会话已保存的
+  // workspace 并展示(此前仅 mount 时加载全局默认, 选定工作区从不显示,
+  // 用户以为"每次启动对话跳回默认"; 实际后端 sessions.workspace 已持久化)。
+  // 2026-08-15 补充: workspace 为空(NULL/默认)时也要更新为默认展示 ——
+  // 否则切到未设置工作区的会话时残留上一个会话的旧值(场景工作区不同步)。
+  useEffect(() => {
+    const sid = realSessionId ?? sessionId;
+    if (!sid) return;
+    let cancelled = false;
+    adminFetch(`http://localhost:8765/admin/sessions/${sid}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const ws =
+          typeof data.workspace === "string" && data.workspace
+            ? data.workspace
+            : null;
+        setWorkspace(ws);
+        setWorkspaceInput(ws ?? "");
+      })
+      .catch(() => {
+        /* 后端未起时忽略 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [realSessionId, sessionId]);
 
   // 保存会话工作区(画地为牢)
   const saveWorkspace = useCallback(async (): Promise<void> => {
@@ -2387,20 +2594,39 @@ export default function App(): JSX.Element {
                   <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                     session={realSessionId ?? sessionId}
                   </span>
-                  {/* 对话中加载/切换技能: 弹技能面板 → 新会话激活(主智能体无 skill, 隐藏) */}
-                  {activeSkill && (
-                    <button
-                      onClick={() => setSkillPickerOpen(true)}
-                      title="切换技能(将新建会话)"
-                      style={{
-                        fontSize: 12, padding: "4px 12px", borderRadius: 10,
-                        border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
-                        color: "var(--text-primary)",
-                      }}
-                    >
-                      🔄 切换技能
-                    </button>
-                  )}
+                  {/* 2026-08-12 Phase 2: 选择技能(多技能调用) —— 原"切换技能"
+                      改为挂载附加技能, 不新建会话 */}
+                  <button
+                    onClick={() => setSkillPickerOpen(true)}
+                    title="选择附加技能(可多选, 与当前技能叠加使用)"
+                    style={{
+                      fontSize: 12, padding: "4px 12px", borderRadius: 10,
+                      border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    ➕ 选择技能
+                  </button>
+                  {/* 已挂载附加技能 chip(点击移除) */}
+                  {supplementarySkills.map((sn) => {
+                    const info = availableSkills.find((s) => s.name === sn);
+                    return (
+                      <span
+                        key={sn}
+                        title={`移除附加技能 ${sn}`}
+                        onClick={() => void removeSupplementarySkill(sn)}
+                        style={{
+                          fontSize: 12, padding: "4px 10px", borderRadius: 10,
+                          border: "1px solid rgba(139,92,246,0.4)",
+                          background: "rgba(139,92,246,0.08)",
+                          color: "var(--accent-soft-text)",
+                          cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap",
+                        }}
+                      >
+                        {info?.display_name || info?.name || sn} ×
+                      </span>
+                    );
+                  })}
                   <span style={{ flex: 1 }} />
                   {/* V1.1-3.5 会话设置(记忆开关/截断/系统提示词) */}
                   <button
@@ -2746,6 +2972,10 @@ export default function App(): JSX.Element {
                           : "";
                         const risk = (ce.payload.risk_level as string) || "medium";
                         const reason = (ce.payload.reason as string) || "";
+                        // 2026-08-15: 人性化描述(老事件无 display 时回退 message)
+                        const display = ce.payload.display as
+                          | { title?: string; summary?: string[] }
+                          | undefined;
                         const riskColor =
                           risk === "high" ? "#dc2626" : risk === "medium" ? "#d97706" : "#16a34a";
                         const riskLabel =
@@ -2763,7 +2993,7 @@ export default function App(): JSX.Element {
                           >
                             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                               <span style={{ fontSize: 12, fontWeight: 600, color: "#92400e" }}>
-                                ⚠️ {formatPayload("tool_confirmation_required", ce.payload)}
+                                ⚠️ {display?.title ?? formatPayload("tool_confirmation_required", ce.payload)}
                               </span>
                               <span
                                 style={{
@@ -2778,24 +3008,43 @@ export default function App(): JSX.Element {
                                 {riskLabel}
                               </span>
                             </div>
+                            {display?.summary && display.summary.length > 0 && (
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: "#92400e",
+                                  marginBottom: 4,
+                                  lineHeight: 1.7,
+                                }}
+                              >
+                                {display.summary.map((line, i) => (
+                                  <div key={i}>· {line}</div>
+                                ))}
+                              </div>
+                            )}
                             {reason && (
                               <div style={{ fontSize: 11, color: "#78350f", marginBottom: 4 }}>
                                 原因: {reason}
                               </div>
                             )}
                             {argsPreview && (
-                              <pre
-                                style={{
-                                  margin: "0 0 8px",
-                                  whiteSpace: "pre-wrap",
-                                  wordBreak: "break-all",
-                                  fontSize: 11,
-                                  color: "#b45309",
-                                  fontFamily: "Consolas, monospace",
-                                }}
-                              >
-                                {argsPreview}
-                              </pre>
+                              <details style={{ margin: "0 0 8px", fontSize: 11 }}>
+                                <summary style={{ cursor: "pointer", color: "#b45309" }}>
+                                  技术详情(原始参数)
+                                </summary>
+                                <pre
+                                  style={{
+                                    margin: "6px 0 0",
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-all",
+                                    fontSize: 11,
+                                    color: "#b45309",
+                                    fontFamily: "Consolas, monospace",
+                                  }}
+                                >
+                                  {argsPreview}
+                                </pre>
+                              </details>
                             )}
                             {confirmResultEv ? (
                               <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
@@ -3044,36 +3293,123 @@ export default function App(): JSX.Element {
         )}
 
         {/* 消息输入框(2026-08-08 无框化: 无边框 + 透明背景, 融入输入卡片) */}
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onPaste={handlePaste}
-          onKeyDown={(e) => {
-            // V1.1-3.4: Enter 发送, Shift+Enter 换行(多行输入)
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              sendMessage();
-            }
-          }}
-          placeholder={activeSlot === 0 && !activeSkill ? `向${agentName || "主智能体"}提问(如: 查看系统性能)…` : "输入消息,Enter 发送,Shift+Enter 换行,可直接粘贴图片"}
-          rows={2}
-          style={{
-            flex: 1,
-            padding: "8px 4px",
-            borderRadius: 10,
-            border: "none",
-            fontSize: 14,
-            outline: "none",
-            resize: "vertical",
-            minHeight: 40,
-            maxHeight: 160,
+        {/* 2026-08-12 Phase 3: / 召唤技能浮层(absolute 悬浮输入区上方); 包裹 div
+            承担原 textarea 的 flex:1 布局, textarea 内部保持自适应 */}
+        <div style={{ position: "relative", flex: 1, display: "flex", minWidth: 0 }}>
+          {slashOpen && slashFilteredSkills.length > 0 && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: "calc(100% + 8px)",
+                left: 0,
+                right: 0,
+                zIndex: 60,
+                background: "var(--panel-bg-solid)",
+                border: "1px solid var(--border-color)",
+                borderRadius: 12,
+                boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
+                padding: 6,
+                maxHeight: 280,
+                overflowY: "auto",
+              }}
+            >
+              <div style={{ fontSize: 10, color: "var(--text-tertiary)", padding: "4px 8px 6px", letterSpacing: "0.05em" }}>
+                / 召唤技能(Enter 挂载 · ↑↓ 导航 · Esc 关闭)
+              </div>
+              {slashFilteredSkills.map((s, i) => (
+                <div
+                  key={s.name}
+                  onMouseEnter={() => setSlashIndex(i)}
+                  onClick={() => insertSlashSkill(s.name)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    cursor: "pointer",
+                    background: i === slashIndex ? "rgba(139,92,246,0.1)" : "transparent",
+                  }}
+                >
+                  <span style={{ flexShrink: 0, fontSize: 14 }}>{s.display_name || s.name}</span>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 11, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {s.description || s.name}
+                    </span>
+                    <span style={{ display: "block", fontSize: 10, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {s.name} · {s.description ? "" : "通用"}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => {
+              const val = e.target.value;
+              setInput(val);
+              // / 触发浮层(仅行首或空白后的 /, 排除 http:// 等路径)
+              if (/(?:^|\s)\/[a-z0-9_]*$/.test(val) && availableSkills.some((s) => s.enabled)) {
+                const m = /(?:^|\s)\/([a-z0-9_]*)$/.exec(val);
+                setSlashOpen(true);
+                setSlashQuery(m ? m[1].toLowerCase() : "");
+                setSlashIndex(0);
+              } else {
+                setSlashOpen(false);
+              }
+            }}
+            onPaste={handlePaste}
+            onKeyDown={(e) => {
+              // 2026-08-12 Phase 3: 浮层键盘导航(优先级高于 Enter 发送)
+              if (slashOpen && slashFilteredSkills.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSlashIndex((i) => Math.min(slashFilteredSkills.length - 1, i + 1));
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSlashIndex((i) => Math.max(0, i - 1));
+                  return;
+                }
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  insertSlashSkill(slashFilteredSkills[slashIndex].name);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setSlashOpen(false);
+                  return;
+                }
+              }
+              // V1.1-3.4: Enter 发送, Shift+Enter 换行(多行输入)
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
+            placeholder={activeSlot === 0 && !activeSkill ? `向${agentName || "主智能体"}提问(如: 查看系统性能)…` : "输入消息,Enter 发送,Shift+Enter 换行,输入 / 可召唤技能"}
+            rows={2}
+            style={{
+              flex: 1,
+              padding: "8px 4px",
+              borderRadius: 10,
+              border: "none",
+              fontSize: 14,
+              outline: "none",
+              resize: "vertical",
+              minHeight: 40,
+              maxHeight: 160,
             fontFamily: "inherit",
             lineHeight: 1.5,
             background: "transparent",
             color: "var(--text-primary)",
           }}
         />
+        </div>
 
         {/* 2026-08-08: 原分隔线已移除(输入区与底部操作行无框化过渡) */}
 
@@ -3958,7 +4294,9 @@ export default function App(): JSX.Element {
             >
               <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>选择技能</div>
               <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 12 }}>
-                切换技能将新建会话(当前会话保持原技能); 部分技能仅限当前模型(DeepSeek 系列)使用
+                {activeSkill
+                  ? `当前主技能「${renderChatAssistantName()}」已激活; 勾选附加技能后与主技能叠加使用(同一问题可调用多个技能)`
+                  : "勾选技能作为附加能力, 与当前对话叠加使用"}
               </div>
               {(() => {
                 // 2026-08-08: 按会话生效模型过滤 model_scope 限定技能;
@@ -3980,24 +4318,52 @@ export default function App(): JSX.Element {
                     <div style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "4px 2px 6px" }}>
                       {g.label}
                     </div>
-                    {g.list.map((s) => (
-                      <button
-                        key={s.name}
-                        onClick={() => {
-                          setSkillPickerOpen(false);
-                          void handlePickMode(s.name as "office" | "data_analysis" | "frontend_design");
-                        }}
-                        style={{
-                          display: "flex", alignItems: "center", justifyContent: "space-between",
-                          width: "100%", padding: "10px 14px", marginBottom: 8,
-                          borderRadius: 10, border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)",
-                          fontSize: 14, cursor: "pointer", textAlign: "left",
-                        }}
-                      >
-                        <span>{s.name}</span>
-                        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>v{s.version}</span>
-                      </button>
-                    ))}
+                    {g.list.map((s) => {
+                      const isMain = activeSkill === s.name;
+                      const checked = pickerSelected.includes(s.name);
+                      return (
+                        <label
+                          key={s.name}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 10,
+                            width: "100%", padding: "10px 14px", marginBottom: 8,
+                            borderRadius: 10, border: "1px solid var(--border-strong)",
+                            background: checked ? "rgba(139,92,246,0.08)" : "var(--panel-bg-solid)",
+                            fontSize: 14, cursor: isMain ? "default" : "pointer", textAlign: "left",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={isMain}
+                            onChange={() => {
+                              if (isMain) return;
+                              setPickerSelected((prev) =>
+                                prev.includes(s.name)
+                                  ? prev.filter((n) => n !== s.name)
+                                  : [...prev, s.name]
+                              );
+                            }}
+                          />
+                          <span style={{ flex: 1, minWidth: 0 }}>
+                            <span style={{ display: "block", fontWeight: 600 }}>
+                              {s.name}
+                              {isMain && (
+                                <span style={{ fontSize: 10, marginLeft: 6, padding: "1px 6px", borderRadius: 8, background: "rgba(139,92,246,0.12)", color: "var(--accent-soft-text)" }}>
+                                  主技能
+                                </span>
+                              )}
+                            </span>
+                            {s.description && (
+                              <span style={{ display: "block", fontSize: 11, color: "var(--text-tertiary)", marginTop: 2 }}>
+                                {s.description}
+                              </span>
+                            )}
+                          </span>
+                          <span style={{ fontSize: 11, color: "var(--text-tertiary)", flexShrink: 0 }}>v{s.version}</span>
+                        </label>
+                      );
+                    })}
                   </div>
                 ));
               })()}
@@ -4006,12 +4372,28 @@ export default function App(): JSX.Element {
                   暂无可用技能
                 </div>
               )}
-              <button
-                onClick={() => setSkillPickerOpen(false)}
-                style={{ width: "100%", padding: "8px", marginTop: 6, borderRadius: 10, border: "none", background: "var(--border-color)", cursor: "pointer", fontSize: 13 }}
-              >
-                取消
-              </button>
+              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                <button
+                  onClick={() => {
+                    const toAdd = pickerSelected.filter((n) => n !== activeSkill);
+                    void addSupplementarySkills(toAdd);
+                    setSkillPickerOpen(false);
+                  }}
+                  style={{
+                    flex: 1, padding: "8px", borderRadius: 10, border: "none",
+                    background: "var(--gradient-indigo)", color: "var(--on-accent)",
+                    cursor: "pointer", fontSize: 13, fontWeight: 600,
+                  }}
+                >
+                  挂载选中技能
+                </button>
+                <button
+                  onClick={() => setSkillPickerOpen(false)}
+                  style={{ padding: "8px 20px", borderRadius: 10, border: "none", background: "var(--border-color)", cursor: "pointer", fontSize: 13 }}
+                >
+                  取消
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -4061,17 +4443,34 @@ export default function App(): JSX.Element {
                   {confirmCountdown}s 后超时
                 </span>
               </div>
+              {/* 2026-08-15: 优先渲染人性化描述(title/summary), 老事件回退 message */}
               <div
                 style={{
-                  fontSize: 13,
-                  color: "var(--text-secondary)",
-                  marginBottom: 8,
+                  fontSize: 14,
+                  fontWeight: 600,
+                  color: "var(--text-primary)",
+                  marginBottom: 6,
                   whiteSpace: "pre-wrap",
                   wordBreak: "break-word",
                 }}
               >
-                {pendingConfirm.message}
+                {pendingConfirm.display?.title ?? pendingConfirm.message}
               </div>
+              {pendingConfirm.display?.summary &&
+                pendingConfirm.display.summary.length > 0 && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "var(--text-secondary)",
+                      marginBottom: 8,
+                      lineHeight: 1.7,
+                    }}
+                  >
+                    {pendingConfirm.display.summary.map((line, i) => (
+                      <div key={i}>· {line}</div>
+                    ))}
+                  </div>
+                )}
               {pendingConfirm.risk && (
                 <div
                   style={{
@@ -4080,14 +4479,19 @@ export default function App(): JSX.Element {
                     marginBottom: 4,
                   }}
                 >
-                  风险级别: {pendingConfirm.risk}
+                  风险级别:{" "}
+                  {pendingConfirm.risk === "high"
+                    ? "高"
+                    : pendingConfirm.risk === "low"
+                      ? "低"
+                      : "中"}
                 </div>
               )}
               {pendingConfirm.reason && (
                 <div
                   style={{
                     fontSize: 11,
-                    color: "#78350f",
+                    color: "var(--text-tertiary)",
                     marginBottom: 4,
                   }}
                 >
@@ -4095,23 +4499,32 @@ export default function App(): JSX.Element {
                 </div>
               )}
               {pendingConfirm.argsPreview && (
-                <pre
-                  style={{
-                    margin: "0 0 8px",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-all",
-                    fontSize: 11,
-                    color: "#b45309",
-                    fontFamily: "Consolas, monospace",
-                    background: "var(--panel-bg-hover)",
-                    borderRadius: 8,
-                    padding: 8,
-                    maxHeight: 160,
-                    overflow: "auto",
-                  }}
+                <details
+                  style={{ margin: "0 0 8px", fontSize: 11 }}
                 >
-                  {pendingConfirm.argsPreview}
-                </pre>
+                  <summary
+                    style={{ cursor: "pointer", color: "var(--text-tertiary)" }}
+                  >
+                    技术详情(原始参数)
+                  </summary>
+                  <pre
+                    style={{
+                      margin: "6px 0 0",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      fontSize: 11,
+                      color: "#b45309",
+                      fontFamily: "Consolas, monospace",
+                      background: "var(--panel-bg-hover)",
+                      borderRadius: 8,
+                      padding: 8,
+                      maxHeight: 160,
+                      overflow: "auto",
+                    }}
+                  >
+                    {pendingConfirm.argsPreview}
+                  </pre>
+                </details>
               )}
               <div
                 style={{

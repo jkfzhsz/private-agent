@@ -4,6 +4,7 @@
 // SidecarManager.start(拉起 Python Sidecar) → waitForHealth → createWindow;
 // 退出时停止 Sidecar。
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { execSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { loadSidecarConfig } from "./config-loader";
@@ -63,6 +64,32 @@ function loadDotEnv(filePath: string): void {
   }
 }
 
+/** 2026-08-12: 首次启动时解压 venv.zip → .venv (一次性, ~30-60s)。
+ *
+ * 打包版 venv 以单个 zip 形式分发(避免 NSIS 逐文件解压 + Defender 扫描
+ * 导致安装卡死)。首次启动时由 Electron 主进程解压到 backend/.venv。
+ * 后续启动 .venv 已存在, 直接跳过。
+ */
+function ensureVenvExtracted(backendDir: string): void {
+  const venvDir = join(backendDir, ".venv");
+  const venvZip = join(backendDir, "venv.zip");
+  // 已解压或无 zip(dev 模式 / 系统 python) → 跳过
+  if (existsSync(venvDir)) return;
+  if (!existsSync(venvZip)) return;
+  console.log("[main] First launch: extracting venv.zip (one-time, ~30-60s)...");
+  try {
+    // PowerShell Expand-Archive (Windows 10+ 自带, 无需额外依赖)
+    execSync(
+      `powershell -NoProfile -Command "Expand-Archive -Path '${venvZip}' -DestinationPath '${venvDir}' -Force"`,
+      { stdio: "inherit", timeout: 180000 }
+    );
+    console.log("[main] venv.zip extracted successfully");
+  } catch (e) {
+    console.error("[main] venv.zip extraction failed:", e);
+    // 解压失败不崩溃, 后端会回退到系统 python (依赖可能缺失但应用可启动)
+  }
+}
+
 /** 窗口创建后异步弹出配置提示(不阻塞主进程, 窗口先出来再弹)。
  *
  * 2026-08-06: 仅检查 PA_DB_PASSWORD(数据库连接必需, 缺失时后端连不上库)。
@@ -107,6 +134,9 @@ async function bootstrap(): Promise<void> {
     console.error(`[main] backend dir not found: ${backendDir}`);
   }
   loadDotEnv(join(backendDir, ".env"));
+
+  // 1.5) 首次启动解压 venv.zip (打包版, 一次性)
+  ensureVenvExtracted(backendDir);
 
   // 2) 读取 Sidecar 配置并启动后端
   const config = loadSidecarConfig();

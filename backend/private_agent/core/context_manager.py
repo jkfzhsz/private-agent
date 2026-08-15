@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from private_agent.errors import FrozenHashMismatchError
 from private_agent.observability.logging import setup_logger
+from private_agent.storage.react_events import insert_react_event
 from private_agent.tools.defs import ToolDef
 
 logger = setup_logger(__name__)
@@ -138,6 +139,45 @@ class ContextManager:
         self.stable_zone.messages = []
         self.active_zone.messages = []
 
+    async def _emit_context_injected(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        source: str,
+        content: str,
+        turn: int,
+        msg_id: int | None = None,
+    ) -> None:
+        """0.5.1 A-1: 记录上下文注入审计事件(context_injected)。
+
+        DSH "model-visible means logged": 凡进入模型视野的注入(Stable Zone
+        记忆/经验/KB)落 react_events, 供排查"模型到底看到了什么"取证。
+        仅落库(react_events), 不推 WS(前端无需感知, 避免流量膨胀)。
+
+        Args:
+            conn: Postgres 连接。
+            source: 注入来源(如 stable_memory/stable_lessons/stable_kb)。
+            content: 注入文本(仅取 preview, 全文在 messages 表可回查)。
+            turn: 当前轮次。
+            msg_id: 对应 messages 行 id(全文回查锚点)。
+        """
+        try:
+            text = content or ""
+            await insert_react_event(
+                conn,
+                session_id=self.session_id,
+                turn=turn,
+                event_type="context_injected",
+                payload={
+                    "source": source,
+                    "bytes": len(text.encode("utf-8")),
+                    "preview": text[:200],
+                    "msg_id": msg_id,
+                },
+            )
+        except Exception:  # noqa: BLE001 - 审计失败绝不影响注入主流程
+            logger.warning("context_injected audit failed (source=%s)", source)
+
     async def _inject_memories(self, conn: "asyncpg.Connection") -> None:
         """注入用户记忆到 Stable Zone(蓝图 §4.5)。
 
@@ -187,10 +227,11 @@ class ContextManager:
                 memories_text = memories_text[:total_max] + "\n…(记忆已按预算截断)"
         except (TypeError, ValueError):
             pass
-        await conn.execute(
+        msg_id = await conn.fetchval(
             """
             INSERT INTO messages (session_id, turn, role, content, zone)
             VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
             """,
             self.session_id,
             0,
@@ -199,8 +240,13 @@ class ContextManager:
             "stable",
         )
         self.stable_zone.messages = [
-            {"role": "user", "content": memories_text}
+            {"role": "user", "content": memories_text, "msg_id": msg_id}
         ]
+        # 0.5.1 A-1: 注入审计(记忆进模型视野)
+        await self._emit_context_injected(
+            conn, source="stable_memory", content=memories_text,
+            turn=0, msg_id=msg_id,
+        )
 
     async def _inject_lessons(self, conn: "asyncpg.Connection") -> None:
         """Phase 2(2026-08-11): 注入历史经验到 Stable Zone(会话启动)。
@@ -250,10 +296,11 @@ class ContextManager:
             if len(lines) <= 1:
                 return
             lessons_text = "\n".join(lines)
-            await conn.execute(
+            msg_id = await conn.fetchval(
                 """
                 INSERT INTO messages (session_id, turn, role, content, zone)
                 VALUES ($1, $2, $3, $4, $5)
+                RETURNING id
                 """,
                 self.session_id,
                 0,
@@ -262,7 +309,12 @@ class ContextManager:
                 "stable",
             )
             self.stable_zone.messages.append(
-                {"role": "user", "content": lessons_text}
+                {"role": "user", "content": lessons_text, "msg_id": msg_id}
+            )
+            # 0.5.1 A-1: 注入审计(经验进模型视野)
+            await self._emit_context_injected(
+                conn, source="stable_lessons", content=lessons_text,
+                turn=0, msg_id=msg_id,
             )
         except Exception as e:  # noqa: BLE001 - 经验注入失败不影响会话启动
             logger.warning(
@@ -319,6 +371,11 @@ class ContextManager:
                 "msg_id": msg_id,
                 "zone": "stable",
             }
+        )
+        # 0.5.1 A-1: 注入审计(KB 检索片段进模型视野)
+        await self._emit_context_injected(
+            conn, source="stable_kb", content=kb_text,
+            turn=turn, msg_id=msg_id,
         )
 
     def kb_chunk_count(self) -> int:
@@ -418,10 +475,11 @@ class ContextManager:
             text = c.text[:600] + "..." if len(c.text) > 600 else c.text
             lines.append(f"{i}. [source: {c.source}] {text}")
         kb_text = "\n".join(lines)
-        await conn.execute(
+        msg_id = await conn.fetchval(
             """
             INSERT INTO messages (session_id, turn, role, content, zone)
             VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
             """,
             self.session_id,
             0,
@@ -430,7 +488,12 @@ class ContextManager:
             "stable",
         )
         self.stable_zone.messages.append(
-            {"role": "user", "content": kb_text, "zone": "stable"}
+            {"role": "user", "content": kb_text, "zone": "stable", "msg_id": msg_id}
+        )
+        # 0.5.1 A-1: 注入审计(场景 KB 自动检索进模型视野)
+        await self._emit_context_injected(
+            conn, source="stable_kb_auto", content=kb_text,
+            turn=0, msg_id=msg_id,
         )
 
     async def verify_frozen_hash(self, conn: "asyncpg.Connection") -> None:

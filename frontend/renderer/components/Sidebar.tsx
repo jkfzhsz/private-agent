@@ -22,6 +22,7 @@ export interface SessionItem {
   user_msg_count?: number;
   updated_at: string | null;
   model_id?: string | null; // 会话选择的模型(auto 为 null/空)
+  kind?: string | null; // main / sub / monitor(0.5.0 P3: 主智能体监控会话)
 }
 
 const stroke = {
@@ -130,6 +131,7 @@ function TaskTree({
   onSwitchSession,
   onNavigate,
   onResumeSession,
+  agentName,
 }: {
   currentSessionId: number | null;
   onSwitchSession: (id: number, skillName?: string | null, modelId?: string | null) => void;
@@ -137,6 +139,8 @@ function TaskTree({
   onNavigate: (v: ViewKey) => void;
   // V1.5 项-4: 断点恢复(interrupted 会话"断点继续"按钮)
   onResumeSession?: (id: number) => void;
+  // 0.5.0 P5(2026-08-15): 主智能体显示名(无涯等, 历史树主智能体组名)
+  agentName?: string;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
@@ -146,13 +150,15 @@ function TaskTree({
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renamingValue, setRenamingValue] = useState("");
   const [hoverId, setHoverId] = useState<number | null>(null);
-  const [archivedOpen, setArchivedOpen] = useState(false);
+  // 2026-08-15(蒋先生反馈): 已归档并入场景组(对话名后标签), 取消独立归档区
   // 0.5.0 M1(2026-08-08): 历史树按场景分组(子瞻/白圭/清和), 场景组可折叠
+  // 2026-08-15(蒋先生反馈): 组默认收起 —— 不再每次展开全列表(反人类)
   const [sceneOpen, setSceneOpen] = useState<Record<string, boolean>>({
-    office: true,
-    data_analysis: true,
-    frontend_design: true,
-    global: true,
+    office: false,
+    data_analysis: false,
+    frontend_design: false,
+    global: false,
+    monitor: false,
   });
   // V1.1-3.2 搜索 + 导出; V1.4-8.4 升级为跨模块(会话/技能/知识库)
   const [searchQ, setSearchQ] = useState("");
@@ -352,20 +358,25 @@ function TaskTree({
   // 0.5.0 M1(2026-08-08): 历史按场景分三大类展示 ——
   // 子瞻(office)/白圭(data_analysis)/清和(frontend_design) 三组 +
   // 全局组(未锁定场景/其他 skill 的会话, 保留 folder 子分组兼容旧行为)。
+  // 2026-08-15(蒋先生反馈): ① 主智能体(monitor)会话归入独立组, 组名用
+  // 实时智能体名(无涯等), 不再混进"全局"; ② 已归档会话并入各自场景组
+  // (对话名后带"已归档"标签), 取消底部独立"已归档"大区。
   const SCENE_GROUPS: { key: string; name: string; icon: string }[] = [
+    { key: "monitor", name: agentName || "主智能体", icon: "🤖" },
     { key: "office", name: "子瞻", icon: "📄" },
     { key: "data_analysis", name: "白圭", icon: "📈" },
     { key: "frontend_design", name: "清和", icon: "🎨" },
   ];
-  const activeSessions = sessions.filter((s) => s.status !== "archived");
-  const archivedSessions = sessions.filter((s) => s.status === "archived");
   const sceneMap = new Map<string, SessionItem[]>();
   for (const g of SCENE_GROUPS) sceneMap.set(g.key, []);
   sceneMap.set("global", []);
-  for (const s of activeSessions) {
-    const key = SCENE_GROUPS.some((g) => g.key === s.locked_skill_name)
-      ? s.locked_skill_name!
-      : "global";
+  for (const s of sessions) {
+    const key =
+      s.kind === "monitor"
+        ? "monitor"
+        : SCENE_GROUPS.some((g) => g.key === s.locked_skill_name)
+          ? s.locked_skill_name!
+          : "global";
     sceneMap.get(key)!.push(s);
   }
 
@@ -375,6 +386,8 @@ function TaskTree({
 
   const renderSessionRow = (s: SessionItem): JSX.Element => {
     const isCurrent = currentSessionId === s.id;
+    // 2026-08-15(蒋先生反馈): hover 图标遮挡对话名 —— 非当前会话只显示
+    // 核心 3 个操作(重命名/归档/删除); 文件夹/导出/断点继续仅当前会话显示。
     const showActions = hoverId === s.id || isCurrent;
     return (
       <div
@@ -444,7 +457,25 @@ function TaskTree({
                   }}
                   title="会话被中断, 可断点继续"
                 >
-                  已中断
+                  未归档
+                </span>
+              )}
+              {/* 2026-08-15(蒋先生反馈): 已归档改为对话名后标签(并入场景组) */}
+              {s.status === "archived" && (
+                <span
+                  style={{
+                    flexShrink: 0,
+                    fontSize: 9,
+                    padding: "1px 6px",
+                    borderRadius: 8,
+                    background: "var(--panel-bg)",
+                    color: "var(--text-tertiary)",
+                    border: "1px solid var(--border)",
+                    whiteSpace: "nowrap",
+                  }}
+                  title="会话已归档, 点击可查看"
+                >
+                  已归档
                 </span>
               )}
             </span>
@@ -467,7 +498,6 @@ function TaskTree({
             onClick={(e) => e.stopPropagation()}
           >
             <ActionBtn label="✎" title="重命名" onClick={() => startRename(s)} />
-            <ActionBtn label="📁" title={s.folder ? `移到文件夹(当前:${s.folder})` : "移到文件夹"} onClick={() => promptFolder(s)} />
             {/* V1.5 项-4: 中断会话断点继续按钮(先切到该会话再 resume) */}
             {s.status === "interrupted" && onResumeSession && (
               <ActionBtn
@@ -484,7 +514,6 @@ function TaskTree({
               title={s.status === "archived" ? "恢复会话" : "归档会话"}
               onClick={() => toggleArchive(s)}
             />
-            <ActionBtn label="⤓" title="导出(MD/JSON)" onClick={() => setExportFor(exportFor === s.id ? null : s.id)} />
             <ActionBtn
               label="×"
               title="删除此会话"
@@ -495,6 +524,13 @@ function TaskTree({
                 }
               }}
             />
+            {/* 仅当前会话显示低频操作(文件夹/导出), 减少 hover 遮挡 */}
+            {isCurrent && (
+              <>
+                <ActionBtn label="📁" title={s.folder ? `移到文件夹(当前:${s.folder})` : "移到文件夹"} onClick={() => promptFolder(s)} />
+                <ActionBtn label="⤓" title="导出(MD/JSON)" onClick={() => setExportFor(exportFor === s.id ? null : s.id)} />
+              </>
+            )}
           </span>
         )}
         {exportFor === s.id && showActions && (
@@ -708,7 +744,7 @@ function TaskTree({
               暂无历史会话, 点击 + 新建
             </div>
           )}
-          {/* 0.5.0 M1: 历史按场景分组(子瞻/白圭/清和 + 全局) */}
+          {/* 0.5.0 M1: 历史按场景分组(子瞻/白圭/清和 + 主智能体 + 全局) */}
           {[...SCENE_GROUPS, { key: "global", name: "全局", icon: "🌐" }].map((g) => {
             const list = sceneMap.get(g.key) ?? [];
             if (list.length === 0) return null;
@@ -742,33 +778,6 @@ function TaskTree({
               </div>
             );
           })}
-          {archivedSessions.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 4 }}>
-              <button
-                onClick={() => setArchivedOpen(!archivedOpen)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "4px 8px",
-                  fontSize: 11,
-                  color: "var(--text-tertiary)",
-                  border: "none",
-                  background: "transparent",
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-              >
-                <span>🗄 已归档 ({archivedSessions.length})</span>
-                <span>{archivedOpen ? "▾" : "▸"}</span>
-              </button>
-              {archivedOpen && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                  {archivedSessions.map(renderSessionRow)}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -803,12 +812,13 @@ function ActionBtn({
       onClick={onClick}
       title={title}
       style={{
-        width: 20,
-        height: 20,
+        // 2026-08-15(蒋先生反馈): 缩小图标尺寸(20→15px), 减少 hover 遮挡对话名
+        width: 15,
+        height: 15,
         border: "none",
         background: "transparent",
         color: danger ? "var(--text-tertiary)" : "var(--text-tertiary)",
-        fontSize: 11,
+        fontSize: 10,
         cursor: "pointer",
         borderRadius: 4,
         padding: 0,
@@ -1164,6 +1174,7 @@ export default function Sidebar({
             onSwitchSession={onSwitchSession}
             onNavigate={onChange}
             onResumeSession={onResumeSession}
+            agentName={agentName}
           />
 
           <NavLabel>系统</NavLabel>

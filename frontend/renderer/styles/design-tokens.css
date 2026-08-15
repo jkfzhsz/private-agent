@@ -626,6 +626,10 @@ body,
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 2026-08-15(蒋先生反馈): 数据管理/通用设置/工具与MCP 等板块内部
+     有固定宽度元素, 窄窗口下横向溢出被 .settings-layout overflow:hidden
+     裁切(看不全)。加 overflow-x 兜底: 超宽时出现横向滚动条而非裁切。 */
+  overflow-x: auto;
   padding-right: 4px;
   display: flex;
   flex-direction: column;

@@ -28,6 +28,7 @@ from private_agent.core.subagent import (
     lifetime_exceeded_ids,
     scan_and_mark_stalled,
     subagent_cfg,
+    subagent_type_registry,
 )
 from private_agent.observability.logging import setup_logger
 from private_agent.tools.defs import ToolDef, ToolResult
@@ -55,6 +56,16 @@ DELEGATE_SCHEMA: dict = {
                         "description": (
                             "自包含的委派指令: 必须明确子任务边界"
                             "(输入给什么、要求输出什么、长度上限)"
+                        ),
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["search", "analysis", "code", "other"],
+                        "description": (
+                            "2026-08-13 任务类型(可选): search=网络搜索/调研(反爬敏感), "
+                            "analysis=数据分析, code=代码/文件, other=其他。"
+                            "未填时服务端按指令关键词自动推断。"
+                            "注意: 同一轮同一类型最多 1 个子任务, 同类任务请合并。"
                         ),
                     },
                 },
@@ -169,6 +180,32 @@ async def _delegate_handler(
             error="delegate_subtask: 子代理不支持嵌套委派(嵌套深度上限)",
         )
 
+    # 2026-08-13 类型感知限流(方案 §4.2): 类型判定 + 同轮去重。
+    # 蒋先生设计意图: 同一类型的任务不要分派多个子任务(搜索的就搜索、分析的就分析),
+    # 既避免共享 stdio MCP 通道拥挤, 也避免外部网站反爬限流。
+    from collections import Counter
+
+    from private_agent.core.task_types import infer_task_type
+
+    same_type_max = int(sc.get("same_type_max", 1))
+    type_wait_timeout = float(sc.get("type_wait_timeout_sec", 30))
+    types: list[str] = []
+    for st in subtasks:
+        explicit = st.get("type")
+        explicit = explicit if isinstance(explicit, str) else None
+        types.append(infer_task_type(st.get("prompt", ""), explicit))
+    type_counts = Counter(types)
+    for typ, n in type_counts.items():
+        if n > same_type_max:
+            return ToolResult(
+                output="",
+                error=(
+                    f"delegate_subtask: 同类子任务已含 {typ}×{n}(上限 {same_type_max})。"
+                    "同一类型的任务不要分派多个子代理(搜索/分析/代码分别合并), "
+                    "请合并为一个子任务后重试。"
+                ),
+            )
+
     # 触发委派的轮次(当前轮 user 消息已 append, MAX(turn) = 当前轮)
     parent_turn = await conn.fetchval(
         "SELECT COALESCE(MAX(turn), 0) FROM messages WHERE session_id=$1",
@@ -178,17 +215,38 @@ async def _delegate_handler(
         "SELECT model_id FROM sessions WHERE id=$1", session_id
     )
 
+    # 2026-08-13: 进程级类型配额 acquire(跨会话/跨轮, 同类型全局并发受限)。
+    # 超限等待 type_wait_timeout_sec; 超时释放已获取并拒绝(让模型稍后重试/合并)。
+    # 释放点覆盖全部路径: 正常聚合前 / CancelledError / acquire 中途失败。
+    acquired: list[str] = []
+    for typ in types:
+        if not await subagent_type_registry.acquire(
+            typ, max_conc=same_type_max, timeout_sec=type_wait_timeout
+        ):
+            for _t in acquired:
+                await subagent_type_registry.release(_t)
+            return ToolResult(
+                output="",
+                error=(
+                    f"delegate_subtask: 同类型子代理({typ})当前已在运行且并发已达上限"
+                    f"({same_type_max}), 等待 {type_wait_timeout}s 超时。"
+                    "请稍后重试, 或将任务合并到现有子代理。"
+                ),
+            )
+        acquired.append(typ)
+
     # 1) 创建 subagents 行(pending) + 推 subagent_start
     subagent_ids: list[int] = []
-    for st in subtasks:
+    for i, st in enumerate(subtasks):
         sid = await conn.fetchval(
             """
             INSERT INTO subagents (session_id, parent_turn, parent_task, prompt,
-                                   model_id, status)
-            VALUES ($1, $2, $3, $4, $5, 'pending')
+                                   model_id, status, task_type)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6)
             RETURNING id
             """,
             session_id, parent_turn, st["id"], st["prompt"], parent_model,
+            types[i],
         )
         subagent_ids.append(int(sid))
         await _safe_push(event_sink, {
@@ -231,7 +289,7 @@ async def _delegate_handler(
             parent_turn=parent_turn,
         )
     except asyncio.CancelledError:
-        # 父会话停止 / 工具超时(wait_for 300s) → 级联取消 + DB 批量置 cancelled
+        # 父会话停止 / 工具超时(wait_for) → 级联取消 + DB 批量置 cancelled
         logger.warning(
             "delegate_subtask interrupted: session=%s cancelling %d subagents",
             session_id, len(subagent_ids),
@@ -239,6 +297,21 @@ async def _delegate_handler(
         for t in tasks_by_id.values():
             if not t.done():
                 t.cancel()
+        # 2026-08-13 修复: cancel 后 await join —— 此前只发信号不等待,
+        # 子代理阻塞中的模型调用/MCP 请求未释放, 拖死 Searchpin 等 MCP 通道
+        # (后续工具全部 30s 超时的根因)。join 设 cancel_wait_sec 上限, 不无限等;
+        # 超时未退出的 zombie 记 ERROR(资源泄漏由观测系统告警)。
+        if tasks_by_id:
+            _, zombie = await asyncio.wait(
+                list(tasks_by_id.values()),
+                timeout=sc["cancel_wait_sec"],
+            )
+            for _t in zombie:
+                logger.error(
+                    "subagent zombie on cancel: session=%s 子代理未在 %ss 内退出"
+                    "(阻塞的模型/MCP 调用未响应 cancel, 资源泄漏)",
+                    session_id, sc["cancel_wait_sec"],
+                )
         await conn.execute(
             """
             UPDATE subagents SET status='cancelled', finished_at=now()
@@ -246,9 +319,13 @@ async def _delegate_handler(
             """,
             subagent_ids,
         )
+        for _t in acquired:
+            await subagent_type_registry.release(_t)
         raise
 
     # 4) 聚合结果(截断防超长, ADR R12)
+    for _t in acquired:
+        await subagent_type_registry.release(_t)
     rows = await conn.fetch(
         """
         SELECT id, parent_task, status, result, error, tool_calls

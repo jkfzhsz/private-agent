@@ -37,6 +37,8 @@
     "appId": "com.privateagent.desktop",
     "productName": "Private Agent",
     "icon": "build/icon.ico",
+    "compression": "normal",
+    "electronLanguages": ["zh-CN", "en-US"],
     "directories": {
       "output": "release2"
     },
@@ -58,6 +60,8 @@
           "!**/.env",
           "!**/.env.*",
           "!**/outputs/**",
+          "!**/uploads/**",
+          "!**/.claude/**",
           "!**/logs/**",
           "!**/tests/**",
           "!**/__pycache__/**",
@@ -91,9 +95,11 @@
       "createDesktopShortcut": true,
       "shortcutName": "Private Agent",
       "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico"
+      "uninstallerIcon": "build/icon.ico",
+      "differentialPackage": false
     },
-    "electronDist": "node_modules/electron/dist"
+    "electronDist": "node_modules/electron/dist",
+    "publish": null
   },
   "author": "zongxin"
 }

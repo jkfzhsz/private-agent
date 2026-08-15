@@ -17,6 +17,7 @@ from private_agent.tools.builtins.monitor_tools import MONITOR_TOOLS
 from private_agent.tools.builtins.read_artifact import READ_ARTIFACT_TOOL
 from private_agent.tools.builtins.search_knowledge import SEARCH_KNOWLEDGE_TOOL
 from private_agent.tools.builtins.search_lessons import SEARCH_LESSONS_TOOL
+from private_agent.tools.builtins.system_capabilities import SYSTEM_CAPABILITIES_TOOL
 from private_agent.tools.builtins.web_search import WEB_SEARCH_TOOL
 from private_agent.tools.registry import ToolRegistry
 
@@ -37,6 +38,7 @@ __all__ = [
     "MONITOR_TOOLS",
     "SEARCH_LESSONS_TOOL",
     "EVOLUTION_TOOLS",
+    "SYSTEM_CAPABILITIES_TOOL",
 ]
 
 
@@ -89,6 +91,7 @@ def register_all_builtins(registry: ToolRegistry) -> None:
         MEMORY_SEARCH_TOOL,
         MEMORY_SAVE_TOOL,
         SEARCH_LESSONS_TOOL,
+        SYSTEM_CAPABILITIES_TOOL,
     ]
     for td in tools:
         registry.register_builtin(td.name, td)

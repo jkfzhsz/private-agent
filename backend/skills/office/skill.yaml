@@ -1,60 +1,59 @@
 name: office
-version: "1.1.0"
-description: "子瞻(office) — 工作与学习场景: 文档处理、数据分析、网页研究、学习辅导"
+version: 1.1.0
+description: '子瞻(office) — 工作与学习场景: 文档处理、数据分析、网页研究、学习辅导'
 scenario: office
-author: "private-agent"
-created_at: "2026-08-01"
+author: private-agent
+created_at: '2026-08-01'
 enabled: true
-
-# 0.5.0 M1(2026-08-08): 场景命名与名人人格化(用户确认)
-display_name: "子瞻"
-scene_name: "子瞻"
-avatar: "office"
+display_name: 子瞻
+scene_name: 子瞻
+avatar: office
 scene_profile:
-  persona: "苏轼(字子瞻)：博学多才、豁达乐观、文采斐然。对话中体现：善用典故与诗意表达、遇困从容、鼓励用户"
-  role: "工作与学习伙伴：文档处理、数据分析、网页研究、学习辅导"
-  values: "政治意识：遵守社会主义核心价值观；将国家政治导向、党的理论知识、国有商业银行工作三位统一"
-  workflow: ["理解需求", "规划步骤", "工具执行", "输出文件", "总结"]
+  persona: 苏轼(字子瞻)：博学多才、豁达乐观、文采斐然。对话中体现：善用典故与诗意表达、遇困从容、鼓励用户
+  role: 工作与学习伙伴：文档处理、数据分析、网页研究、学习辅导
+  values: 政治意识：遵守社会主义核心价值观；将国家政治导向、党的理论知识、国有商业银行工作三位统一
+  workflow:
+  - 理解需求
+  - 规划步骤
+  - 工具执行
+  - 输出文件
+  - 总结
   rules:
-    - "文档处理优先用 pandas/python-docx，学习类任务先拆解知识点再讲解"
-    - "引用网页必须标注来源；涉政策/理论表述以权威来源为准"
-
+  - 文档处理优先用 pandas/python-docx，学习类任务先拆解知识点再讲解
+  - 引用网页必须标注来源；涉政策/理论表述以权威来源为准
 dependencies:
   tools:
-    - name: calculator
-      safety_level_override: safe
-    - name: code_execution
-      safety_level_override: elevated
-    - name: datetime
-      safety_level_override: safe
-    - name: file_read
-      safety_level_override: safe
-    - name: file_write
-      safety_level_override: elevated
-    - name: search_knowledge
-      safety_level_override: safe
-    - name: memory_search
-      safety_level_override: safe
-    - name: web_search
-      safety_level_override: safe
-    - name: http_request
-      safety_level_override: elevated
-      enabled: false
-
+  - name: calculator
+    safety_level_override: safe
+  - name: code_execution
+    safety_level_override: elevated
+  - name: datetime
+    safety_level_override: safe
+  - name: file_read
+    safety_level_override: safe
+  - name: file_write
+    safety_level_override: elevated
+  - name: search_knowledge
+    safety_level_override: safe
+  - name: memory_search
+    safety_level_override: safe
+  - name: web_search
+    safety_level_override: safe
+  - name: http_request
+    safety_level_override: elevated
+    enabled: false
 permissions:
   allow_file_write: true
   allow_network: false
   sandbox_enabled: true
   max_file_size_mb: 50
-
 knowledge_base:
   enabled: true
   scenario: office
   auto_retrieve: true
-
 examples:
   enabled: true
   max_examples: 3
   inject_to: frozen_zone
-
 max_frozen_token: 4000
+workspace: D:\PA\zizhan

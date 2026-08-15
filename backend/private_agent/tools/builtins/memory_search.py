@@ -53,10 +53,21 @@ async def _memory_search_handler(args: dict) -> ToolResult:
     try:
         repo = MemoriesRepo(conn)
         memories = await repo.get_top_active(
-            limit=top_k * 3,  # 宽取再做关键词过滤
+            limit=max(top_k * 20, 200),  # 0.5.1 fix: 候选集扩大(原 top_k*3=15,
+            # 活跃记忆 >15 条时新记忆会被 importance 排序截断漏检)
             scope=scope,
         )
-        hits = [m for m in memories if query.lower() in (m.content or "").lower()]
+        # 0.5.1 fix(2026-08-13): 空格分词 OR 匹配(对齐 kb keyword_search)。
+        # 原实现把含空格的多词 query 当连续子串匹配 → 中文多词查询必然 0 命中
+        # ("记忆能写不能读"根因, 见 memory-kb-storage-诊断报告-2026-08-13)。
+        # 无空格时 tokens=[query], 行为与旧版一致(整串匹配)。
+        tokens = list(dict.fromkeys(t for t in query.split() if t.strip())) or [
+            query
+        ]
+        hits = [
+            m for m in memories
+            if any(t.lower() in (m.content or "").lower() for t in tokens)
+        ]
         archived: list[dict] = []
         if include_archived:
             archived = await repo.search_archived(query, limit=top_k)

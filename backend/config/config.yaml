@@ -214,6 +214,15 @@ tools:
       office: ["hexin-ifind-ds-*", "mempalace", "Searchpin"]
       data_analysis: ["hexin-ifind-ds-*", "mempalace", "Searchpin"]
       frontend_design: ["mempalace", "Searchpin"]
+    # 2026-08-13 类型感知限流(方案 §4.3): 进程级 MCP 请求类型并发上限。
+    # MCP client 是进程级单例(全会话共享同一 Searchpin 子进程), ReactLoop 级
+    # Semaphore(concurrent_limit=5) 无法防多会话并发打爆通道。search 类(web_search/
+    # Searchpin)访问外部网站, 反爬敏感, 全局并发压到 1 —— 既防管道拥挤也防网站限流。
+    type_limits:
+      search: 1
+      analysis: 3
+      code: 3
+      other: 5
   # 对话流畅度优化(方向一): 每轮动态 top-N 工具注入(避免全量 schema)
   tool_selection:
     enabled: true
@@ -244,8 +253,12 @@ tools:
       web_search: 30
       code_execution: 300
       search_knowledge: 10
-      delegate_subtask: 300  # V1.5 项-1: 委派工具兜底上限(子代理心跳机制保证
-                             # 挂掉时提前释放, 不等满 300s; 300s 亦为子代理硬总时长上限)
+      delegate_subtask: 1860  # V1.5 项-1: 委派工具兜底上限。2026-08-13 修复:
+                              # 原 300s 与 max_total_lifetime(300s) 同值且过短, 误杀
+                              # 心跳正常的慢任务(搜索类 20+ 次检索 300s 不够), 且 wait_for
+                              # 先于 lifetime 到点走了粗暴 cancel 路径(拖死 MCP 通道)。
+                              # 现设为 1860s(31min) > max_total_lifetime(1800s), 让心跳
+                              # 机制 + lifetime 优雅判定先行, wait_for 仅作最后保险丝。
     max_retries: 3
     backoff_base_sec: 1
   # V1.5 项-1 子代理/任务委派(ADR-012 §3.3(f) 配置项, [runtime])
@@ -254,7 +267,11 @@ tools:
     heartbeat_timeout_sec: 90    # 无心跳判 stale 阈值(> 单次模型/工具调用上限)
     heartbeat_poll_sec: 5        # watchdog 轮询间隔(delegate handler 轮询式 wait)
     grace_sec: 30                # stale 后宽限窗口(自 stalled_at 起算, 非最后心跳)
-    max_total_lifetime_sec: 300  # 子代理最大总生命周期硬上限(防御心跳 bug 死循环)
+    max_total_lifetime_sec: 1800  # 子代理最大总生命周期硬上限。2026-08-13 修复:
+                                  # 原 300s 误杀心跳正常的长任务(搜索类任务 300s 不够,
+                                  # 心跳机制本应"慢但活着不误判")。放宽到 30min, 仅作
+                                  # 防御心跳 bug 死循环的最后兜底, 真死判定交给心跳超时
+                                  # (stalled→grace→kill)。
     max_parallel: 3              # 单轮委派子代理数上限
     max_nesting_depth: 2         # 嵌套深度上限(M2: 子代理不注入 delegate 工具 → 实际 1)
     cancel_wait_sec: 5           # cancel 后等待任务退出的窗口期(zombie 判定)

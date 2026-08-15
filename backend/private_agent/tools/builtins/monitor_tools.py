@@ -222,6 +222,135 @@ async def _apply_optim_handler(
             await conn.close()
 
 
+async def _subagent_status_handler(
+    args: dict, ctx: Any | None = None, **kwargs: Any
+) -> ToolResult:
+    """查询所有会话最近的子代理委派状态(成功/取消/失败/超时)。
+
+    2026-08-13 修复(问题3 第一环): 全局智能体此前无跨会话子任务查询工具,
+    "调查子任务取消原因连事件都找不到"。本工具打通 subagents 表查询。
+
+    Args:
+        since_hours: 最近 N 小时(默认 24)。
+        status: 可选过滤(cancelled/failed/succeeded/running)。
+        limit: 返回条数上限(默认 50)。
+    """
+    conn = None
+    try:
+        from collections import Counter
+
+        from private_agent.storage import db
+
+        conn = await db.connect()
+        since_hours = float(args.get("since_hours", 24))
+        status = args.get("status")
+        limit = int(args.get("limit", 50))
+        if status:
+            rows = await conn.fetch(
+                """
+                SELECT id, session_id, status, error, tool_calls,
+                       created_at, started_at, finished_at
+                FROM subagents
+                WHERE created_at > now() - make_interval(hours => $1)
+                  AND status = $2
+                ORDER BY id DESC LIMIT $3
+                """,
+                since_hours, str(status), limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, session_id, status, error, tool_calls,
+                       created_at, started_at, finished_at
+                FROM subagents
+                WHERE created_at > now() - make_interval(hours => $1)
+                ORDER BY id DESC LIMIT $2
+                """,
+                since_hours, limit,
+            )
+        if not rows:
+            return ToolResult(output=f"(最近 {since_hours}h 无子代理委派记录)")
+        cnt = Counter(r["status"] for r in rows)
+        dist = ", ".join(f"{k}={v}" for k, v in cnt.items())
+        lines = [f"最近 {since_hours}h 共 {len(rows)} 条子代理记录, 状态分布: {dist}"]
+        for r in rows:
+            lines.append(
+                f"- #{r['id']} session={r['session_id']} status={r['status']} "
+                f"tool_calls={r['tool_calls']} error={r['error'] or '-'} "
+                f"started={r['started_at']} finished={r['finished_at']}"
+            )
+        return ToolResult(output="\n".join(lines))
+    except Exception as e:  # noqa: BLE001
+        return ToolResult(output="", error=f"subagent_status failed: {e}")
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def _session_events_handler(
+    args: dict, ctx: Any | None = None, **kwargs: Any
+) -> ToolResult:
+    """查询指定会话的 react_events 事件流(跨会话, 全局智能体可查任意会话)。
+
+    2026-08-13 修复(问题3 第一环): 让全局智能体"回放"任意会话的事件,
+    定位子任务取消/超时/报错的真实原因。
+
+    Args:
+        session_id: 会话 id(必填)。
+        event_type: 可选过滤(subagent/error/tool_error/tool_result/final 等)。
+        limit: 返回条数上限(默认 100)。
+    """
+    session_id = args.get("session_id")
+    if session_id is None:
+        return ToolResult(output="", error="session_id required")
+    conn = None
+    try:
+        from private_agent.storage import db
+
+        conn = await db.connect()
+        event_type = args.get("event_type")
+        limit = int(args.get("limit", 100))
+        if event_type:
+            rows = await conn.fetch(
+                """
+                SELECT id, turn, event_type, payload, created_at
+                FROM react_events
+                WHERE session_id = $1 AND event_type = $2
+                ORDER BY id DESC LIMIT $3
+                """,
+                int(session_id), str(event_type), limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, turn, event_type, payload, created_at
+                FROM react_events
+                WHERE session_id = $1
+                ORDER BY id DESC LIMIT $2
+                """,
+                int(session_id), limit,
+            )
+        if not rows:
+            return ToolResult(output=f"(session {session_id} 无匹配事件)")
+        lines = [f"session {session_id} 共 {len(rows)} 条事件(倒序):"]
+        for r in rows:
+            payload = r["payload"]
+            if isinstance(payload, str):
+                snippet = payload[:140]
+            else:
+                snippet = str(payload)[:140]
+            lines.append(
+                f"- [{r['event_type']}] turn={r['turn']} {snippet} "
+                f"(at {r['created_at']})"
+            )
+        return ToolResult(output="\n".join(lines))
+    except Exception as e:  # noqa: BLE001
+        return ToolResult(output="", error=f"session_events failed: {e}")
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
 # 工具注册表(monitor 会话专属白名单, 由 skills/loader 或 main.py 装配)
 MONITOR_TOOLS: list[ToolDef] = [
     ToolDef(
@@ -299,5 +428,56 @@ MONITOR_TOOLS: list[ToolDef] = [
         handler=_apply_optim_handler,
         is_kernel=False,
         safety_level="elevated",  # 触发 WS 60s 权限确认
+    ),
+    ToolDef(
+        name="subagent_status",
+        description=(
+            "查询所有会话最近的子代理委派状态(成功/取消/失败/超时)。"
+            "用于全局智能体发现其他对话中子任务被取消/超时的异常, "
+            "支持按时间范围/状态过滤。"
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "since_hours": {
+                    "type": "number",
+                    "description": "最近 N 小时(默认 24)",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "状态过滤: cancelled/failed/succeeded/running",
+                },
+                "limit": {"type": "integer", "description": "返回条数上限(默认 50)"},
+            },
+        },
+        handler=_subagent_status_handler,
+        is_kernel=False,
+        safety_level="none",
+    ),
+    ToolDef(
+        name="session_events",
+        description=(
+            "查询指定会话的 react_events 事件流(跨会话, 可查任意会话)。"
+            "用于全局智能体回放某次对话的事件, 定位子任务取消/工具超时/报错"
+            "的真实原因。"
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "integer", "description": "会话 id(必填)"},
+                "event_type": {
+                    "type": "string",
+                    "description": (
+                        "事件类型过滤: subagent/error/tool_error/tool_result/"
+                        "final/tool_confirmation_required 等"
+                    ),
+                },
+                "limit": {"type": "integer", "description": "返回条数上限(默认 100)"},
+            },
+            "required": ["session_id"],
+        },
+        handler=_session_events_handler,
+        is_kernel=False,
+        safety_level="none",
     ),
 ]

@@ -99,15 +99,32 @@ class SkillManager:
         await cm.ensure_initial(conn)
         frozen_hash = cm.compute_frozen_hash()
 
-        # 7. UPDATE sessions 锁定字段
-        await conn.execute(
-            "UPDATE sessions SET locked_skill_name=$1, locked_skill_version=$2, "
-            "frozen_hash=$3 WHERE id=$4",
-            skill_name,
-            skill.manifest.version,
-            frozen_hash,
-            session_id,
+        # 7. UPDATE sessions 锁定字段 + 场景工作区注入(2026-08-15 蒋先生需求)
+        # 场景智能体的产物默认落自己的工作区: skill manifest.workspace 配置时,
+        # 会话未设置工作区(NULL)则注入(用户手动设置过的不覆盖)。
+        skill_ws = (skill.manifest.workspace or "").strip()
+        cur_ws = await conn.fetchval(
+            "SELECT workspace FROM sessions WHERE id = $1", session_id
         )
+        if skill_ws and not cur_ws:
+            await conn.execute(
+                "UPDATE sessions SET locked_skill_name=$1, locked_skill_version=$2, "
+                "frozen_hash=$3, workspace=$4 WHERE id=$5",
+                skill_name,
+                skill.manifest.version,
+                frozen_hash,
+                skill_ws,
+                session_id,
+            )
+        else:
+            await conn.execute(
+                "UPDATE sessions SET locked_skill_name=$1, locked_skill_version=$2, "
+                "frozen_hash=$3 WHERE id=$4",
+                skill_name,
+                skill.manifest.version,
+                frozen_hash,
+                session_id,
+            )
 
         return {
             "locked_version": skill.manifest.version,

@@ -40,6 +40,10 @@ async def code_execution_handler(args: dict) -> ToolResult:
     # 安全边界: code_execution 为 elevated 工具, 联网执行同样经过权限确认,
     # 用户在确认弹窗可见"联网"语义。仅 LLM 显式声明 network=true 才放行。
     allow_network: bool = bool(args.get("network", False))
+    # 2026-08-15: 会话工作区 env 对齐(ReactLoop 注入的内部参数, 不进模型
+    # schema) —— 沙箱子进程 WORKSPACE 环境变量覆盖为会话选定工作区,
+    # 避免模型在代码里读到全局 backend 路径把产物写错目录。
+    workspace_env: str | None = args.get("_workspace_env")
     # 流式输出回调(由 react_loop 注入): (stream_type, chunk) -> Awaitable[None]
     on_output = args.get("_on_output")
 
@@ -59,6 +63,7 @@ async def code_execution_handler(args: dict) -> ToolResult:
             code=code, language="python", timeout=timeout,
             session_id=session_id, on_output=on_output,
             allow_network=allow_network,
+            workspace_env=workspace_env,
         )
         output = (
             f"Exit code: {result.exit_code}\n"

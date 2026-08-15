@@ -47,6 +47,8 @@ from private_agent.storage import db
 __all__ = [
     "SubagentRunner",
     "subagent_cfg",
+    "subagent_type_registry",
+    "SubagentTypeRegistry",
     "scan_and_mark_stalled",
     "grace_expired_ids",
     "lifetime_exceeded_ids",
@@ -55,6 +57,53 @@ __all__ = [
 ]
 
 logger = setup_logger("private_agent.subagent")
+
+
+class SubagentTypeRegistry:
+    """进程级: running 子代理的类型并发计数(跨会话/跨轮)。
+
+    2026-08-13 类型感知限流(方案 §4.2): 同一类型的子代理全局并发受限,
+    防"3 个搜索子代理并行打爆外部网站(反爬) / 共享 stdio MCP 通道"。
+    超限 acquire 等待(type_wait_timeout_sec), 超时返回 False 由调用方拒绝重规划。
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+        self._cond: asyncio.Condition = asyncio.Condition()
+
+    def current(self, typ: str) -> int:
+        """当前 running 计数(同步读取, 测试/日志用)。"""
+        return self._counts.get(typ, 0)
+
+    async def acquire(
+        self, typ: str, max_conc: int, timeout_sec: float = 30.0
+    ) -> bool:
+        """尝试获取一个类型配额。超限时等待, 超时返回 False。"""
+
+        async def _wait() -> bool:
+            async with self._cond:
+                while self._counts.get(typ, 0) >= max_conc:
+                    await self._cond.wait()
+                self._counts[typ] = self._counts.get(typ, 0) + 1
+            return True
+
+        if max_conc <= 0:
+            return False
+        try:
+            return await asyncio.wait_for(_wait(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            return False
+
+    async def release(self, typ: str) -> None:
+        """释放一个类型配额(子代理终态时调用)。"""
+        async with self._cond:
+            if self._counts.get(typ, 0) > 0:
+                self._counts[typ] -= 1
+            self._cond.notify_all()
+
+
+# 进程级单例(跨会话/跨轮共享)
+subagent_type_registry = SubagentTypeRegistry()
 
 
 def _rowcount(result) -> int:
@@ -118,6 +167,9 @@ def subagent_cfg(cfg: dict | None) -> dict:
         "max_nesting_depth": int(s.get("max_nesting_depth", 2)),
         "cancel_wait_sec": float(s.get("cancel_wait_sec", 5)),
         "max_restarts": int(s.get("max_restarts", 0)),
+        # 2026-08-13 类型感知限流(方案 §4.2/§4.4)
+        "same_type_max": int(s.get("same_type_max", 1)),
+        "type_wait_timeout_sec": float(s.get("type_wait_timeout_sec", 30)),
     }
 
 
@@ -544,11 +596,31 @@ class SubagentRunner:
         )
 
     async def _mark_cancelled(self) -> None:
+        # 2026-08-13 修复: cancelled 补写 tool_calls(此前恒 0, 误导排查
+        # "tool_calls=0" 被误读为"子代理没干活") + subagent 埋点(kind='cancelled',
+        # 让全局智能体/管理端可查取消事件)。埋点失败不阻断取消流程。
         await self._conn.execute(
-            "UPDATE subagents SET status='cancelled', finished_at=now() "
-            "WHERE id=$1 AND status='running'",
-            self._subagent_id,
+            "UPDATE subagents SET status='cancelled', finished_at=now(), "
+            "tool_calls=$2 WHERE id=$1 AND status='running'",
+            self._subagent_id, self._tool_call_count,
         )
+        try:
+            await _emit_observability_event(
+                self._conn,
+                parent_session_id=self._parent_session_id,
+                turn=self._parent_turn,
+                kind="cancelled",
+                subagent_id=self._subagent_id,
+                detail=(
+                    f"父会话取消/工具超时级联取消(已执行 {self._tool_call_count} "
+                    "次工具调用)"
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "subagent cancelled 埋点失败(不阻断取消流程): subagent_id=%s",
+                self._subagent_id,
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

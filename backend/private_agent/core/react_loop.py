@@ -344,6 +344,12 @@ class ReactLoop:
             persist: 是否持久化到 DB。False 用于高频流式事件
                 (如 sandbox_output), 避免事件风暴, 仅 WS 推送 + 队列。
         """
+        # 0.5.1 A-1(2026-08-15, C-4 事件级去重): event_id = DB 自增 id。
+        # 落库后回填推送事件 → 实时推送与 replay 重放共享同一 id, 前端
+        # 按 event_id 去重(修复: turn N 中途断线重连, 该轮事件全量重放
+        # 导致 delta 重复累积 / 事件重复渲染)。
+        # persist=False 的高频事件(sandbox_output/turn_paused 等)不入库,
+        # 无 event_id —— 它们不参与 replay, 去重无意义(丢失可接受)。
         event: dict[str, Any] = {
             "type": "react_event",
             "event_type": event_type,
@@ -354,13 +360,14 @@ class ReactLoop:
 
         # 持久化到 DB(高频流式事件跳过)
         if persist:
-            await insert_react_event(
+            event_id = await insert_react_event(
                 self._conn,
                 session_id=self._session_id,
                 turn=self._turn,
                 event_type=event_type,
                 payload=payload or {},
             )
+            event["event_id"] = event_id
 
         # 推送到队列(测试消费)
         await self.event_queue.put(event)
@@ -534,20 +541,37 @@ class ReactLoop:
                 and self._status_bar_per_turn
                 and self._iteration % self._status_bar_inject_every == 0
             ):
+                status_text = self._status_bar.render(
+                    state=self._state.value,
+                    turn=self._turn,
+                    iteration=self._iteration,
+                    max_iterations=self._max_iterations,
+                    workspace=self._workspace_label,
+                    platform=self._platform_label,
+                )
                 messages = [
                     *messages,
                     {
                         "role": "user",
-                        "content": self._status_bar.render(
-                            state=self._state.value,
-                            turn=self._turn,
-                            iteration=self._iteration,
-                            max_iterations=self._max_iterations,
-                            workspace=self._workspace_label,
-                            platform=self._platform_label,
-                        ),
+                        "content": status_text,
                     },
                 ]
+                # 0.5.1 A-1: 注入审计(状态栏进模型视野; 仅落库不推 WS)。
+                # 状态栏每迭代注入 → 事件量与迭代数一致(有界, 通常 <10/轮)。
+                try:
+                    await insert_react_event(
+                        self._conn,
+                        session_id=self._session_id,
+                        turn=self._turn,
+                        event_type="context_injected",
+                        payload={
+                            "source": "status_bar",
+                            "bytes": len(status_text.encode("utf-8")),
+                            "preview": status_text[:200],
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    self._logger.warning("status_bar context_injected audit failed")
 
             # 推理增量累积器(跨 iteration 的 thinking 事件流, 前端逐段展示)
             reasoning_acc: list[str] = []
@@ -568,9 +592,13 @@ class ReactLoop:
             # 多模态检测: 消息含图片内容时, FallbackChain 跳过纯文本模型,
             # 从首个多模态模型开始调用(避免逐个试纯文本模型 400 后才降级)
             require_vision = _messages_contain_image(messages)
-            # 0.5.1(2026-08-09): 图片文本引用 → image_url(data URL)注入,
-            # 让多模态模型真正"看到"图片(此前模型只收到路径文本)。
+            # 0.5.3(2026-08-14 优化): 发图轮不传工具 schema。
+            # GLM-4.6V-Flash 带 tools 时先尝试 code_execution 读图(而非直接
+            # 看图) → 浪费一轮 + 触发 60s 权限确认超时。看图轮只做纯视觉
+            # 描述(模型直接见 image_url); 若用户需对图执行操作(保存/整理),
+            # 下一轮纯文本主模型(带 tools)承担 —— 符合"视觉补短板、文本贯主线"。
             if require_vision:
+                round_schemas = None
                 messages, skipped_images = _inject_image_urls(messages)
                 # 0.5.1(2026-08-10 蒋先生要求"错误零静默"): 图片超限/读取
                 # 失败 → 明确暴露(能力边界), 不静默跳过让模型瞎答。
@@ -589,6 +617,27 @@ class ReactLoop:
                 # 0.5.1(2026-08-10 双链架构): 发图语境 → 自动切换多模态链
                 if self._vision_adapter is not None:
                     self._adapter = self._vision_adapter
+                    # 0.5.2(2026-08-14 modlens 集成): 参数上限与实际模型绑定。
+                    # provider_limits 按 text 链首选解析(如 deepseek-flash
+                    # max_output_tokens=49152), 切到 vision 链后沿用会超出
+                    # 视觉模型上限(智谱 GLM-4.6V-Flash max 32768 → upstream
+                    # 400 "max_tokens参数非法")。此处按 vision 链首 provider
+                    # 重新解析 max_output_tokens 覆盖。
+                    try:
+                        vp_adapters = getattr(self._vision_adapter, "_adapters", [])
+                        if vp_adapters:
+                            from private_agent.config.loader import (
+                                resolve_provider_limits,
+                            )
+
+                            vp_name = getattr(vp_adapters[0], "provider_name", None)
+                            vp_limits = resolve_provider_limits(self._cfg, vp_name)
+                            if vp_limits.get("max_output_tokens"):
+                                self._max_output_tokens = int(
+                                    vp_limits["max_output_tokens"]
+                                )
+                    except Exception:  # noqa: BLE001 - 解析失败保持原值(仍可降级)
+                        pass
                 else:
                     # 兼容旧构造(无 vision_adapter): 会话锁定纯文本时发图,
                     # 自动改用全 fallback 链的 vision 子集(不报错、不锁死,
@@ -868,6 +917,29 @@ class ReactLoop:
                                     ),
                                     zone="active",
                                 )
+                                # 0.5.1 A-1: 注入审计(hook additionalContext
+                                # 进模型视野; 仅落库不推 WS)
+                                try:
+                                    hook_text = str(
+                                        hook_decision.additional_context
+                                    )
+                                    await insert_react_event(
+                                        self._conn,
+                                        session_id=self._session_id,
+                                        turn=self._turn,
+                                        event_type="context_injected",
+                                        payload={
+                                            "source": "hook_additional_context",
+                                            "bytes": len(
+                                                hook_text.encode("utf-8")
+                                            ),
+                                            "preview": hook_text[:200],
+                                        },
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    self._logger.warning(
+                                        "hook context_injected audit failed"
+                                    )
                             if hook_decision.permission_decision == "deny":
                                 reason = (
                                     f"Tool blocked by hook policy: {tool_name}"
@@ -1023,6 +1095,14 @@ class ReactLoop:
                             ):
                                 args["data_dir"] = ws_root
                                 args["workspace"] = ws_root
+                            # 2026-08-15: code_execution 沙箱内 WORKSPACE env 对齐
+                            # —— 会话选定工作区后, 子进程环境变量 WORKSPACE 若仍
+                            # 是后端全局目录(backend), 模型代码里 os.environ 读取
+                            # 会拿到旧值, 把产物写到 backend/outputs。注入内部参数
+                            # _workspace_env(不进模型 schema), 由 handler 覆盖
+                            # 沙箱子进程 env, 保持全链路一致。
+                            if plan["tool_name"] == "code_execution" and ws_root:
+                                args["_workspace_env"] = ws_root
                             # T-2(架构修订 A.2.5): 工具执行超时按类别分级
                             # (config tools.timeout.categories), 不再读死键
                             # tool_timeout_sec(恒 120s)。
@@ -1197,12 +1277,16 @@ class ReactLoop:
                                 )
 
                         # 持久化 tool message
+                        # 2026-08-13 修复: 补传 error —— 此前超时/失败只写
+                        # output(空), error 丢失, 用户与 LLM 都看不到报错原因
+                        # ("子任务被取消未发现报错"的根因之一)。
                         await self._context_manager.append_tool_message(
                             self._conn,
                             turn=self._turn,
                             tool_call_id=tool_call_id,
                             content=tool_result.output,
                             name=tool_name,
+                            error=tool_result.error,
                         )
 
                         # §4.15 [MVP]: search_knowledge 结果额外注入 Stable Zone

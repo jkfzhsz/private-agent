@@ -112,6 +112,104 @@ class ActivateSkillRequest(BaseModel):
     skill_name: str
 
 
+class SupplementarySkillsRequest(BaseModel):
+    """2026-08-12 Phase 2: 会话附加技能(多技能调用)请求体。"""
+
+    skill_names: list[str]
+    added_by: str = "picker"
+
+
+@router.get("/sessions/{session_id}/supplementary-skills", response_model=None)
+async def list_supplementary_skills(session_id: int):
+    """2026-08-12 Phase 2: 查询会话附加技能(含 display_name 供前端展示)。"""
+    conn = await db.connect()
+    try:
+        rows = await conn.fetch(
+            "SELECT skill_name, added_by, created_at "
+            "FROM session_supplementary_skills "
+            "WHERE session_id = $1 ORDER BY id",
+            session_id,
+        )
+        skills = []
+        for r in rows:
+            skills.append({
+                "name": r["skill_name"],
+                "added_by": r["added_by"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            })
+        return {"skills": skills}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"error": f"query_failed: {e}"})
+    finally:
+        await conn.close()
+
+
+@router.post("/sessions/{session_id}/supplementary-skills", response_model=None)
+async def add_supplementary_skills(
+    session_id: int, body: SupplementarySkillsRequest
+):
+    """2026-08-12 Phase 2: 为会话挂载附加技能(多技能调用, 幂等)。
+
+    - 不改变 sessions.locked_skill_name(主技能)
+    - 技能不存在 → 该技能计入 failed, 不阻塞其余
+    - 挂载后下次消息自动合并 system_prompt/工具白名单
+    """
+    from private_agent.skills.loader import SkillLoader
+
+    cfg = await _load_cfg()
+    loader = SkillLoader.from_cfg(cfg)
+    conn = await db.connect()
+    try:
+        added: list[str] = []
+        failed: list[dict] = []
+        for sname in body.skill_names:
+            try:
+                # 校验技能存在
+                await loader.load(sname, conn)
+            except Exception as e:  # noqa: BLE001
+                failed.append({
+                    "name": sname,
+                    "reason": f"技能不存在或加载失败: {type(e).__name__}: {e}",
+                })
+                continue
+            try:
+                await conn.execute(
+                    "INSERT INTO session_supplementary_skills "
+                    "(session_id, skill_name, added_by) VALUES ($1, $2, $3) "
+                    "ON CONFLICT (session_id, skill_name) DO NOTHING",
+                    session_id, sname, body.added_by,
+                )
+                added.append(sname)
+            except Exception as e:  # noqa: BLE001
+                failed.append({
+                    "name": sname,
+                    "reason": f"挂载失败: {type(e).__name__}: {e}",
+                })
+        return {"ok": True, "added": added, "failed": failed}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"error": f"add_failed: {e}"})
+    finally:
+        await conn.close()
+
+
+@router.delete("/sessions/{session_id}/supplementary-skills/{skill_name}", response_model=None)
+async def remove_supplementary_skill(session_id: int, skill_name: str):
+    """2026-08-12 Phase 2: 移除会话附加技能(多技能取消挂载)。"""
+    conn = await db.connect()
+    try:
+        result = await conn.execute(
+            "DELETE FROM session_supplementary_skills "
+            "WHERE session_id = $1 AND skill_name = $2",
+            session_id, skill_name,
+        )
+        removed = "DELETE" in result
+        return {"ok": True, "removed": removed}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=500, content={"error": f"remove_failed: {e}"})
+    finally:
+        await conn.close()
+
+
 @router.get("/disk-status", response_model=None)
 async def disk_status():
     """返回磁盘占用分级状态(蓝图 §2.10 第 6 条)。
@@ -1121,6 +1219,9 @@ class SkillMetaRequest(BaseModel):
     model_params: dict | None = None
     # V1.1-3.6 改名: 用户可改的显示名(空串=清除回退 name, 不影响标识符)
     display_name: str | None = None
+    # 2026-08-15(蒋先生需求): 场景工作区(该场景智能体产物默认目录,
+    # 空串=清除回退全局 workspace_root)
+    workspace: str | None = None
 
 
 @router.put("/skills/{skill_name}/meta", response_model=None)
@@ -1162,6 +1263,10 @@ async def update_skill_meta(skill_name: str, body: SkillMetaRequest):
         # V1.1-3.6 改名: display_name 写入 skill.yaml(空串表示清除回退 name)
         if body.display_name is not None:
             data["display_name"] = body.display_name.strip()
+        # 2026-08-15(蒋先生需求): 场景工作区写入 skill.yaml(空串=清除)
+        if body.workspace is not None:
+            ws = body.workspace.strip()
+            data["workspace"] = ws
         if body.enabled is not None:
             data["enabled"] = bool(body.enabled)
         yaml_path.write_text(
@@ -3406,18 +3511,49 @@ async def create_session(body: SessionCreateRequest | None = None):
     try:
         conn = await db.connect()
         try:
+            # 2026-08-15(蒋先生需求): 场景工作区 —— 场景智能体的新会话
+            # 自动继承该 skill 配置的工作区(写入 sessions.workspace,
+            # ReactLoop 据此路由产物目录)。kind=monitor 或未配置场景
+            # workspace 时用全局默认(workspace 保持 NULL)。
+            session_workspace: str | None = None
+            if skill_name and kind != "monitor":
+                try:
+                    ws_row = await conn.fetchrow(
+                        """
+                        SELECT manifest FROM skills WHERE name = $1
+                        """,
+                        skill_name,
+                    )
+                    if ws_row and ws_row["manifest"]:
+                        mf = ws_row["manifest"]
+                        if isinstance(mf, str):
+                            import json as _json
+                            mf = _json.loads(mf)
+                        ws_val = (mf or {}).get("workspace")
+                        if isinstance(ws_val, str) and ws_val.strip():
+                            session_workspace = ws_val.strip()
+                except Exception:  # noqa: BLE001 - 工作区读取失败不阻断建会话
+                    session_workspace = None
             row = await conn.fetchrow(
                 """
-                INSERT INTO sessions (title, folder, locked_skill_name, status, kind)
-                VALUES ($1, $2, $3, 'active', $4)
+                INSERT INTO sessions (title, folder, locked_skill_name,
+                                      status, kind, workspace)
+                VALUES ($1, $2, $3, 'active', $4, $5)
                 RETURNING id, created_at
                 """,
                 title,
                 folder,
                 skill_name,
                 kind,
+                session_workspace,
             )
-            return {"ok": True, "id": row["id"], "created_at": row["created_at"].isoformat(), "kind": kind}
+            return {
+                "ok": True,
+                "id": row["id"],
+                "created_at": row["created_at"].isoformat(),
+                "kind": kind,
+                "workspace": session_workspace,
+            }
         finally:
             await conn.close()
     except Exception:
@@ -4153,6 +4289,7 @@ async def get_session_detail(session_id: int):
             row = await conn.fetchrow(
                 "SELECT id, title, status, folder, model_id, summary, "
                 "memory_enabled, auto_execute, max_rounds, locked_skill_name, "
+                "workspace, "
                 "created_at, updated_at "
                 "FROM sessions WHERE id = $1",
                 session_id,
@@ -4170,6 +4307,7 @@ async def get_session_detail(session_id: int):
                 "auto_execute": row["auto_execute"],
                 "max_rounds": row["max_rounds"],
                 "locked_skill_name": row["locked_skill_name"],
+                "workspace": row["workspace"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                 "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
             }
@@ -5322,21 +5460,56 @@ async def update_wallpaper_style(body: WallpaperStyleRequest):
 
 
 class ChatFileUploadRequest(BaseModel):
-    """POST /admin/files/upload 请求体: 对话文档上传(base64)。"""
+    """POST /admin/files/upload 请求体: 对话文档上传(base64)。
+
+    2026-08-15 P2: 新增 session_id —— 会话选定工作区后, 文件落盘到
+    {会话工作区}/uploads/(画地为牢一致), 否则回退全局 uploads。
+    """
 
     filename: str = "upload.bin"
     content_base64: str
+    session_id: int | None = None
+
+
+async def _resolve_uploads_dir(session_id: int | None) -> Path:
+    """上传落盘目录: 会话工作区 {workspace}/uploads 优先, 回退全局。
+
+    画地为牢语义: 会话选定工作区后, 上传文件必须落该工作区, 否则
+    file_read 的路径校验(base_dir=会话 workspace)会拦截(Path traversal),
+    模型只能靠 code_execution 绕过读取(2026-08-15 清和验收复现)。
+    """
+    from pathlib import Path
+
+    if session_id:
+        try:
+            conn = await db.connect()
+            try:
+                ws = await conn.fetchval(
+                    "SELECT workspace FROM sessions WHERE id=$1", session_id
+                )
+            finally:
+                await conn.close()
+            ws_str = str(ws or "").strip()
+            if ws_str:
+                d = Path(os.path.expandvars(ws_str)) / "uploads"
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+        except Exception:  # noqa: BLE001 - 会话查询失败回退全局
+            pass
+    uploads_dir = Path(_get_outputs_dir()).parent / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    return uploads_dir
 
 
 @router.post("/files/upload", response_model=None)
 async def upload_chat_file(body: ChatFileUploadRequest):
-    """对话文档上传: 存 {WORKSPACE}/uploads/, 返回绝对路径供模型 file_read。
+    """对话文档上传: 存 {会话工作区}/uploads/(有 session_id 时)或全局。
 
     Args:
-        body: {"filename": "xxx.pdf", "content_base64": "..."}
+        body: {"filename": "xxx.pdf", "content_base64": "...", "session_id": 123}
 
     Returns:
-        200: {"path": str, "name": str, "size": int}
+        200: {"path": str, "name": str, "size": int, "dir": str}
         400: {"error": "invalid_file" | "file_too_large"}
         500: {"error": "upload_failed"}
     """
@@ -5356,11 +5529,11 @@ async def upload_chat_file(body: ChatFileUploadRequest):
     try:
         # 2026-08-08: uploads 与 logs 一致, 从 config workspace_root(PA_USER_DATA)派生,
         # 不再直读 WORKSPACE 环境变量(打包版用户数据已重定向到 userData)
-        uploads_dir = Path(_get_outputs_dir()).parent / "uploads"
-        uploads_dir.mkdir(parents=True, exist_ok=True)
+        # 2026-08-15 P2: 会话选定工作区 → 落 {会话工作区}/uploads/(画地为牢一致)
+        uploads_dir = await _resolve_uploads_dir(body.session_id)
         target = uploads_dir / safe_name
         target.write_bytes(decoded)
-        return {"path": str(target), "name": safe_name, "size": len(decoded)}
+        return {"path": str(target), "name": safe_name, "size": len(decoded), "dir": str(uploads_dir)}
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"error": "upload_failed"})
 
@@ -5414,6 +5587,101 @@ async def upload_skill(body: SkillUploadRequest):
         return {"name": name, "path": str(target_dir)}
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=500, content={"error": "skill_save_failed"})
+
+
+# ── 2026-08-12 Phase1: 技能压缩包一键识别安装增强 ──────────────────────────
+# 结构校验 + 中文元数据生成(LLM) + 结构化失败原因
+
+def _is_english_like(text: str) -> bool:
+    """粗略判断文本是否以拉丁字母为主(用于触发中文翻译)。"""
+    if not text:
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    latin = sum(1 for c in letters if ord(c) < 0x2E80)  # CJK 起点
+    return latin / len(letters) > 0.8
+
+
+def _validate_skill_structure(
+    name: str,
+    parsed: dict,
+    has_system_prompt: bool,
+    tool_registry,
+) -> list[dict]:
+    """技能结构校验, 返回 [{field, reason}]。任一错误 → 该技能不安装。"""
+    errors: list[dict] = []
+    if not name or not str(name).strip():
+        errors.append({"field": "name", "reason": "skill.yaml 缺少必填字段: name"})
+    if not parsed.get("version"):
+        errors.append({"field": "version", "reason": "skill.yaml 缺少必填字段: version"})
+    if not parsed.get("scenario"):
+        errors.append({"field": "scenario", "reason": "skill.yaml 缺少必填字段: scenario"})
+    if not has_system_prompt:
+        errors.append({"field": "system_prompt.md", "reason": "缺少 system_prompt.md 文件(技能提示词)"})
+    # 工具白名单引用校验(引用的工具必须存在于 ToolRegistry)
+    deps = parsed.get("dependencies")
+    tools = deps.get("tools") if isinstance(deps, dict) else None
+    if isinstance(tools, list):
+        for t in tools:
+            tname = t.get("name") if isinstance(t, dict) else None
+            if tname and tool_registry and not tool_registry.get_tool(tname):
+                errors.append({
+                    "field": f"dependencies.tools.{tname}",
+                    "reason": f"工具 '{tname}' 不在工具注册表中(未内置且无对应 MCP server)",
+                })
+    return errors
+
+
+async def _generate_chinese_metadata(
+    cfg,
+    name: str,
+    parsed: dict,
+    system_prompt_snippet: str,
+) -> dict | None:
+    """调用当前模型为技能生成中文元数据(display_name/description/scenario)。
+
+    失败返回 None(不阻塞安装, 保留原始英文元数据)。
+    """
+    import json as _json
+    import re as _re
+
+    try:
+        from private_agent.models.registry import get_adapter
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        chain = cfg.get("models", {}).get("fallback_chain") or []
+        provider = chain[0] if isinstance(chain, list) and chain else "deepseek-flash"
+        adapter = get_adapter(provider, cfg)
+    except Exception:  # noqa: BLE001
+        return None
+    prompt = (
+        "你是技能元数据翻译助手。根据技能信息生成中文元数据, 只输出 JSON, 不要解释。\n"
+        f"技能标识: {name}\n"
+        f"英文显示名: {parsed.get('display_name', '') or ''}\n"
+        f"原始描述: {parsed.get('description', '') or ''}\n"
+        f"原始场景: {parsed.get('scenario', '') or ''}\n"
+        f"系统提示词片段: {(system_prompt_snippet or '')[:300]}\n\n"
+        '返回 JSON: {"display_name": "中文名2-4字", '
+        '"description": "一句话中文简介(≤30字)", "scenario": "中文适用场景(≤30字)"}'
+    )
+    try:
+        result = await adapter.chat([{"role": "user", "content": prompt}])
+        text = (result.content or "").strip()
+        m = _re.search(r"\{.*\}", text, _re.S)
+        if not m:
+            return None
+        data = _json.loads(m.group(0))
+        if not isinstance(data, dict):
+            return None
+        return {
+            "display_name": str(data.get("display_name") or "").strip() or None,
+            "description": str(data.get("description") or "").strip() or None,
+            "scenario": str(data.get("scenario") or "").strip() or None,
+        }
+    except Exception:  # noqa: BLE001
+        return None
 
 
 @router.post("/skills/upload-zip", response_model=None)
@@ -5478,18 +5746,59 @@ async def upload_skill_zip(file: UploadFile = File(...)):
         groups.setdefault(root, (info, norm))
 
     if groups:
-        installed = []
+        installed: list[dict] = []
+        failed: list[dict] = []
+        # 2026-08-12 Phase1: 校验需工具注册表
+        try:
+            from private_agent.tools.registry import ToolRegistry
+            from private_agent.tools.builtins import register_all_builtins
+
+            _reg = ToolRegistry()
+            register_all_builtins(_reg)
+        except Exception:  # noqa: BLE001
+            _reg = None
         for root, (info, norm) in groups.items():
             try:
                 yaml_text = zf.read(info).decode("utf-8")
                 parsed = yaml.safe_load(yaml_text)
                 if not isinstance(parsed, dict) or not parsed.get("name"):
+                    failed.append({
+                        "name": norm,
+                        "errors": [{"field": "skill.yaml", "reason": "skill.yaml 缺失或 name 字段为空"}],
+                    })
                     continue
                 name = str(parsed["name"]).strip().lower()
                 if not _re.fullmatch(r"[a-z0-9_]+", name):
+                    failed.append({
+                        "name": str(parsed.get("name")),
+                        "errors": [{"field": "name", "reason": f"name '{name}' 含非法字符(仅允许小写字母/数字/下划线)"}],
+                    })
                     continue
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                failed.append({
+                    "name": norm,
+                    "errors": [{"field": "skill.yaml", "reason": f"skill.yaml 解析失败: {type(e).__name__}: {e}"}],
+                })
                 continue
+            # 2026-08-12 Phase1: 结构校验(缺文件/字段/工具引用 → 失败并说明原因)
+            has_sp = any(
+                n2.lower() == f"{root}system_prompt.md" if root else n2.lower() == "system_prompt.md"
+                for _, n2 in members
+            )
+            errors = _validate_skill_structure(name, parsed, has_sp, _reg)
+            if errors:
+                failed.append({"name": name, "errors": errors})
+                continue
+            # 2026-08-12 Phase1: 中文元数据生成(LLM, 失败不阻塞安装)
+            sp_snippet = ""
+            for i2, n2 in members:
+                if n2.lower() == f"{root}system_prompt.md" if root else n2.lower() == "system_prompt.md":
+                    try:
+                        sp_snippet = zf.read(i2).decode("utf-8")[:300]
+                    except Exception:  # noqa: BLE001
+                        sp_snippet = ""
+                    break
+            meta = await _generate_chinese_metadata(cfg, name, parsed, sp_snippet)
             try:
                 target = dev_dir / name
                 target.mkdir(parents=True, exist_ok=True)
@@ -5507,21 +5816,58 @@ async def upload_skill_zip(file: UploadFile = File(...)):
                     dest.write_bytes(zf.read(i2))
                     written += 1
                 (target / "skill.yaml").write_text(yaml_text, encoding="utf-8")
-                installed.append(
-                    {"name": name, "path": str(target), "files": written + 1}
-                )
-            except Exception:  # noqa: BLE001
-                continue
-        if not installed:
+                # 生成的中文元数据写回 skill.yaml(display_name/description/scenario)
+                if meta:
+                    write_back = dict(parsed)
+                    if meta.get("display_name"):
+                        write_back["display_name"] = meta["display_name"]
+                    if meta.get("description"):
+                        write_back["description"] = meta["description"]
+                    if meta.get("scenario"):
+                        write_back["scenario"] = meta["scenario"]
+                    (target / "skill.yaml").write_text(
+                        yaml.safe_dump(write_back, allow_unicode=True, sort_keys=False),
+                        encoding="utf-8",
+                    )
+                deps = parsed.get("dependencies") if isinstance(parsed.get("dependencies"), dict) else {}
+                tools = deps.get("tools", [])
+                tool_names = [
+                    t.get("name") for t in tools if isinstance(t, dict) and t.get("name")
+                ]
+                installed.append({
+                    "name": name,
+                    "display_name": (meta or {}).get("display_name")
+                        or parsed.get("display_name")
+                        or parsed.get("scene_name")
+                        or name,
+                    "description": (meta or {}).get("description") or parsed.get("description") or "",
+                    "scenario": (meta or {}).get("scenario") or parsed.get("scenario") or "",
+                    "tools": tool_names,
+                    "path": str(target),
+                    "files": written + 1,
+                })
+            except Exception as e:  # noqa: BLE001
+                failed.append({
+                    "name": name,
+                    "errors": [{"field": "install", "reason": f"安装失败: {type(e).__name__}: {e}"}],
+                })
+        if not installed and not failed:
             return JSONResponse(status_code=500, content={"error": "skill_save_failed"})
-        if len(installed) == 1:
-            return installed[0]
-        return {
-            "mode": "collection",
-            "skills": installed,
-            "total": len(installed),
-            "note": "检测到技能集合包, 已批量安装",
+        # 2026-08-12 Phase1: 统一增强返回(ok/installed/failed)
+        resp: dict = {
+            "ok": len(installed) > 0,
+            "mode": "single" if len(installed) == 1 else "collection",
+            "installed": installed,
+            "failed": failed,
+            "total": len(installed) + len(failed),
         }
+        if len(installed) == 1 and not failed:
+            resp["installed"] = installed
+        elif not installed:
+            resp["note"] = "所有技能校验失败, 无安装"
+        else:
+            resp["note"] = "检测到技能集合包, 已批量安装"
+        return resp
 
     # 无 skill.yaml → 素材库自动技能化(如 awesome-design-md)
     auto = _auto_generate_skills(zf, members, dev_dir)

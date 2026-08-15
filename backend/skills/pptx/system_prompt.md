@@ -160,3 +160,11 @@ prs.save('presentation.pptx')
 - 不要在单页放超过 3 级层级
 - 图片需要用户提供本地路径
 - 复杂图表建议在 Excel 中制作后导入，pptx 脚本中只做占位
+
+## 版式增强规范（design-stylist 对齐, 2026-08-15）
+
+- **统一字体家族**：标题/正文同一家族（Inter / 思源黑体 / Calibri），全稿 ≤2 个字体家族
+- **每页一个核心观点**：一页超载自动拆分多页（保留 6×6 原则）
+- **图表统一**：matplotlib 无 3D、去冗余网格线、数据标签简洁；色板取 design-stylist 风格预设（business-minimal / tech-dark / academic-clean / light-luxury）
+- **页眉页脚**：统一页眉（主题/品牌）、页码、页脚（日期/作者）；python-pptx 无动画，天然满足"禁动画"
+- 原有配色表保留为参考，优先按 design-stylist 风格预设取色

@@ -177,3 +177,13 @@ for page in reader.pages:
 - A4 尺寸：210mm × 297mm
 - 打印用 PDF 建议 margin ≥ 2cm
 - weasyprint 不支持 JavaScript，动态内容需要先渲染成静态 HTML
+
+## 版式增强规范（design-stylist 对齐, 2026-08-15）
+
+- **三套版式预设**：学术报告 / 商业提案 / 白皮书（页边距、页眉页脚、标题层级、图题表题、参考文献样式各一套）
+- **生成方案（2026-08-15 环境验证定稿）**：
+  - 主方案 **Typst**：`pip install typst`（D 盘 venv 已装 0.15.0）；`typst.compile("文件.typ", output="out.pdf")` —— input 必须传**文件路径**，非源码字符串；页脚页码 `#set page(footer: context "第 " + counter(page).display() + " 页")`（勿用 `context { }` 块，会报 `label <page> does not exist`）
+  - HTML→PDF 兜底：**Edge headless**（`msedge --headless=new --disable-gpu --print-to-pdf="out.pdf" file:///...`，系统自带零依赖）
+  - **weasyprint 弃用**：Windows 需 GTK3 runtime（import 报 `cannot load library 'libgobject-2.0-0'`）
+- **中文字体**：Microsoft YaHei（系统自带，实测可用）
+- **输出前自查**：页数、字体、页边距 ≥2cm、页眉页脚页码
