@@ -37,6 +37,62 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+# 2026-08-15(M2 P2-14): 查询重写 —— 启发式查询扩展(零 LLM 依赖)
+_QUERY_STOPWORDS = frozenset(
+    "的了吗呢是和在就都而及与或如果那么因为所以但是等"
+    "我你他她它们这那什么怎么如何请帮问哪些有"
+)
+_QUERY_PUNCT = frozenset(
+    "，。？！、；：""''（）《》【】—…·,.:;!?()[]{}<>\"'-_"
+)
+
+
+def _expand_queries(query: str, max_expansions: int = 3) -> list[str]:
+    """生成查询扩展变体(含原查询), 最多 max_expansions 个, 保序去重。
+
+    变体策略(纯启发式, 无 LLM/分词依赖):
+      1. 原查询(始终保留)
+      2. 去停用词 + 去标点的核心词串(≥2 字才作为变体)
+      3. 含空格的多词查询 → 词拼接变体(中英混排时保留实体完整性)
+
+    Args:
+        query: 原始查询。
+        max_expansions: 扩展总数上限(含原查询, ≥1)。
+
+    Returns:
+        去重后的查询列表(首个恒为原查询)。
+    """
+    q = (query or "").strip()
+    if not q:
+        return [q]
+    max_expansions = max(int(max_expansions), 1)
+    variants: list[str] = [q]
+
+    # 变体 2: 去停用词/标点核心词
+    core = "".join(c for c in q if c not in _QUERY_PUNCT and not c.isspace())
+    core_no_stop = "".join(c for c in core if c not in _QUERY_STOPWORDS)
+    if core_no_stop and core_no_stop != q and len(core_no_stop) >= 2:
+        variants.append(core_no_stop)
+
+    # 变体 3: 多词拼接(保留原序, 中英混排实体完整)
+    words = [w for w in q.split() if w]
+    if len(words) > 1:
+        joined = "".join(words)
+        if joined not in variants and len(joined) >= 2:
+            variants.append(joined)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in variants:
+        v = v.strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+        if len(out) >= max_expansions:
+            break
+    return out or [q]
+
+
 class KnowledgeBaseService:
     """知识库服务编排层(蓝图 §4.6/§4.14/§4.15/§4.16)。
 
@@ -72,6 +128,11 @@ class KnowledgeBaseService:
         # HNSW 参数
         hnsw = self._config.get("hnsw", {})
         self._ef_search = hnsw.get("ef_search", 64)
+
+        # 2026-08-15(M2 P2-14): 查询重写(默认关闭, 行为与旧版一致)
+        qr = self._config.get("query_rewrite", {})
+        self._qr_enabled = bool(qr.get("enabled", False))
+        self._qr_max = int(qr.get("max_expansions", 3))
 
     # ══════════════════════════════════════════════════════════════════════
     # 文档处理流水线
@@ -162,6 +223,56 @@ class KnowledgeBaseService:
         """
         top_k = top_k or self._final_top_k
 
+        # 2026-08-15(M2 P2-14): 查询重写 —— enabled 时扩展查询并分别检索,
+        # 按 chunk_id 合并去重(保留最高分)后统一重排; 关闭时走原路径零变化。
+        queries = (
+            _expand_queries(query, self._qr_max)
+            if self._qr_enabled
+            else [query]
+        )
+        if len(queries) == 1:
+            return await self._search_single(query, scenario, top_k, min_similarity)
+
+        filters = {"scenario": scenario} if scenario else None
+        merged: dict[int, Chunk] = {}
+        for q in queries:
+            try:
+                qv = await self._embedding_service.embed_single(q)
+                cands = await self._kb_repo.hybrid_search(
+                    q,
+                    qv,
+                    limit=self._vector_top_k,
+                    ef_search=self._ef_search,
+                    rrf_k=self._rrf_k,
+                    filters=filters,
+                )
+            except Exception:  # noqa: BLE001 - 单变体失败不拖垮整体
+                logger.warning("query rewrite variant failed: %r", q)
+                continue
+            for c in cands:
+                cid = c.chunk_id
+                if cid is None:
+                    continue
+                if cid not in merged or (c.score or 0) > (merged[cid].score or 0):
+                    merged[cid] = c
+        candidates = list(merged.values())
+        if not candidates:
+            return []
+
+        reranked = await self._reranker_service.rerank(
+            query, candidates, top_k=top_k * 2
+        )
+        filtered = [c for c in reranked if c.score >= min_similarity]
+        return filtered[:top_k]
+
+    async def _search_single(
+        self,
+        query: str,
+        scenario: str | None = None,
+        top_k: int = 5,
+        min_similarity: float = 0.2,
+    ) -> list[Chunk]:
+        """单查询检索(原路径, 查询重写关闭时使用)。"""
         # 1. query 向量化
         query_vector = await self._embedding_service.embed_single(query)
 

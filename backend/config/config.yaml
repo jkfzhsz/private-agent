@@ -164,8 +164,7 @@ kb:
   embedding:
     # 0.5.1: 固定 bge-small-zh-v1.5(512 维, ModelScope 官方) —— 本机 7.6GB 内存下 bge-m3 OOM;
     # padding 至 storage_dim(1024) 与 DB vector(1024) 对齐。
-    # C3 单一模型纪律: 切换模型 = 全量重灌, 由启动自检程序强制, 勿运行时改。
-    local_default: "BAAI/bge-small-zh-v1.5"
+    # C3 单一模型纪律: 切换模型 = 全量重灌, 由启动自检程序强制, 勿运行时改。    local_default: "BAAI/bge-small-zh-v1.5"
     local_light: "BAAI/bge-small-zh-v1.5"  # [runtime]
     # 模型本地路径(直接模型目录: ModelScope 官方 BAAI/bge-small-zh-v1.5,
     # 512 维, 2026-08-09 下载至 kb-model-cache/modelscope)。
@@ -186,6 +185,13 @@ kb:
     vector_top_k: 20
     keyword_top_k: 20
     final_top_k: 5
+  query_rewrite:
+    # 2026-08-15(M2 P2-14): 查询重写 —— 检索前启发式多查询扩展
+    # (去停用词核心词/短语合并变体), 提升召回精度。
+    # enabled=false(默认): 行为与旧版完全一致, 零成本零风险;
+    # enabled=true: 检索前对扩展查询分别检索 → 合并去重 → 统一重排。
+    enabled: false  # [runtime]
+    max_expansions: 3  # [runtime] 扩展查询总数上限(含原查询)
 
 # ------------------------------------------------------------------------------
 # 7. 工具层配置(5.4、5.12、5.13、5.15)
