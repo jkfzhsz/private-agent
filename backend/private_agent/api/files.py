@@ -60,6 +60,72 @@ def _get_outputs_dir() -> Path:
     return Path(workspace) / "outputs"
 
 
+def _search_sandbox_outputs(filename: str) -> Path | None:
+    """2026-08-16: 回退搜索沙箱产物目录(按文件名, 取最新 mtime)。
+
+    搜索范围(存在即扫):
+    - {PA_USER_DATA}/.sandbox/{session_id}/outputs/  (沙箱原生产物)
+    - {PA_USER_DATA}/.sandbox-artifacts/{session_id}/ (阶段1-C 同步产物)
+    - {workspace_root}/.sandbox/... / .sandbox-artifacts/... (workspace 变体)
+
+    Returns:
+        命中文件 Path(最新 mtime), 未命中 None。
+    """
+    roots: list[Path] = []
+    # 从 config workspace_root 推导候选根
+    try:
+        cfg = loader.load_config()
+        ws = cfg.get("system", {}).get("workspace_root", ".")
+        ws = os.path.expandvars(ws)
+        if ws.startswith("${") and ws.endswith("}"):
+            ws = "."
+        ws_path = Path(ws)
+        roots.append(ws_path / ".sandbox")
+        roots.append(ws_path / ".sandbox-artifacts")
+    except Exception:  # noqa: BLE001
+        pass
+    # 额外: 沙箱配置的 workspace_root(可能与 system 不同)
+    try:
+        cfg = loader.load_config()
+        sand_ws = cfg.get("sandbox", {}).get("workspace_root", "")
+        if sand_ws:
+            sand_ws = os.path.expandvars(sand_ws)
+            if not (sand_ws.startswith("${") and sand_ws.endswith("}")):
+                roots.append(Path(sand_ws) / ".sandbox")
+                roots.append(Path(sand_ws) / ".sandbox-artifacts")
+    except Exception:  # noqa: BLE001
+        pass
+
+    best: Path | None = None
+    best_mtime = 0.0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        # .sandbox/{session_id}/outputs/ 结构 + .sandbox-artifacts/{session_id}/ 结构
+        try:
+            for session_dir in root.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                candidates = [session_dir]
+                # .sandbox 结构含 outputs 子目录
+                if (session_dir / "outputs").is_dir():
+                    candidates.append(session_dir / "outputs")
+                for cand in candidates:
+                    fp = (cand / filename).resolve()
+                    if not fp.is_file():
+                        continue
+                    try:
+                        mtime = fp.stat().st_mtime
+                    except OSError:
+                        mtime = 0.0
+                    if mtime > best_mtime:
+                        best = fp
+                        best_mtime = mtime
+        except OSError:
+            continue
+    return best
+
+
 @router.get("/outputs/{filename}", response_model=None)
 async def get_output_file(filename: str):
     """返回 outputs 目录下的图片文件(AC-8)。
@@ -89,7 +155,23 @@ async def get_output_file(filename: str):
         raise HTTPException(status_code=404, detail="file_not_found")
 
     if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="file_not_found")
+        # 2026-08-16(蒋先生反馈: 回答中 .png 损坏): 标准 outputs/ 未命中时
+        # 回退扫描沙箱产物目录 —— 沙箱 outputs/ 落
+        # {PA_USER_DATA}/.sandbox/{session_id}/outputs/, 阶段1-C 同步到
+        # {workspace}/.sandbox-artifacts/{session_id}/, 均不在前端
+        # files/outputs/ 服务目录下 → img 404 显示破损图标。
+        # 按文件名匹配(取最新 mtime), 兼容多会话同名产物。
+        fallback = _search_sandbox_outputs(filename)
+        if fallback is None:
+            raise HTTPException(status_code=404, detail="file_not_found")
+        file_path = fallback
+        ext = file_path.suffix.lower()
+        content_type = _EXT_CONTENT_TYPE.get(ext, "application/octet-stream")
+        return FileResponse(
+            path=str(file_path),
+            media_type=content_type,
+            headers={"Cache-Control": "no-store"},
+        )
 
     ext = file_path.suffix.lower()
     content_type = _EXT_CONTENT_TYPE.get(ext, "application/octet-stream")

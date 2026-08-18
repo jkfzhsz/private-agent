@@ -59,8 +59,12 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 vision=True, json_mode=False,
             )
         # V1.5:推理模型(reasoning)复杂请求思考时间可能远超 httpx 默认 5s,
-        # 放宽读超时至 120s,避免 ReadTimeout 误杀正常推理(连接 15s)
-        self._timeout = httpx.Timeout(120.0, connect=15.0)
+        # 放宽读超时避免 ReadTimeout 误杀正常推理(连接 15s)。
+        # 2026-08-16(历史任务继续提问无响应诊断): 120s → 60s —— 第三方中转
+        # (tokenrhythm)延迟高/抖动时, 过长读超时让 fallback 链逐 provider
+        # 各等 120s(最坏 10 分钟无反馈, 用户感知"思考中无响应")。60s 内无
+        # 响应即 fallback 下一 provider(官方 API 快), 总等待有界。
+        self._timeout = httpx.Timeout(60.0, connect=15.0)
         # 注入 client(测试用 MockTransport);默认新建 AsyncClient
         self._client = client if client is not None else httpx.AsyncClient(
             timeout=self._timeout

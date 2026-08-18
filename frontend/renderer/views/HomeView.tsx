@@ -203,7 +203,7 @@ export default function HomeView({
             gap: 16,
           }}
         >
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="flex-1-min0">
             {/* 2026-08-08: 智能体标识与改名入口已合并到左侧边栏, 此处仅保留问候语 */}
             <div
               style={{
@@ -238,7 +238,7 @@ export default function HomeView({
           <div style={{ textAlign: "right", flexShrink: 0, display: "flex", alignItems: "center", gap: 12 }}>
             <div>
               <div style={{ fontSize: 30, lineHeight: 1 }}>{weather.emoji}</div>
-              <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em", marginTop: 2 }}>
+              <div style={{ fontSize: "var(--fs-hero)", fontWeight: 700, letterSpacing: "-0.02em", marginTop: 2 }}>
                 {weather.temp}
               </div>
               <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
@@ -369,8 +369,8 @@ export default function HomeView({
       </div>
 
       {/* 三个模式按钮 */}
-      <div className="glass-panel" style={{ padding: "20px 24px" }}>
-        <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+      <div className="glass-panel pad-lg">
+        <div style={{ fontSize: "var(--fs-title)", fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
           选择模式开始
         </div>
         <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
@@ -390,7 +390,8 @@ export default function HomeView({
               <button
                 key={m.skill}
                 onClick={() => onPickMode(m.skill)}
-                className="animate-in"
+                // P1-2(2026-08-17): hover 位移由 CSS .mode-card:hover 承担(原 JS onMouseEnter)
+                className={`animate-in mode-card${isActive ? " active" : ""}`}
                 data-testid={`mode-btn-${m.skill}`}
                 style={{
                   position: "relative",
@@ -411,15 +412,8 @@ export default function HomeView({
                   display: "flex",
                   flexDirection: "column",
                   gap: 10,
-                  transition: "all 0.25s var(--transition-smooth)",
                   fontFamily: "inherit",
                   color: "var(--text-primary)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = "translateY(-2px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = "translateY(0)";
                 }}
               >
                 {/* 0.5.0 P5(2026-08-08 蒋先生反馈): 排列方式与左下角"本地用户"卡片一致 ——

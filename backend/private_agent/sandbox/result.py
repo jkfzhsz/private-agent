@@ -32,6 +32,7 @@ class SandboxResult:
     generated_files: 执行生成的文件路径列表。
     warnings: 代码预扫描告警列表。
     duration_ms: 执行耗时(毫秒)。
+    sync_dir: 2026-08-16(问题1-C) 产物同步目录(会话工作区内), 空=未同步。
     """
 
     stdout: str
@@ -40,3 +41,4 @@ class SandboxResult:
     generated_files: list[str] = field(default_factory=list)
     warnings: list[CodeWarning] = field(default_factory=list)
     duration_ms: int = 0
+    sync_dir: str = ""

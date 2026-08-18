@@ -72,6 +72,13 @@ async def code_execution_handler(args: dict) -> ToolResult:
         ).strip()
         if result.generated_files:
             output += f"\nGenerated files: {json.dumps(result.generated_files)}"
+            # 2026-08-16(问题1-C): 产物已同步到会话工作区, 提示模型可
+            # file_read 读取(sync_dir 在会话工作区内闭环)
+            if result.sync_dir:
+                output += (
+                    f"\n产物已同步到工作区: {result.sync_dir}"
+                    " (可用 file_read 读取)"
+                )
         if result.warnings:
             warnings_str = "; ".join(
                 f"line {w.line}: {w.snippet}" for w in result.warnings
@@ -84,9 +91,13 @@ async def code_execution_handler(args: dict) -> ToolResult:
 
 CODE_EXECUTION_TOOL = ToolDef(
     name="code_execution",
-    description="Execute Python code in an isolated sandbox subprocess. "
-    "Supports timeout control, security scanning, and result capture. "
-    "Use for running user-provided Python scripts safely.",
+    description=(
+        "Execute Python code in an isolated sandbox subprocess. Supports timeout "
+        "control, security scanning, and result capture. Use for running "
+        "user-provided Python scripts safely. "
+        "Windows 提示: 调用外部命令(docker/ps 等)时输出可能是 GBK 中文, "
+        "subprocess 请用 encoding='gbk' 或 errors='replace', 避免解码崩溃。"
+    ),
     parameters_schema={
         "type": "object",
         "properties": {
@@ -115,6 +126,10 @@ CODE_EXECUTION_TOOL = ToolDef(
         "required": ["code"],
     },
     handler=code_execution_handler,
-    # 蓝图 §5.11: code_execution safety_level="elevated"(V2 P1: 权限确认链路)
-    safety_level="elevated",
+    # 2026-08-16(蒋先生要求"工作区内读写免确认, 仅记录"): code_execution 在
+    # 沙箱内隔离执行(代码预扫描 + 网络隔离 + 资源限制 + Windows Job Object
+    # 多重防护, 不触碰用户文件系统) → 降为 safe 自动执行, 仅审计记录
+    # (tool_call 事件含 code + 参数已落库)。原 elevated(每次 60s 确认)在
+    # 长任务中频繁打断, 且用户已确认沙箱为可信执行边界。
+    safety_level="safe",
 )

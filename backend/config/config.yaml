@@ -121,6 +121,19 @@ context:
     stable_zone_size_limit: 20  # [runtime]
     aggressive_mode: false  # [runtime]
     kb_chunks_merge_threshold: 20  # [runtime]
+    # 2026-08-15(B-1 压缩多信号触发, 设计文档 §3.2): 全部默认关闭, 可手动开。
+    # 触发决策优先级: token_limit > model_suggested > task_phase > turn_limit。
+    keep_turns: 6  # [runtime] 保留最近轮次(默认 6, 与既有行为一致)
+    keep_ratio: 0.1  # [runtime] B-2: 保留最近 ~10% token 的原始消息
+    task_phase: false  # [runtime] B-1: 回合间检测"新任务指令"关键词允许提前压缩
+    model_suggested: false  # [runtime] B-1: 暴露 compress_now 工具, 模型自主触发
+    # compress_now 工具注册开关(默认关; 开启后模型工具列表含 compress_now,
+    # 模型在完成一个交付物/准备开始新任务时自主触发压缩 —— Deep Agents 思想)
+    compress_now_tool: false  # [runtime]
+    # C-2(2026-08-15 大产物文件化引导, 设计文档 §3.3-C2): 单条 assistant
+    # 消息超过该字符阈值(≈8K token)时, 收尾注入提示"长内容建议写入工作区
+    # 文件(ws_write), 上下文保留路径引用"。0 = 关闭引导(默认)。
+    large_output_threshold_chars: 0  # [runtime]
   billing:
     currency: "CNY"  # [runtime]
     price_snapshot_enabled: true  # [runtime]
@@ -220,6 +233,19 @@ tools:
       office: ["hexin-ifind-ds-*", "mempalace", "Searchpin"]
       data_analysis: ["hexin-ifind-ds-*", "mempalace", "Searchpin"]
       frontend_design: ["mempalace", "Searchpin"]
+      # 2026-08-16(蒋先生反馈): 无涯(monitor)是项目进化者, 不需要金融行情
+      # 工具 —— 只装配记忆(mempalace)/搜索(Searchpin), 剔除 ifind 全系。
+      # 此前 monitor 会话走全量装配(70+ 工具), 对话启动 [TOOLS] 注入过大。
+      monitor: ["mempalace", "Searchpin"]
+    # 2026-08-16(§14 场景归类, agent-upgrader 设计文档): 四场景附加技能
+    # 允许类目(skill.yaml scenario 字段)。挂载校验 + 前端过滤/分组用。
+    # 空/缺省 = 允许全部(向后兼容); 类目语义: writing/documents/
+    # engineering/design/meta + 场景自身名。
+    scene_skills:
+      office: ["documents", "writing"]           # 子瞻: 文档 + 写作
+      data_analysis: ["documents"]               # 白圭: 文档(无 engineering)
+      frontend_design: ["design", "engineering"] # 清和: 设计 + 工程
+      monitor: ["engineering", "meta"]           # 无涯: 工程 + 元
     # 2026-08-13 类型感知限流(方案 §4.3): 进程级 MCP 请求类型并发上限。
     # MCP client 是进程级单例(全会话共享同一 Searchpin 子进程), ReactLoop 级
     # Semaphore(concurrent_limit=5) 无法防多会话并发打爆通道。search 类(web_search/
@@ -258,6 +284,10 @@ tools:
       http_request: 60
       web_search: 30
       code_execution: 300
+      # 2026-08-16(阶段2 实测反馈): pytest_run 必须给足外圈超时 ——
+      # 不在 categories 时落 default_sec=30, 慢测试(TestClient 起 app)
+      # 被 ReactLoop 外圈 wait_for 30s 截断, 无涯传的 timeout 参数无效。
+      pytest_run: 300
       search_knowledge: 10
       delegate_subtask: 1860  # V1.5 项-1: 委派工具兜底上限。2026-08-13 修复:
                               # 原 300s 与 max_total_lifetime(300s) 同值且过短, 误杀
@@ -284,14 +314,21 @@ tools:
     max_restarts: 0              # 自动重启次数上限(M4, 默认关)
   artifact:
     truncate_threshold_tokens: 4000
-    sandbox_truncate_threshold_tokens: 2000
+    # 2026-08-16(蒋先生反馈): 2000 tokens 过早截断导致 AI 频繁绕道读
+    # artifact → 死循环。提高到 8000(≈8K token, 覆盖绝大多数单次输出)。
+    sandbox_truncate_threshold_tokens: 8000
 
 # ------------------------------------------------------------------------------
 # 8. 沙箱配置(6.7、6.14)
 # ------------------------------------------------------------------------------
 sandbox:
   enabled: true  # [runtime]
-  workspace_root: "${PA_USER_DATA}/.sandbox"
+  # 2026-08-16(蒋先生反馈): 修复双 .sandbox 路径错乱 —— 原配置
+  # "${PA_USER_DATA}/.sandbox" 已含 .sandbox, 而 WorkspaceManager.
+  # get_or_create 又在 root 下建 .sandbox/{session_id} → artifact 落到
+  # backend/.sandbox/.sandbox/artifacts/ 且 file_read 读不到(AI 截断死循环)。
+  # 此处只给根目录, 沙箱目录由 WorkspaceManager 统一拼 .sandbox/{session_id}。
+  workspace_root: "${PA_USER_DATA}"
   retention_days: 7  # [runtime]
   languages:
     python:

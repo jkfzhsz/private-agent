@@ -166,7 +166,13 @@ def test_tool_error_triggers_collection():
 
 
 def test_iteration_exhausted_triggers_collection():
-    """迭代用尽(max_iterations) → 采集 ITERATION_EXHAUSTED。"""
+    """2026-08-16 修订: 迭代上限改为询问继续, 不再采集 ITERATION_EXHAUSTED。
+
+    旧行为: 超限直接失败 → 采集 ITERATION_EXHAUSTED。
+    新行为: 超限 emit iteration_limit_reached + 挂起等待用户决定; 30s 超时
+    默认继续(扩展上限)。因此"迭代用尽"不再是失败路径, 不应采集该类型;
+    用户选择停止时才正常收尾(也不采集失败)。
+    """
     _setup_schema()
     tools = [_make_tool("echo_test", _echo_handler)]
 
@@ -187,24 +193,38 @@ def test_iteration_exhausted_triggers_collection():
                     ChatResult(content="", tool_calls=[_tool_call("echo_test")], used_provider="mock"),
                     ChatResult(content="", tool_calls=[_tool_call("echo_test")], used_provider="mock"),
                     ChatResult(content="", tool_calls=[_tool_call("echo_test")], used_provider="mock"),
+                    ChatResult(content="", tool_calls=[_tool_call("echo_test")], used_provider="mock"),
+                    ChatResult(content="", tool_calls=[_tool_call("echo_test")], used_provider="mock"),
+                    ChatResult(content="完成", used_provider="mock"),
                 ]),
                 tools=tools,
                 conn=conn,
                 max_iterations=3,
                 failure_collector=collector,
+                # 快速超时默认继续(模拟 30s 无响应) → 继续消耗响应到 content 结束
+                limit_confirm_timeout=0.1,
+                # 关闭 Doom Loop 检测(echo 同参工具会误触发, 干扰上限验证)
+                cfg={"context": {"loop": {"enabled": False}}},
             )
             await loop.run_turn("复杂任务")
+            # 直接检查 await_count; collect 未调用时 call_kwargs 为 None
+            call = collector.collect.await_args
             return {
                 "collect_called": collector.collect.await_count,
-                "call_kwargs": _extract_call(collector),
+                "call_kwargs": (
+                    call.kwargs if call else None
+                ),
             }
         finally:
             await conn.close()
 
     info = asyncio.run(_run())
-    assert info["collect_called"] == 1
-    assert info["call_kwargs"]["failure_type"] == FailureType.ITERATION_EXHAUSTED
-    assert "迭代" in info["call_kwargs"]["failure_detail"]
+    # 新行为: 超限默认继续 + 正常结束 → 无失败采集(长任务不中断)
+    # (即便有采集, 也绝不能是 ITERATION_EXHAUSTED)
+    assert info["collect_called"] == 0 or (
+        info["call_kwargs"]
+        and info["call_kwargs"].get("failure_type") != FailureType.ITERATION_EXHAUSTED
+    ), "迭代上限应转为询问继续, 不应再采集 ITERATION_EXHAUSTED"
 
 
 def test_provider_error_triggers_collection():

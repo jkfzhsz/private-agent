@@ -91,6 +91,38 @@ async def test_kb_upload_binary_rejected(client, schema):
 
 
 @pytest.mark.asyncio
+async def test_kb_upload_multipart(client, schema):
+    """P1-3(2026-08-17): multipart/form-data 主路径上传(不占 JS 主线程)。"""
+    resp = await client.post(
+        "/admin/knowledge/upload-file",
+        files={"file": ("multipart.md", ("# multipart 测试\n" + "内容行 " * 30).encode("utf-8"), "text/markdown")},
+        data={"scenario": "office"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["doc_id"] > 0
+    assert data["chunks"] > 0
+    assert data["filename"] == "multipart.md"
+
+    # 可见于库列表
+    resp = await client.get("/admin/knowledge/office/documents")
+    assert resp.status_code == 200
+    docs = resp.json()
+    assert any("multipart.md" in d["source"] for d in docs)
+
+
+@pytest.mark.asyncio
+async def test_kb_upload_multipart_missing_file(client, schema):
+    """multipart 缺 file 字段 → 400。"""
+    resp = await client.post(
+        "/admin/knowledge/upload-file",
+        files={"other": ("x.txt", b"x", "text/plain")},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_file"
+
+
+@pytest.mark.asyncio
 async def test_kb_delete_scenario(client, schema):
     """删除库 → 文档软删(列表不可见)。"""
     resp = await client.post("/admin/knowledge/upload-file", json={

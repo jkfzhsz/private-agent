@@ -1,0 +1,54 @@
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+
+ RUN  v2.1.9 D:/Private agent/frontend
+
+ ✓ main/__tests__/sidecar.test.ts (5 tests) 39ms
+stderr | renderer/utils/kbUpload.test.ts > P1-3 kbUpload 双路径 > 主入口: multipart 失败 → 自动回退 base64
+[kb-upload] multipart 失败, 回退 base64: Error: unprocessable
+    at uploadKbFileMultipart [90m(D:\Private agent\frontend\[39mrenderer\utils\kbUpload.ts:37:23[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at Module.uploadKbFile [90m(D:\Private agent\frontend\[39mrenderer\utils\kbUpload.ts:76:12[90m)[39m
+    at [90mD:\Private agent\frontend\[39mrenderer\utils\kbUpload.test.ts:73:15
+    at [90mfile:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5
+    at runTest [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1056:11[90m)[39m
+    at runSuite [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1205:15[90m)[39m
+    at runSuite [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1205:15[90m)[39m
+    at runFiles [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1262:5[90m)[39m
+    at startTests [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1271:3[90m)[39m
+
+stderr | renderer/utils/kbUpload.test.ts > P1-3 kbUpload 双路径 > 主入口: 双路径均失败 → 抛出最后错误
+[kb-upload] multipart 失败, 回退 base64: Error: upload_failed
+    at uploadKbFileMultipart [90m(D:\Private agent\frontend\[39mrenderer\utils\kbUpload.ts:37:23[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at Module.uploadKbFile [90m(D:\Private agent\frontend\[39mrenderer\utils\kbUpload.ts:76:12[90m)[39m
+    at [90mD:\Private agent\frontend\[39mrenderer\utils\kbUpload.test.ts:98:5
+    at [90mfile:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5
+    at runTest [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1056:11[90m)[39m
+    at runSuite [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1205:15[90m)[39m
+    at runSuite [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1205:15[90m)[39m
+    at runFiles [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1262:5[90m)[39m
+    at startTests [90m(file:///D:/Private%20agent/frontend/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:1271:3[90m)[39m
+
+ ✓ renderer/utils/kbUpload.test.ts (5 tests) 30ms
+ ✓ renderer/utils/deAIfy.test.ts (12 tests) 41ms
+ ✓ renderer/__tests__/SkillSelectionPanel.test.tsx (4 tests) 458ms
+ ✓ renderer/__tests__/ModelSwitch.test.tsx (1 test) 652ms
+   ✓ 切换 LLM 后输入框可用性 > 进入对话 → 切换模型 → 输入框仍可输入且发送按钮可用 650ms
+ ✓ renderer/__tests__/App.test.tsx (7 tests) 1125ms
+ ✓ renderer/__tests__/Windows.test.tsx (10 tests) 5065ms
+   ✓ App 四窗口并发集成 > 主智能体对话入口: 侧边栏 PA 图标 → 进入主智能体对话(P4-4) 379ms
+   ✓ App 四窗口并发集成 > 场景窗口状态隔离(P2-2 保留): 子瞻草稿不串到白圭 515ms
+   ✓ App 四窗口并发集成 > 切出对话页不打断 + 点击图标恢复未结束对话(P5-2/P5-3) 449ms
+   ✓ App 四窗口并发集成 > 关闭对话 → 归档 PUT(status=archived)(P5-4) 316ms
+   ✓ App 四窗口并发集成 > 单 WS 复用: 切换会话不新建连接 + 输入框立即可用(P6-1) 619ms
+   ✓ App 四窗口并发集成 > 主智能体统一渲染: 功能区完整 + 无切换技能按钮 + 流式 delta 可见(P6-2) 330ms
+   ✓ App 四窗口并发集成 > 后台会话事件写入快照, 切回后展示(P6-3) 535ms
+   ✓ App 四窗口并发集成 > 并发快速来回切换: A 会话输出不渲染到 B 窗口(P6-4) 335ms
+   ✓ App 四窗口并发集成 > 网络抖动重连: 重连后恢复当前会话状态, 不串台(P6-5) 1187ms
+   ✓ App 四窗口并发集成 > 历史树点击 monitor 会话 → 进 chat 而非 home(2026-08-16 修复) 396ms
+
+ Test Files  7 passed (7)
+      Tests  44 passed (44)
+   Start at  22:10:11
+   Duration  9.68s (transform 1.39s, setup 2.96s, collect 5.69s, tests 7.41s, environment 11.40s, prepare 1.83s)
+

@@ -11,7 +11,7 @@
  * - 关闭对话按钮 → 归档 PUT 调用
  * - 切出对话页面不打断(状态缓存保留)
  */
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -226,15 +226,19 @@ describe("App 四窗口并发集成", () => {
       return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
     });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
 
     const user = userEvent.setup();
     render(<App />);
     const officeBtn = await screen.findByTestId("mode-btn-office");
     await user.click(officeBtn);
-    // 点击"关闭对话"按钮 → 归档 PUT
+    // 点击「⋯ 更多」展开 → 关闭对话按钮 → 玻璃确认弹层 → 确认 → 归档 PUT
+    // P0-3(2026-08-17): window.confirm 已替换为 ConfirmDialog, 需在弹层内点确认
+    // P1-4(2026-08-17): 关闭对话收进「⋯」下拉, 先展开
+    await user.click(screen.getByTitle("更多操作"));
     const closeBtn = screen.getByTitle("关闭对话(归档至历史任务)");
     await user.click(closeBtn);
+    const dialog = await screen.findByRole("dialog", { name: "关闭当前对话" });
+    await user.click(within(dialog).getByRole("button", { name: "关闭" }));
     expect(putCalls.length).toBeGreaterThan(0);
     const last = putCalls[putCalls.length - 1];
     expect(last.body).toContain("archived");
@@ -326,10 +330,13 @@ describe("App 四窗口并发集成", () => {
     await waitFor(() => {
       expect(screen.getByText(/负责系统监控与优化/)).toBeInTheDocument();
     });
-    // 功能区: 设置 + 任务 + 关闭对话 齐全(与场景一致)
+    // 功能区(P1-4 收纳进「⋯ 更多」): 点开下拉 → 设置 + 任务 + 关闭对话 齐全
+    await user.click(screen.getByTitle("更多操作"));
     expect(screen.getByTitle("会话设置(记忆/截断/系统提示词)")).toBeInTheDocument();
     expect(screen.getByTitle("任务执行状态")).toBeInTheDocument();
     expect(screen.getByTitle("关闭对话(归档至历史任务)")).toBeInTheDocument();
+    // 关闭下拉
+    await user.click(screen.getByTitle("更多操作"));
     // 主智能体无 skill: 不显示"切换技能"按钮
     expect(screen.queryByText("🔄 切换技能")).not.toBeInTheDocument();
     // 完整输入卡片: 工作区 + 更多(+) + 模型选择
@@ -528,5 +535,48 @@ describe("App 四窗口并发集成", () => {
     // 其他会话(id=7)事件不串入
     emitWs(ws2, wsEvent({ event_type: "delta", payload: { turn: 1, content: "重连后别台输出" } }, 7));
     expect(screen.queryByText(/重连后别台输出/)).not.toBeInTheDocument();
+  });
+
+  it("历史树点击 monitor 会话 → 进 chat 而非 home(2026-08-16 修复)", async () => {
+    // 会话列表含 monitor 会话(locked_skill_name=NULL, kind=monitor)
+    const fetchMock = vi.fn((url: string) => {
+      const u = String(url);
+      if (u.includes("/sessions?")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve([
+            {
+              id: 56, title: "系统监控", status: "active", kind: "monitor",
+              locked_skill_name: null, model_id: null, last_turn: 3, folder: null,
+            },
+          ]),
+        });
+      }
+      if (u.includes("/skills")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(SKILLS) });
+      }
+      if (u.includes("/agent-profile")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }
+      if (u.includes("/sessions/56/resume")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ resumable: false }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const user = userEvent.setup();
+    render(<App />);
+    // 展开历史任务 → monitor 组默认收起 → 展开 monitor 组 → 点击会话
+    await user.click(screen.getByRole("button", { name: /历史任务/ }));
+    // monitor 组按钮 title: "{agentName}场景会话(N)"(agentName 未配置 → 主智能体)
+    const monitorGroup = await screen.findByTitle(/主智能体场景会话/);
+    await user.click(monitorGroup);
+    const sessionRow = await screen.findByText(/系统监控/);
+    await user.click(sessionRow);
+    // 修复前: 跳主页; 修复后: 进 chat 对话界面(输入框出现)
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/输入消息|输入|发送/i)).toBeInTheDocument();
+    });
   });
 });

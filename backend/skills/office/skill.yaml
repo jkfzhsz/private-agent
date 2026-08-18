@@ -57,3 +57,16 @@ examples:
   inject_to: frozen_zone
 max_frozen_token: 4000
 workspace: D:\PA\zizhan
+# 2026-08-15(A-1 Agent Harness 工程化, 设计文档 §3.1-A1)
+harness:
+  enabled: true
+  prompt_vars:
+    audience: "国有商业银行信贷人员"
+    tone: "专业、务实、避免空泛"
+  tool_descriptions:
+    web_search: "检索公开网页信息。研究类任务优先，引用必须标注来源。"
+    code_execution: "沙箱内执行 Python 代码。文档处理/数据分析/图表/脚本验证用。"
+  compression:
+    keep_turns: 8
+    keep_ratio: 0.15
+  middleware: []

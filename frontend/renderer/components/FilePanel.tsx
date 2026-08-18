@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
+import { toast } from "./Toast";
+import ConfirmDialog from "./ConfirmDialog";
 
 const API_BASE = "http://127.0.0.1:8765/admin";
 
@@ -22,6 +24,8 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ path: string; type: string; content?: string; size?: number } | null>(null);
   const [activePath, setActivePath] = useState<string>(""); // 当前操作目录(新建文件的目标位置)
+  // P0-3(2026-08-17): 删除文件 → 玻璃确认弹层
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -100,7 +104,6 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
   };
 
   const remove = async (path: string): Promise<void> => {
-    if (!window.confirm(`删除 ${path}? (仅文件或空目录可删)`)) return;
     try {
       const resp = await adminFetch(`${API_BASE}/files/delete?path=${encodeURIComponent(path)}`, {
         method: "DELETE",
@@ -151,8 +154,7 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
     if (!file) return;
     const MAX = 15 * 1024 * 1024;
     if (file.size > MAX) {
-      // eslint-disable-next-line no-alert
-      window.alert("文件超过 15MB 限制");
+      toast.error("文件超过 15MB 限制");
       return;
     }
     try {
@@ -259,7 +261,7 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
           borderBottom: "1px solid var(--border)",
         }}
       >
-        <span style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+        <span style={{ fontSize: "var(--fs-body)", fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
           📂 工作区文件
         </span>
         <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
@@ -342,7 +344,7 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
                 ✎
               </button>
               <button
-                onClick={() => void remove(preview.path)}
+                onClick={() => setPendingDelete(preview.path)}
                 style={{ ...toolBtnStyle, color: "var(--danger-text)" }}
                 title="删除"
               >
@@ -376,6 +378,21 @@ export default function FilePanel({ embedded = false }: { embedded?: boolean }):
           )}
         </div>
       )}
+
+      {/* P0-3(2026-08-17): 删除文件玻璃确认弹层 */}
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="删除文件"
+        body={pendingDelete ? `删除 ${pendingDelete}? (仅文件或空目录可删)` : ""}
+        confirmText="删除"
+        danger
+        onConfirm={() => {
+          const p = pendingDelete;
+          setPendingDelete(null);
+          if (p) void remove(p);
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

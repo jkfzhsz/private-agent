@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
 import RobotAvatar from "./RobotAvatar";
+import { toast } from "./Toast";
+import ConfirmDialog from "./ConfirmDialog";
 
 // 2026-08-10: 侧边栏固定宽度两态(展开/折叠), 取消外部拖拽调宽
 // 左右侧边栏对称: 折叠宽度均为 44px(与 ArtifactPanel 的 PANEL_COLLAPSED_WIDTH 一致)
@@ -134,7 +136,12 @@ function TaskTree({
   agentName,
 }: {
   currentSessionId: number | null;
-  onSwitchSession: (id: number, skillName?: string | null, modelId?: string | null) => void;
+  onSwitchSession: (
+    id: number,
+    skillName?: string | null,
+    modelId?: string | null,
+    kind?: string | null
+  ) => void;
   // V1.4-8.4: 跨模块搜索结果跳转(技能/知识库视图)
   onNavigate: (v: ViewKey) => void;
   // V1.5 项-4: 断点恢复(interrupted 会话"断点继续"按钮)
@@ -336,8 +343,15 @@ function TaskTree({
     if (title !== "") await patchSession(id, { title });
   };
 
+  // 2026-08-16(蒋先生反馈): 恢复会话 = 解除归档 + 直接进入该会话对话
+  // (原实现只改 status, 用户还需再点会话行, 且 monitor 会话此前会跳主页)。
   const toggleArchive = (s: SessionItem): void => {
-    void patchSession(s.id, { status: s.status === "archived" ? "active" : "archived" });
+    const wasArchived = s.status === "archived";
+    void patchSession(s.id, { status: wasArchived ? "active" : "archived" });
+    if (wasArchived) {
+      // 恢复 → 立即切到该会话对话(带 kind, 修复 monitor 跳主页)
+      onSwitchSession(s.id, s.locked_skill_name, s.model_id, s.kind);
+    }
   };
 
   const promptFolder = (s: SessionItem): void => {
@@ -352,8 +366,12 @@ function TaskTree({
       setSessions((prev) => prev.filter((s) => s.id !== id));
     } catch (e) {
       setError(`删除失败: ${String(e)}`);
+      // P0-3(2026-08-17): 删除失败同步全局 Toast(接入点②)
+      toast.error(`删除会话失败: ${String(e)}`);
     }
   };
+  // P0-3(2026-08-17): 删除会话 → 玻璃确认弹层
+  const [pendingDeleteSession, setPendingDeleteSession] = useState<SessionItem | null>(null);
 
   // 0.5.0 M1(2026-08-08): 历史按场景分三大类展示 ——
   // 子瞻(office)/白圭(data_analysis)/清和(frontend_design) 三组 +
@@ -393,7 +411,7 @@ function TaskTree({
       <div
         key={s.id}
         className="nav-item"
-        onClick={() => onSwitchSession(s.id, s.locked_skill_name, s.model_id)}
+        onClick={() => onSwitchSession(s.id, s.locked_skill_name, s.model_id, s.kind)}
         onDoubleClick={() => startRename(s)}
         onMouseEnter={() => setHoverId(s.id)}
         onMouseLeave={() => setHoverId(null)}
@@ -479,7 +497,7 @@ function TaskTree({
                 </span>
               )}
             </span>
-            <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
+            <span className="fs-10 text-tertiary">
               {sceneName(s.locked_skill_name)}
               {s.last_turn > 0 ? ` · ${s.last_turn} 轮` : ""}
               {s.user_msg_count ? ` · ${s.user_msg_count} 条` : ""}
@@ -504,7 +522,7 @@ function TaskTree({
                 label="▶"
                 title="断点继续: 从中断处恢复生成"
                 onClick={() => {
-                  onSwitchSession(s.id, s.locked_skill_name, s.model_id);
+                  onSwitchSession(s.id, s.locked_skill_name, s.model_id, s.kind);
                   onResumeSession(s.id);
                 }}
               />
@@ -518,11 +536,7 @@ function TaskTree({
               label="×"
               title="删除此会话"
               danger
-              onClick={() => {
-                if (window.confirm(`删除会话 #${s.id}?该会话的所有消息也会被删除(不可恢复)`)) {
-                  void deleteSession(s.id);
-                }
-              }}
+              onClick={() => setPendingDeleteSession(s)}
             />
             {/* 仅当前会话显示低频操作(文件夹/导出), 减少 hover 遮挡 */}
             {isCurrent && (
@@ -570,21 +584,22 @@ function TaskTree({
   };
 
   return (
+    <>
     <div style={{ marginTop: 8 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+      <div className="flex-center gap-4">
         <button
           onClick={() => setExpanded(!expanded)}
           className="nav-item"
           style={{ flex: 1, justifyContent: "space-between" }}
         >
-          <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="flex-center gap-10">
             <svg width="18" height="18" viewBox="0 0 24 24" style={stroke}>
               <circle cx="12" cy="12" r="10" />
               <polyline points="12 6 12 12 16 14" />
             </svg>
             历史任务
           </span>
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+          <span className="fs-11 text-tertiary">
             {expanded ? "▾" : "▸"}
           </span>
         </button>
@@ -711,8 +726,8 @@ function TaskTree({
                             fontSize: 11,
                             color: "var(--text-primary)",
                           }}
-                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(139,92,246,0.08)"; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                          // P1-2(2026-08-17): JS hover 改背景 → CSS 伪类
+                          className="hover-highlight"
                         >
                           <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {h.type === "session" ? "💬 " : h.type === "skill" ? "🧩 " : "📚 "}
@@ -768,7 +783,7 @@ function TaskTree({
                     textAlign: "left",
                   }}
                 >
-                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span className="flex-center gap-6">
                     {g.icon} {g.name}
                     <span style={{ fontWeight: 400, fontSize: 10 }}>({list.length})</span>
                   </span>
@@ -781,6 +796,26 @@ function TaskTree({
         </div>
       )}
     </div>
+
+    {/* P0-3(2026-08-17): 删除会话玻璃确认弹层(在 TaskTree 内渲染, 共享其 state) */}
+    <ConfirmDialog
+      open={pendingDeleteSession !== null}
+      title="删除会话"
+      body={
+        pendingDeleteSession
+          ? `删除会话 #${pendingDeleteSession.id}? 该会话的所有消息也会被删除(不可恢复)。`
+          : ""
+      }
+      confirmText="删除"
+      danger
+      onConfirm={() => {
+        const s = pendingDeleteSession;
+        setPendingDeleteSession(null);
+        if (s) void deleteSession(s.id);
+      }}
+      onCancel={() => setPendingDeleteSession(null)}
+    />
+    </>
   );
 }
 
@@ -808,24 +843,19 @@ function ActionBtn({
   danger?: boolean;
 }): JSX.Element {
   return (
+    // P1-2(2026-08-17): JS hover 改色 → CSS 伪类(.icon-action-btn)
     <button
       onClick={onClick}
       title={title}
+      className={`icon-action-btn${danger ? " danger" : ""}`}
       style={{
-        // 2026-08-15(蒋先生反馈): 缩小图标尺寸(20→15px), 减少 hover 遮挡对话名
         width: 15,
         height: 15,
-        border: "none",
-        background: "transparent",
-        color: danger ? "var(--text-tertiary)" : "var(--text-tertiary)",
         fontSize: 10,
-        cursor: "pointer",
         borderRadius: 4,
         padding: 0,
         lineHeight: 1,
       }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = danger ? "var(--danger-text)" : "var(--text-primary)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-tertiary)"; }}
     >
       {label}
     </button>
@@ -846,12 +876,23 @@ export default function Sidebar({
   onRenameAgent,
   onOpenMonitor,
   monitorActive,
+  reconnectCount = 0,
+  onReconnect,
 }: {
   active: ViewKey;
   onChange: (v: ViewKey) => void;
   currentSessionId: number | null;
-  onSwitchSession: (id: number, skillName?: string | null, modelId?: string | null) => void;
+  onSwitchSession: (
+    id: number,
+    skillName?: string | null,
+    modelId?: string | null,
+    kind?: string | null
+  ) => void;
   status: "connected" | "disconnected" | "reconnecting";
+  /** P0-1(2026-08-17): 当前重连尝试序号(展示"重连中(第 N 次)") */
+  reconnectCount?: number;
+  /** P0-1(2026-08-17): 手动重连回调(断线时显示"重连"按钮) */
+  onReconnect?: () => void;
   /** 2026-08-10: 展开宽度由 App 以固定常量传入(不可拖拽); 折叠为 SIDEBAR_COLLAPSED_WIDTH */
   width?: number;
   /** V1.5 项-4: 断点恢复 —— 点击对 interrupted 会话发送 resume(可空: 兼容未接入方) */
@@ -897,12 +938,13 @@ export default function Sidebar({
     }
   };
 
+  // P0-1(2026-08-17): 状态色/文案走语义 token(亮暗双主题自适应), 弃用硬编码 #4caf50 等
   const statusColor =
-    status === "connected" ? "#4caf50" :
-    status === "reconnecting" ? "#ff9800" : "#f44336";
+    status === "connected" ? "var(--success-text)" :
+    status === "reconnecting" ? "var(--warning-text)" : "var(--danger-text)";
   const statusLabel =
     status === "connected" ? "已连接" :
-    status === "reconnecting" ? "重连中" : "未连接";
+    status === "reconnecting" ? `重连中（第 ${reconnectCount} 次）` : "未连接";
 
   const renderItem = (item: { key: ViewKey; label: string; icon: JSX.Element }): JSX.Element => (
     <button
@@ -1278,17 +1320,44 @@ export default function Sidebar({
             </div>
             <div style={{ fontSize: 13, flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600, lineHeight: 1.2 }}>本地用户</div>
-              <div style={{ fontSize: 11, color: "var(--text-tertiary)", display: "flex", alignItems: "center", gap: 4 }}>
+              <div style={{ fontSize: 11, color: "var(--text-tertiary)", display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+                {/* P0-1(2026-08-17): 状态点 + 文案; 重连中脉冲动画, 断线显示手动重连按钮 */}
                 <span
+                  role="img"
+                  aria-label={statusLabel}
                   style={{
                     display: "inline-block",
                     width: 7,
                     height: 7,
                     borderRadius: "50%",
                     backgroundColor: statusColor,
+                    flexShrink: 0,
+                    animation:
+                      status === "reconnecting"
+                        ? "status-pulse 1.2s ease-in-out infinite"
+                        : undefined,
                   }}
                 />
                 {statusLabel}
+                {status === "disconnected" && onReconnect && (
+                  <button
+                    onClick={onReconnect}
+                    style={{
+                      marginLeft: 4,
+                      fontSize: 11,
+                      padding: "1px 8px",
+                      borderRadius: 8,
+                      border: "1px solid var(--border-color)",
+                      background: "var(--panel-bg-hover)",
+                      color: "var(--text-primary)",
+                      cursor: "pointer",
+                      lineHeight: 1.6,
+                      flexShrink: 0,
+                    }}
+                  >
+                    重连
+                  </button>
+                )}
               </div>
             </div>
           </div>

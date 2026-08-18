@@ -148,9 +148,10 @@ def _write_artifact(content: str, workspace: str) -> str:
 FILE_READ_TOOL = ToolDef(
     name="file_read",
     description=(
-        "Read the content of a file on the local filesystem. Path must be within the allowed "
-        "data directory. For large files, use offset and limit parameters to read in chunks. "
-        "Check metadata.has_more and metadata.next_offset for pagination."
+        "Read the content of a file on the local filesystem. Global read access "
+        "(2026-08-16: no directory restriction, reads are audited). For large "
+        "files, use offset and limit parameters to read in chunks. Check "
+        "metadata.has_more and metadata.next_offset for pagination."
     ),
     parameters_schema={
         "type": "object",

@@ -79,3 +79,6 @@ kb-model-cache/
 .eval_review_queue.json
 backend/${PA_USER_DATA}/
 .claude/artifacts/
+
+# 测试运行时产物(pytest 以 WORKSPACE=backend 启动时的沙箱/日志)
+backend/backend/

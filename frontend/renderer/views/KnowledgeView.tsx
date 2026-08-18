@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
+import { uploadKbFile } from "../utils/kbUpload";
+import { toast } from "../components/Toast";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 const API_BASE = "http://127.0.0.1:8765/admin";
 
@@ -31,6 +34,12 @@ export default function KnowledgeView({
   const [scenario, setScenario] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // P0-3(2026-08-17): 删除/重索引 → 玻璃确认弹层(替代 window.confirm)
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    body: string;
+    run: () => void;
+  } | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
@@ -51,40 +60,25 @@ export default function KnowledgeView({
     void load();
   }, [load]);
 
-  // V1.2-6.4: 文件上传入库(base64 → 文本 → 切片向量化)
+  // V1.2-6.4: 文件上传入库 —— P1-3(2026-08-17) multipart 主路径 + base64 回退
+  // (纯函数在 utils/kbUpload.ts, 组件只负责进度反馈与结果展示)
   const uploadFile = async (file: File | undefined | null): Promise<void> => {
     if (!file) return;
     if (file.size > 10 * 1024 * 1024) {
       setUploadMsg({ ok: false, text: "文件超过 10MB 限制" });
+      toast.error("文件超过 10MB 限制");
       return;
     }
     setUploading(true);
-    setUploadMsg(null);
+    setUploadMsg({ ok: true, text: `正在上传 ${(file.size / 1024 / 1024).toFixed(1)} MB…` });
     try {
-      const buf = await file.arrayBuffer();
-      let binary = "";
-      const bytes = new Uint8Array(buf);
-      const chunk = 0x8000;
-      for (let i = 0; i < bytes.length; i += chunk) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-      }
-      const b64 = btoa(binary);
-      const body: Record<string, unknown> = {
-        filename: file.name,
-        content_base64: b64,
-      };
-      if (scenario.trim()) body.scenario = scenario.trim();
-      const resp = await adminFetch(`${API_BASE}/knowledge/upload-file`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+      const data = await uploadKbFile(file, scenario, (url, init) => adminFetch(url, init));
       setUploadMsg({ ok: true, text: `文件入库: ${data.filename} → ${data.chunks} 个片段` });
+      toast.success(`文件入库: ${data.filename} → ${data.chunks} 个片段`);
       void load();
     } catch (e) {
       setUploadMsg({ ok: false, text: `上传失败: ${String(e)}` });
+      toast.error(`上传失败: ${String(e)}`);
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -95,6 +89,7 @@ export default function KnowledgeView({
   const doTextUpload = async (): Promise<void> => {
     if (!filename.trim() || !content.trim()) {
       setUploadMsg({ ok: false, text: "请填写文件名和内容" });
+      toast.error("请填写文件名和内容");
       return;
     }
     setUploading(true);
@@ -112,11 +107,13 @@ export default function KnowledgeView({
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
       setUploadMsg({ ok: true, text: `上传成功: 文档 #${data.doc_id}, 生成 ${data.chunks} 个片段` });
+      toast.success(`上传成功: 文档 #${data.doc_id}, 生成 ${data.chunks} 个片段`);
       setContent("");
       setFilename("");
       void load();
     } catch (e) {
       setUploadMsg({ ok: false, text: `上传失败: ${String(e)}` });
+      toast.error(`上传失败: ${String(e)}`);
     } finally {
       setUploading(false);
     }
@@ -124,7 +121,6 @@ export default function KnowledgeView({
 
   // V1.2-6.4: 删除库(软删)
   const removeBase = async (sc: string): Promise<void> => {
-    if (!window.confirm(`删除知识库 "${sc}"? 其中全部文档将被移出检索(可追溯)。`)) return;
     try {
       const resp = await adminFetch(`${API_BASE}/knowledge/${encodeURIComponent(sc)}`, {
         method: "DELETE",
@@ -254,7 +250,6 @@ export default function KnowledgeView({
   };
 
   const doReindex = async (sc: string): Promise<void> => {
-    if (!window.confirm(`重索引 "${sc}": 全部片段将按当前切片配置重新切分+向量化。确定?`)) return;
     setReindexing(sc);
     setCfgMsg(null);
     try {
@@ -282,29 +277,30 @@ export default function KnowledgeView({
   };
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", scrollbarGutter: "stable" }}>
+    <>
+    <div className="view-scroll">
       {/* 统计卡 */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 12 }}>
         <div className="stat-card animate-in delay-1">
           <div>
-            <div className="stat-label" style={{ fontSize: 12, color: "var(--text-tertiary)", fontWeight: 500 }}>知识库</div>
-            <div style={{ fontSize: 32, fontWeight: 700, letterSpacing: "-0.03em", color: "var(--text-primary)" }}>
+            <div className="stat-label fs-12 text-tertiary fw-500">知识库</div>
+            <div className="page-title">
               {kb?.bases?.length ?? "—"}
             </div>
           </div>
         </div>
         <div className="stat-card animate-in delay-2">
           <div>
-            <div className="stat-label" style={{ fontSize: 12, color: "var(--text-tertiary)", fontWeight: 500 }}>文档总数</div>
-            <div style={{ fontSize: 32, fontWeight: 700, letterSpacing: "-0.03em", color: "var(--text-primary)" }}>
+            <div className="stat-label fs-12 text-tertiary fw-500">文档总数</div>
+            <div className="page-title">
               {kb?.total_documents ?? "—"}
             </div>
           </div>
         </div>
         <div className="stat-card animate-in delay-3">
           <div>
-            <div className="stat-label" style={{ fontSize: 12, color: "var(--text-tertiary)", fontWeight: 500 }}>片段总数</div>
-            <div style={{ fontSize: 32, fontWeight: 700, letterSpacing: "-0.03em", color: "var(--text-primary)" }}>
+            <div className="stat-label fs-12 text-tertiary fw-500">片段总数</div>
+            <div className="page-title">
               {kb?.total_chunks ?? "—"}
             </div>
           </div>
@@ -319,15 +315,15 @@ export default function KnowledgeView({
       )}
 
       {/* V1.2-6.4: 上传区(文件 + 文本) */}
-      <div className="glass-panel animate-in delay-2" style={{ padding: "20px 24px" }}>
+      <div className="glass-panel animate-in delay-2 pad-lg">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-          <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em" }}>上传文档</span>
-          <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>session={sessionId}</span>
+          <span className="title-block">上传文档</span>
+          <span className="fs-12 text-tertiary">session={sessionId}</span>
         </div>
         <div style={{ display: "flex", gap: 12, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
           <label
             style={{
-              fontSize: 13, fontWeight: 600, cursor: "pointer",
+              fontSize: "var(--fs-body)", fontWeight: 600, cursor: "pointer",
               padding: "8px 16px", borderRadius: 8,
               background: "var(--gradient-indigo)", color: "var(--on-accent)",
             }}
@@ -371,10 +367,9 @@ export default function KnowledgeView({
         </div>
         <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
           <input
-            className="flow-input"
-            style={{ flex: 1 }}
             placeholder="文件名(如 report.md / data.csv)"
             value={filename}
+            className="flow-input flex-1"
             onChange={(e) => setFilename(e.target.value)}
           />
         </div>
@@ -393,8 +388,8 @@ export default function KnowledgeView({
       </div>
 
       {/* V1.2-6.4: 库列表 */}
-      <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
-        <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 16 }}>
+      <div className="glass-panel animate-in delay-3 pad-lg">
+        <div style={{ fontSize: "var(--fs-title)", fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 16 }}>
           知识库列表
         </div>
         {!loading && (!kb || kb.bases.length === 0) && (
@@ -402,7 +397,7 @@ export default function KnowledgeView({
             暂无知识库。上传文档后按场景自动分组显示。
           </div>
         )}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div className="flex-col gap-8">
           {(kb?.bases ?? []).map((b) => (
             <div
               key={b.scenario}
@@ -413,9 +408,9 @@ export default function KnowledgeView({
               }}
             >
               <span style={{ fontSize: 15 }}>📚</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{b.scenario}</div>
-                <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+              <div className="flex-1-min0">
+                <div className="fs-13 fw-600">{b.scenario}</div>
+                <div className="fs-11 text-tertiary">
                   {b.documents.length} 文档 · {b.chunks} 片段
                 </div>
               </div>
@@ -430,7 +425,13 @@ export default function KnowledgeView({
                 {b.documents.map((d) => d.source).join(", ") || "—"}
               </div>
               <button
-                onClick={() => void doReindex(b.scenario)}
+                onClick={() =>
+                  setPendingConfirm({
+                    title: "重索引知识库",
+                    body: `重索引 "${b.scenario}": 全部片段将按当前切片配置重新切分+向量化。确定?`,
+                    run: () => void doReindex(b.scenario),
+                  })
+                }
                 title="按当前切片配置重切分+重向量化"
                 disabled={reindexing === b.scenario}
                 style={{
@@ -443,7 +444,13 @@ export default function KnowledgeView({
                 {reindexing === b.scenario ? "重索引中…" : "🔄 重索引"}
               </button>
               <button
-                onClick={() => void removeBase(b.scenario)}
+                onClick={() =>
+                  setPendingConfirm({
+                    title: "删除知识库",
+                    body: `删除知识库 "${b.scenario}"? 其中全部文档将被移出检索(可追溯)。`,
+                    run: () => void removeBase(b.scenario),
+                  })
+                }
                 title="删除此知识库(软删)"
                 style={{
                   flexShrink: 0, fontSize: 12, padding: "4px 10px",
@@ -460,8 +467,8 @@ export default function KnowledgeView({
       </div>
 
       {/* V1.3-7.3: 检索测试 */}
-      <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
-        <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>
+      <div className="glass-panel animate-in delay-3 pad-lg">
+        <div style={{ fontSize: "var(--fs-title)", fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>
           检索测试
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
@@ -514,7 +521,7 @@ export default function KnowledgeView({
               >
                 <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
                   <span style={{ fontSize: 11, fontWeight: 600, color: "#5b21b6" }}>score {r.score}</span>
-                  <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{r.source} · {r.doc_type}</span>
+                  <span className="fs-11 text-tertiary">{r.source} · {r.doc_type}</span>
                 </div>
                 <div style={{ color: "var(--text-primary)", lineHeight: 1.6, wordBreak: "break-word" }}>{r.text}</div>
               </div>
@@ -524,9 +531,9 @@ export default function KnowledgeView({
       </div>
 
       {/* V1.3-7.3: 切片配置 */}
-      <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
+      <div className="glass-panel animate-in delay-3 pad-lg">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em" }}>切片参数</div>
+          <div className="title-block">切片参数</div>
           <button
             className="btn-primary"
             style={{ padding: "6px 16px", fontSize: 12 }}
@@ -548,7 +555,7 @@ export default function KnowledgeView({
               }}
             >
               <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{dt}</span>
-              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <label className="flex-center gap-6">
                 size
                 <input
                   type="number"
@@ -561,7 +568,7 @@ export default function KnowledgeView({
                   }}
                 />
               </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <label className="flex-center gap-6">
                 overlap
                 <input
                   type="number"
@@ -580,9 +587,9 @@ export default function KnowledgeView({
       </div>
 
       {/* 2026-08-12 方案1: RAG 高级配置(model_path / extra_python_path) */}
-      <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
+      <div className="glass-panel animate-in delay-3 pad-lg">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em" }}>RAG 高级配置</div>
+          <div className="title-block">RAG 高级配置</div>
           <button
             className="btn-primary"
             style={{ padding: "6px 16px", fontSize: 12 }}
@@ -634,5 +641,21 @@ export default function KnowledgeView({
         </div>
       </div>
     </div>
+
+    {/* P0-3(2026-08-17): 删除库/重索引玻璃确认弹层 */}
+    <ConfirmDialog
+      open={pendingConfirm !== null}
+      title={pendingConfirm?.title ?? ""}
+      body={pendingConfirm?.body ?? ""}
+      confirmText="确认"
+      danger
+      onConfirm={() => {
+        const req = pendingConfirm;
+        setPendingConfirm(null);
+        req?.run();
+      }}
+      onCancel={() => setPendingConfirm(null)}
+    />
+    </>
   );
 }

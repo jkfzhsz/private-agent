@@ -32,6 +32,26 @@ class TestFileRead:
             result = await file_read_handler({"path": "/nonexistent/file.txt", "data_dir": tmpdir})
             assert result.error is not None
 
+    async def test_global_read_without_data_dir(self) -> None:
+        """2026-08-16 权限放宽: 不传 data_dir → 全局读取(任意路径免确认)。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "global.txt")
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("global-read-ok")
+            result = await file_read_handler({"path": filepath})  # 无 data_dir
+            assert result.error is None
+            assert "global-read-ok" in result.output
+
+    async def test_data_dir_still_validates_when_provided(self) -> None:
+        """显式 data_dir 时穿越仍拒绝(handler 兼容旧行为, 服务端不注入即全局)。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outside = os.path.join(os.path.dirname(tmpdir), "outside.txt")
+            with open(outside, "w", encoding="utf-8") as f:
+                f.write("x")
+            result = await file_read_handler({"path": outside, "data_dir": tmpdir})
+            assert result.error is not None
+            assert "traversal" in result.error.lower() or "outside" in result.error.lower()
+
 
 class TestFileReadMaxLines:
     """AC-1: max_lines 参数截断。"""

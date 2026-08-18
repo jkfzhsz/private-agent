@@ -77,11 +77,12 @@ const STATUS_META: Record<
   SubagentStatus,
   { bg: string; color: string; label: string; icon: string }
 > = {
-  pending: { bg: "#e2e8f0", color: "#475569", label: "排队中", icon: "⏳" },
-  running: { bg: "#dbeafe", color: "#1d4ed8", label: "运行中", icon: "🔵" },
-  succeeded: { bg: "#d1fae5", color: "#047857", label: "成功", icon: "✅" },
-  failed: { bg: "#fee2e2", color: "#b91c1c", label: "失败", icon: "❌" },
-  cancelled: { bg: "#e2e8f0", color: "#64748b", label: "已取消", icon: "⏹" },
+  // P0-2(2026-08-17): 底色/文字改引 var(--subagent-*) token(亮/暗双值)
+  pending: { bg: "var(--subagent-pending-bg)", color: "var(--subagent-pending-color)", label: "排队中", icon: "⏳" },
+  running: { bg: "var(--subagent-running-bg)", color: "var(--subagent-running-color)", label: "运行中", icon: "🔵" },
+  succeeded: { bg: "var(--subagent-succeeded-bg)", color: "var(--subagent-succeeded-color)", label: "成功", icon: "✅" },
+  failed: { bg: "var(--subagent-failed-bg)", color: "var(--subagent-failed-color)", label: "失败", icon: "❌" },
+  cancelled: { bg: "var(--subagent-cancelled-bg)", color: "var(--subagent-cancelled-color)", label: "已取消", icon: "⏹" },
 };
 
 interface Props {
@@ -167,21 +168,22 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
           marginBottom: 8,
           fontSize: 13,
           fontWeight: 600,
-          color: "#334155",
+          // 2026-08-17: 硬编码深色 → 语义 token(暗色可读)
+          color: "var(--text-primary)",
         }}
       >
         <span>🧩 子任务</span>
-        <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 400 }}>
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontWeight: 400 }}>
           {list.length - finishedCount} 运行中 · {finishedCount} 已完成
         </span>
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         {finishedCount > 0 && onClearFinished && (
           <button
             onClick={onClearFinished}
             style={{
               fontSize: 11, padding: "2px 8px", borderRadius: 6,
               border: "1px solid #cbd5e1", background: "var(--panel-bg-solid)", cursor: "pointer",
-              color: "#64748b",
+              color: "var(--text-secondary)",
             }}
             title="清除已完成的子任务卡片"
           >
@@ -235,7 +237,7 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
                 {meta.icon} {meta.label}
               </span>
               <span
-                style={{ fontSize: 12, fontWeight: 600, color: "#334155", flexShrink: 0 }}
+                style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", flexShrink: 0 }}
               >
                 {s.taskId || `#${s.id}`}
               </span>
@@ -251,20 +253,20 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
                 </span>
               )}
               {s.toolCalls > 0 && (
-                <span style={{ fontSize: 11, color: "#94a3b8" }}>🔧 ×{s.toolCalls}</span>
+                <span className="fs-11 text-tertiary">🔧 ×{s.toolCalls}</span>
               )}
-              <span style={{ flex: 1 }} />
-              <span style={{ fontSize: 11, color: "#94a3b8" }}>{isOpen ? "▾" : "▸"}</span>
+              <span className="flex-1" />
+              <span className="fs-11 text-tertiary">{isOpen ? "▾" : "▸"}</span>
             </div>
             {isOpen && (
-              <div style={{ marginTop: 8, fontSize: 12, color: "#475569" }}>
-                <div style={{ color: "#64748b", marginBottom: 4 }}>
-                  <span style={{ color: "#94a3b8" }}>指令: </span>
+              <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-secondary)" }}>
+                <div style={{ color: "var(--text-secondary)", marginBottom: 4 }}>
+                  <span style={{ color: "var(--text-tertiary)" }}>指令: </span>
                   {s.prompt.length > 180 ? `${s.prompt.slice(0, 180)}…` : s.prompt}
                 </div>
                 {/* 2026-08-06: 完整对话流(DB 读取, 与主对话流 replay 同源) */}
                 {flowLoading.has(s.id) && (
-                  <div style={{ fontSize: 11, color: "#94a3b8", padding: "4px 0" }}>
+                  <div style={{ fontSize: 11, color: "var(--text-tertiary)", padding: "4px 0" }}>
                     加载对话流…
                   </div>
                 )}
@@ -297,13 +299,13 @@ export default function SubagentPanel({ subagents, onClearFinished }: Props) {
                               : "none",
                         }}
                       >
-                        <span style={{ color: "#94a3b8", marginRight: 6 }}>
+                        <span style={{ color: "var(--text-tertiary)", marginRight: 6 }}>
                           {new Date(ev.ts).toLocaleTimeString()}
                         </span>
                         <span style={{ color: "#6d28d9", fontWeight: 600 }}>
                           {ev.eventType}
                         </span>
-                        <span style={{ color: "#475569", marginLeft: 6 }}>
+                        <span style={{ color: "var(--text-secondary)", marginLeft: 6 }}>
                           {formatEventBrief(ev)}
                         </span>
                       </div>
@@ -424,7 +426,7 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
                 <span
                   onClick={() => toggleThinking(turn)}
                   style={{
-                    fontSize: 11, color: "#64748b", cursor: "pointer",
+                    fontSize: 11, color: "var(--text-secondary)", cursor: "pointer",
                     padding: "1px 6px", borderRadius: 6, background: "var(--code-bg)",
                     border: "1px solid var(--border-color)",
                   }}
@@ -433,7 +435,7 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
                 </span>
               )}
               {toolEvents.length > 0 && (
-                <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                <span className="fs-11 text-tertiary">
                   🔧 ×{toolEvents.filter((e) => e.event_type === "tool_call").length}
                 </span>
               )}
@@ -441,7 +443,7 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
             {isOpenT && thinkingText && (
               <div
                 style={{
-                  fontSize: 11, color: "#64748b", background: "var(--code-bg)",
+                  fontSize: 11, color: "var(--text-secondary)", background: "var(--code-bg)",
                   border: "1px solid var(--border-color)", borderRadius: 6, padding: 6,
                   marginBottom: 4, whiteSpace: "pre-wrap", maxHeight: 160,
                   overflowY: "auto",
@@ -456,7 +458,7 @@ function SubagentFlowView({ events }: { events: SubagentFlowEvent[] }): JSX.Elem
             {finalText && (
               <div
                 style={{
-                  fontSize: 12, color: "#334155", whiteSpace: "pre-wrap",
+                  fontSize: 12, color: "var(--text-primary)", whiteSpace: "pre-wrap",
                   padding: "4px 6px", borderLeft: "3px solid #6366f1",
                   background: "var(--accent-soft-bg)", borderRadius: 4, marginTop: 2,
                 }}
@@ -505,7 +507,9 @@ function ToolFlowRow({ ev }: { ev: SubagentFlowEvent }): JSX.Element | null {
         {open && argsText && (
           <pre
             style={{
-              margin: "4px 0 0", fontSize: 10, color: "#475569",
+              margin: "4px 0 0", fontSize: 10,
+              // 2026-08-17: 硬编码 #475569 → 语义 token(暗色下可见)
+              color: "var(--text-secondary)",
               background: "var(--panel-bg-solid)", padding: 4, borderRadius: 4,
               whiteSpace: "pre-wrap", overflowX: "auto",
             }}

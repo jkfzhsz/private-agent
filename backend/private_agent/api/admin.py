@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import json
@@ -152,6 +152,9 @@ async def add_supplementary_skills(
 
     - 不改变 sessions.locked_skill_name(主技能)
     - 技能不存在 → 该技能计入 failed, 不阻塞其余
+    - 2026-08-16(§14 场景归类): 会话场景(locked_skill_name)允许类目外
+      的技能被拒绝(4xx 语义, 计入 failed 带 reason, 不落库) —— 白圭不
+      可挂 tdd 等 engineering 技能, 避免通道拥挤
     - 挂载后下次消息自动合并 system_prompt/工具白名单
     """
     from private_agent.skills.loader import SkillLoader
@@ -160,18 +163,43 @@ async def add_supplementary_skills(
     loader = SkillLoader.from_cfg(cfg)
     conn = await db.connect()
     try:
+        # §14: 会话场景 → 允许类目(config tools.mcp.scene_skills)
+        scene = await conn.fetchval(
+            "SELECT locked_skill_name FROM sessions WHERE id = $1",
+            session_id,
+        )
+        scene_map = (
+            cfg.get("tools", {}).get("mcp", {}).get("scene_skills", {}) or {}
+        )
+        allowed_categories: list[str] | None = (
+            list(scene_map.get(scene) or []) if scene and scene in scene_map else None
+        )
         added: list[str] = []
         failed: list[dict] = []
         for sname in body.skill_names:
             try:
                 # 校验技能存在
-                await loader.load(sname, conn)
+                skill = await loader.load(sname, conn)
             except Exception as e:  # noqa: BLE001
                 failed.append({
                     "name": sname,
                     "reason": f"技能不存在或加载失败: {type(e).__name__}: {e}",
                 })
                 continue
+            # §14 挂载校验: 场景允许类目外拒绝(类目配置存在时生效)
+            if allowed_categories is not None:
+                skill_cat = (
+                    getattr(skill.manifest, "scenario", "") or ""
+                )
+                if skill_cat not in allowed_categories:
+                    failed.append({
+                        "name": sname,
+                        "reason": (
+                            f"技能类目[{skill_cat}]不属于场景[{scene}]允许类目"
+                            f"({sorted(allowed_categories)}), 已拒绝挂载"
+                        ),
+                    })
+                    continue
             try:
                 await conn.execute(
                     "INSERT INTO session_supplementary_skills "
@@ -208,6 +236,121 @@ async def remove_supplementary_skill(session_id: int, skill_name: str):
         return JSONResponse(status_code=500, content={"error": f"remove_failed: {e}"})
     finally:
         await conn.close()
+
+
+@router.get("/sessions/{session_id}/tools-assembly", response_model=None)
+async def get_session_tools_assembly(session_id: int):
+    """2026-08-16(阶段1-d, G2): 会话工具装配视图(只读, 通道收敛可感知)。
+
+    返回当前会话实际装配的工具/MCP 维度(不实例化工具, 仅配置解析):
+    - scene: 场景(locked_skill_name) / kind / workspace
+    - mcp_servers: 按 skill_binding 绑定装配的 MCP server ids
+    - monitor_tools: monitor 会话专属工具名(monitor_tools + evolution_tools)
+    - builtin_tools: 内置工具白名单(通用)
+    - anchor_tools: monitor 场景级注入锚点(阶段1-a)
+
+    Returns:
+        200: {scene, kind, workspace, mcp_servers[], monitor_tools[],
+             builtin_tools[], anchor_tools[]}
+        404: {"error": "session_not_found"}
+    """
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                "SELECT kind, workspace, locked_skill_name FROM sessions "
+                "WHERE id = $1",
+                session_id,
+            )
+            if row is None:
+                return JSONResponse(
+                    status_code=404, content={"error": "session_not_found"}
+                )
+            kind = row["kind"] or ""
+            scene = row["locked_skill_name"] or ""
+            workspace = row["workspace"] or ""
+            cfg = await _load_cfg()
+            mcp_cfg = cfg.get("tools", {}).get("mcp", {}) or {}
+            binding = mcp_cfg.get("skill_binding", {}) or {}
+            # 场景会话 → 按 locked_skill_name 绑定; monitor → kind 绑定
+            server_ids: list[str] = []
+            if kind == "monitor":
+                server_ids = list(binding.get("monitor") or [])
+            elif scene and scene in binding:
+                server_ids = list(binding.get(scene) or [])
+            # monitor 场景级锚点(阶段1-a, 与 main.py 同源)
+            anchor_tools: list[str] = []
+            if kind == "monitor":
+                anchor_tools = [
+                    "code_execution", "file_read", "file_write",
+                    "optim_plan", "apply_optim",
+                    "ws_read", "ws_write", "ws_list", "ws_rm",
+                    "git_status", "git_diff", "git_commit", "pytest_run",
+                    "project_scan",
+                    "skill_list", "skill_create", "skill_update", "skill_delete",
+                    "mcp_server_list", "mcp_server_add",
+                    "eval_scenes", "eval_run", "eval_report",
+                    "lessons_add", "search_lessons",
+                    "mcp__mempalace__mempalace_search",
+                    "mcp__mempalace__mempalace_kg_query",
+                    "mcp__mempalace__mempalace_add_drawer",
+                    "mcp__mempalace__mempalace_list_drawers",
+                    "mcp__mempalace__mempalace_get_drawer",
+                    "mcp__Searchpin__*",
+                ]
+            # monitor 专属工具
+            monitor_tools: list[str] = []
+            if kind == "monitor":
+                from private_agent.tools.builtins import (
+                    MONITOR_TOOLS,
+                    EVOLUTION_TOOLS,
+                )
+                from private_agent.tools.builtins.git_tools import GIT_TOOLS
+                from private_agent.tools.builtins.pytest_run import PYTEST_RUN_TOOL
+                from private_agent.tools.builtins.project_scan import (
+                    PROJECT_SCAN_TOOL,
+                )
+                from private_agent.tools.builtins.skill_manager import (
+                    SKILL_MANAGER_TOOLS,
+                )
+                from private_agent.tools.builtins.mcp_config_manager import (
+                    MCP_MANAGER_TOOLS,
+                )
+                from private_agent.tools.builtins.eval_runner import (
+                    EVAL_MANAGER_TOOLS,
+                )
+
+                monitor_tools = sorted(
+                    {td.name for td in MONITOR_TOOLS}
+                    | {td.name for td in EVOLUTION_TOOLS}
+                    | {td.name for td in GIT_TOOLS}
+                    | {td.name for td in SKILL_MANAGER_TOOLS}
+                    | {td.name for td in MCP_MANAGER_TOOLS}
+                    | {td.name for td in EVAL_MANAGER_TOOLS}
+                    | {PYTEST_RUN_TOOL.name}
+                    | {PROJECT_SCAN_TOOL.name}
+                )
+            return {
+                "scene": scene,
+                "kind": kind,
+                "workspace": workspace,
+                "mcp_servers": server_ids,
+                "monitor_tools": monitor_tools,
+                "builtin_tools": [
+                    "calculator", "code_execution", "datetime", "file_read",
+                    "file_write", "http_request", "memory_search",
+                    "memory_save", "read_artifact", "search_knowledge",
+                    "search_lessons", "system_capabilities",
+                    "delegate_subtask",
+                ],
+                "anchor_tools": anchor_tools,
+            }
+        finally:
+            await conn.close()
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503, content={"error": f"tools_assembly_failed: {e}"}
+        )
 
 
 @router.get("/disk-status", response_model=None)
@@ -910,11 +1053,11 @@ async def knowledge_search_test(body: KnowledgeSearchTestRequest):
 
 
 class KnowledgeFileUploadRequest(BaseModel):
-    """POST /admin/knowledge/upload-file 请求体(V1.2-6.4): 文件上传入库。
+    """POST /admin/knowledge/upload-file 请求体(JSON base64, DEPRECATED)。
 
-    filename: 文件名(扩展名决定文档类型)。
-    content_base64: 文件内容(base64, 文本文件 utf-8/gbk)。
-    scenario: 目标知识库(缺省按文件名/类型归类)。
+    2026-08-17(P1-3): multipart/form-data 已成为主路径(不占 JS 主线程,
+    浏览器原生处理); 本 JSON 分支保留一个版本周期供旧前端回退,
+    P3 清理周期移除。字段: filename / content_base64 / scenario。
     """
 
     filename: str
@@ -922,29 +1065,20 @@ class KnowledgeFileUploadRequest(BaseModel):
     scenario: str | None = None
 
 
-@router.post("/knowledge/upload-file", response_model=None)
-async def knowledge_upload_file(body: KnowledgeFileUploadRequest):
-    """文件上传入库(V1.2-6.4): base64 → 文本 → 切片向量化。
+async def _kb_ingest(
+    filename: str, content: bytes, scenario: str | None
+) -> dict | JSONResponse:
+    """知识库文件入库公共处理(multipart 与 base64 双路径共用)。
 
-    支持文本类文件(md/txt/csv/json/代码等, utf-8/gbk); 二进制/PDF 请
-    先转文本再上传(个人应用, 不内置文档解析器)。
+    content: 原始文件字节(≤10MB); 文本解码 utf-8 优先 gbk 兜底;
+    二进制/PDF 请先转文本再上传(个人应用, 不内置文档解析器)。
     """
-    import base64 as _b64
-    import re as _re
-    from pathlib import Path
-
-    safe_name = _re.sub(r'[\\/:*?"<>|]', "_", Path(body.filename).name or "upload.txt")
-    try:
-        decoded = _b64.b64decode(body.content_base64, validate=False)
-    except Exception:  # noqa: BLE001
-        return JSONResponse(status_code=400, content={"error": "invalid_file"})
-    if len(decoded) > 10 * 1024 * 1024:
+    if len(content) > 10 * 1024 * 1024:
         return JSONResponse(status_code=400, content={"error": "file_too_large"})
-    # 文本解码(utf-8 优先, gbk 兜底)
     text = None
     for enc in ("utf-8", "gbk"):
         try:
-            text = decoded.decode(enc)
+            text = content.decode(enc)
             break
         except UnicodeDecodeError:
             continue
@@ -953,6 +1087,10 @@ async def knowledge_upload_file(body: KnowledgeFileUploadRequest):
             status_code=400,
             content={"error": "unsupported_binary_file"},
         )
+    import re as _re
+    from pathlib import Path
+
+    safe_name = _re.sub(r'[\\/:*?"<>|]', "_", Path(filename).name or "upload.txt")
     try:
         conn = await db.connect()
         try:
@@ -964,13 +1102,47 @@ async def knowledge_upload_file(body: KnowledgeFileUploadRequest):
             doc_id, chunks = await svc.process_document(
                 content=text,
                 filename=safe_name,
-                scenario=body.scenario,
+                scenario=scenario,
             )
             return {"doc_id": doc_id, "chunks": len(chunks), "filename": safe_name}
         finally:
             await conn.close()
     except Exception:
         return JSONResponse(status_code=500, content={"error": "upload_failed"})
+
+
+@router.post("/knowledge/upload-file", response_model=None)
+async def knowledge_upload_file(request: Request):
+    """文件上传入库(P1-3, 2026-08-17): multipart 主路径 + JSON base64 兼容。
+
+    - multipart/form-data(主): 字段 file(文件) + scenario(可选知识库)。
+      base64 由浏览器原生编码, 不占 JS 主线程 → 大文件上传不冻结界面。
+    - application/json(兼容, deprecated): 旧版前端回退路径, 见
+      KnowledgeFileUploadRequest。保留一个版本周期, P3 清理周期移除。
+    """
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        up = form.get("file")
+        if up is None:
+            return JSONResponse(status_code=400, content={"error": "invalid_file"})
+        scenario = form.get("scenario")
+        raw = await up.read()
+        return await _kb_ingest(up.filename or "upload.txt", raw, scenario or None)
+    # JSON base64 兼容分支
+    import base64 as _b64
+
+    body = await request.json()
+    filename = body.get("filename")
+    content_b64 = body.get("content_base64")
+    scenario = body.get("scenario")
+    if not filename or not content_b64:
+        return JSONResponse(status_code=400, content={"error": "invalid_file"})
+    try:
+        decoded = _b64.b64decode(content_b64, validate=False)
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=400, content={"error": "invalid_file"})
+    return await _kb_ingest(filename, decoded, scenario or None)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1145,8 +1317,15 @@ async def list_skills():
                     # 0.5.0 M1: 场景名(子瞻/白圭/清和, 前端显示层统一用 scene_name
                     # 回退 display_name → name; 空 = 通用技能/非场景)
                     "scene_name": getattr(s.manifest, "scene_name", "") or "",
+                    # 2026-08-16(§14 场景归类): 技能类目(writing/documents/
+                    # engineering/design/meta + 场景名), 前端按会话场景过滤/
+                    # 分组展示 + 挂载校验用
+                    "scenario": getattr(s.manifest, "scenario", "") or "",
                     "scene_profile": getattr(s.manifest, "scene_profile", None) or {},
                     "scene_scope": list(getattr(s.manifest, "scene_scope", None) or []),
+                    # 2026-08-15(A-1 Agent Harness): harness 段透传
+                    # (前端技能面板可选展示; 空 dict = 无 harness, 零回归)
+                    "harness": getattr(s.manifest, "harness", None) or {},
                     # 2026-08-08: 模型限定(空=通用, 非空=仅匹配模型会话展示)
                     "model_scope": list(getattr(s.manifest, "model_scope", None) or []),
                     "permissions": _skill_permissions_summary(s.manifest),
@@ -1219,6 +1398,8 @@ async def get_skill_detail(skill_name: str):
                 "scene_name": getattr(skill.manifest, "scene_name", "") or "",
                 "scene_profile": getattr(skill.manifest, "scene_profile", None) or {},
                 "scene_scope": list(getattr(skill.manifest, "scene_scope", None) or []),
+                # 2026-08-15(A-1 Agent Harness): harness 段透传(详情页展示)
+                "harness": getattr(skill.manifest, "harness", None) or {},
                 "model_params": dict(getattr(skill.manifest, "model_params", None) or {}),
                 "system_prompt_preview": skill.system_prompt[:500],
                 "tools": [
@@ -1835,6 +2016,20 @@ async def get_metrics_summary(since_hours: float = 1.0):
         )
 
 
+def _parse_plan_json(plan_json) -> list:
+    """解析 optim_log.plan_json(asyncpg JSONB 返回 str, 2026-08-15 教训)。"""
+    if isinstance(plan_json, list):
+        return plan_json
+    if isinstance(plan_json, str):
+        try:
+            import json as _json
+            parsed = _json.loads(plan_json)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:  # noqa: BLE001
+            return []
+    return []
+
+
 @router.get("/optim-log", response_model=None)
 async def list_optim_log(status: str | None = None, limit: int = 50):
     """列出优化建议记录(可按状态过滤)。
@@ -1869,7 +2064,8 @@ async def list_optim_log(status: str | None = None, limit: int = 50):
                     "proposal": r["proposal"],
                     "category": r["category"],
                     "status": r["status"],
-                    "plan": r["plan_json"] if isinstance(r["plan_json"], list) else [],
+                    # asyncpg JSONB 返回 str(2026-08-15 教训): 需解析为 list
+                    "plan": _parse_plan_json(r["plan_json"]),
                     "result": r["result"],
                     "session_id": r["session_id"],
                     "reviewed_at": (

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
 import RobotAvatar from "../components/RobotAvatar";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 const API_BASE = "http://127.0.0.1:8765/admin";
 
@@ -34,6 +35,8 @@ export default function AgentLibraryView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // P0-3(2026-08-17): 删除技能 → 玻璃确认弹层
+  const [pendingDelete, setPendingDelete] = useState<SkillItem | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -69,7 +72,6 @@ export default function AgentLibraryView({
   };
 
   const removeSkill = async (s: SkillItem): Promise<void> => {
-    if (!window.confirm(`删除技能 "${s.name}"？\n该技能配置将被移除，正在使用它的会话可能无法继续。`)) return;
     try {
       const resp = await adminFetch(`${API_BASE}/skills/${s.name}`, { method: "DELETE" });
       if (!resp.ok) {
@@ -147,10 +149,11 @@ export default function AgentLibraryView({
   };
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", scrollbarGutter: "stable" }}>
+    <>
+    <div className="view-scroll">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>技能库</div>
+          <div style={{ fontSize: "var(--fs-title)", fontWeight: 700, letterSpacing: "-0.02em" }}>技能库</div>
           <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 }}>
             每个技能对应一种能力场景，点击"调用"即可开始对话
           </div>
@@ -186,10 +189,10 @@ export default function AgentLibraryView({
               opacity: s.enabled ? 1 : 0.6,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div className="flex-center gap-10">
               {/* 智能体头像:统一桌面图标款式(蓝紫渐变机器人,所有技能一致品牌) */}
               <RobotAvatar size={40} style={{ borderRadius: 10 }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="flex-1-min0">
                 {renaming === s.name ? (
                   <input
                     autoFocus
@@ -216,11 +219,11 @@ export default function AgentLibraryView({
                     }}
                   />
                 ) : (
-                  <div style={{ fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div style={{ fontSize: "var(--fs-subtitle)", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {s.display_name || s.name}
                   </div>
                 )}
-                <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                <div className="fs-11 text-tertiary">
                   v{s.version} · {s.enabled ? "已启用" : "已停用"}
                   {s.display_name && s.display_name !== s.name ? ` · ${s.name}` : ""}
                 </div>
@@ -330,7 +333,7 @@ export default function AgentLibraryView({
                       cursor: "pointer",
                     }}
                     title="删除技能"
-                    onClick={() => void removeSkill(s)}
+                    onClick={() => setPendingDelete(s)}
                   >
                     🗑 删除
                   </button>
@@ -358,5 +361,21 @@ export default function AgentLibraryView({
         ))}
       </div>
     </div>
+
+    {/* P0-3(2026-08-17): 删除技能玻璃确认弹层 */}
+    <ConfirmDialog
+      open={pendingDelete !== null}
+      title={`删除技能 "${pendingDelete?.name ?? ""}"？`}
+      body="该技能配置将被移除，正在使用它的会话可能无法继续。"
+      confirmText="删除"
+      danger
+      onConfirm={() => {
+        const s = pendingDelete;
+        setPendingDelete(null);
+        if (s) void removeSkill(s);
+      }}
+      onCancel={() => setPendingDelete(null)}
+    />
+    </>
   );
 }

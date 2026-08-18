@@ -52,6 +52,8 @@ __all__ = ["ReactLoopState", "ReactLoop"]
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg")
 # 单张图片注入上限(8MB, 防 base64 撑爆上下文)
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
+# 2026-08-16(阶段2 反馈): 迭代上限询问"继续"时每次扩展的步数
+_ITERATION_CONTINUE_STEP = 10
 
 
 def _messages_contain_image(messages: list[dict]) -> bool:
@@ -87,6 +89,7 @@ def _messages_contain_image(messages: list[dict]) -> bool:
 
 def _inject_image_urls(
     messages: list[dict],
+    workspace: str = "",
 ) -> tuple[list[dict], list[str]]:
     """把消息中的图片文本引用转换为 OpenAI image_url(data URL)。
 
@@ -97,6 +100,11 @@ def _inject_image_urls(
 
     格式: "[用户粘贴图片: name 路径: D:\\...\\x.jpg]" 或
           "[已上传文件: name 路径: D:\\...\\x.png]"
+
+    2026-08-16(问题1-B, 蒋先生反馈): 路径解析增强 —— ① strip 引号/首尾
+    空白; ② 相对路径按会话工作区解析; ③ 原路径不存在时 fallback 扫描
+    工作区 .sandbox 沙箱目录(按文件名 basename 匹配, 解决沙箱产物路径
+    与消息引用不一致导致的"图片读取失败")。
 
     Returns:
         (转换后的 messages, 未注入的图片名列表)。0.5.1(2026-08-10)起返回
@@ -111,6 +119,31 @@ def _inject_image_urls(
         "jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif",
         "webp": "webp", "bmp": "bmp", "svg": "svg+xml",
     }
+
+    def _resolve_path(raw_path: str) -> str | None:
+        """解析图片路径: strip 引号 → 绝对/相对(按 workspace) → 沙箱扫描。"""
+        path = raw_path.strip().strip("\"'“”‘’")
+        if not path:
+            return None
+        if not os.path.isabs(path) and workspace:
+            cand = os.path.join(workspace, path)
+            if os.path.exists(cand):
+                return cand
+        if os.path.exists(path):
+            return path
+        # fallback: 工作区 .sandbox 沙箱目录按文件名扫描(产物路径不一致时)
+        if workspace:
+            base = os.path.basename(path)
+            for root_dir in (os.path.join(workspace, ".sandbox"),):
+                if not os.path.isdir(root_dir):
+                    continue
+                for dirpath, _dirs, files in os.walk(root_dir):
+                    for fn in files:
+                        if fn.lower() == base.lower():
+                            found = os.path.join(dirpath, fn)
+                            return found
+        return None
+
     result: list[dict] = []
     skipped: list[str] = []
     for msg in messages:
@@ -122,12 +155,12 @@ def _inject_image_urls(
         found = False
         for m in img_ref_re.finditer(content):
             _kind, name, raw_path = m.group(1), m.group(2), m.group(3).strip()
-            path = raw_path
-            if not path.lower().endswith(_IMAGE_EXTS):
+            if not raw_path.lower().endswith(_IMAGE_EXTS):
                 continue
             found = True
+            path = _resolve_path(raw_path)
             try:
-                if not os.path.exists(path):
+                if path is None or not os.path.exists(path):
                     skipped.append(f"{name}(文件不存在)")
                     continue
                 data = open(path, "rb").read()
@@ -190,6 +223,9 @@ class ReactLoop:
         reflection_engine: Any | None = None,
         evolution_repo: Any | None = None,
         failure_collector: Any | None = None,
+        tool_descriptions: dict | None = None,
+        # 2026-08-16(阶段2 反馈): 迭代上限询问确认超时(默认 30s, 测试传小值)
+        limit_confirm_timeout: float = 30.0,
     ) -> None:
         self._session_id = session_id
         # 0.5.1(2026-08-10 双链架构): vision_adapter 为多模态链, 发图语境
@@ -198,10 +234,15 @@ class ReactLoop:
         self._context_manager = context_manager
         self._adapter = adapter
         self._tools = tools
+        # A-1(2026-08-15 Agent Harness): 场景级工具描述覆盖。
+        # 仅影响暴露给模型的 schema description(不改 handler/权限),
+        # 命中 harness.tool_descriptions 的工具用覆盖描述替换默认描述。
+        # None/空 = 零回归(描述与现状完全一致)。
+        self._tool_desc_overrides = dict(tool_descriptions or {})
         # adapter.chat 期望 OpenAI tools schema dict(非 ToolDef 对象)
         # 流畅度优化(方向一): 全量 schema 作兜底; 每轮由 ToolSelector 挑选
         # top-N 注入(_round_tool_schemas), 执行侧 _find_tool 仍遍历全池
-        self._tool_schemas = [t.to_openai_schema() for t in tools]
+        self._tool_schemas = [self._to_schema(t) for t in tools]
         self._round_tool_schemas: list[dict] | None = None
         # 工具选择器: 每轮 turn 开始时对 user_message 求值一次(迭代间固定)
         from private_agent.tools.selector import ToolSelector
@@ -289,6 +330,10 @@ class ReactLoop:
         self._compress_adapter = compress_adapter
         self._compress_failures = 0
         self._compress_disabled = False
+        # B-1(2026-08-15 compress_now 工具): 本轮模型是否请求自主压缩。
+        # 工具调用时置 True, 本轮结束 _maybe_compress 以 model_suggested
+        # 信号触发; 新一轮开始时复位。
+        self._compress_now_requested = False
         # V1.5 项-4 断点恢复: 非 None 时 run_turn(resume=True) 从该 turn 原地续跑
         # (不递增 turn、不重复 append user 消息 —— 中断轮的 user 消息已持久化)
         self._resume_from_turn = (
@@ -298,6 +343,15 @@ class ReactLoop:
         # 每次迭代开始前检查, 暂停则产出 turn_paused 并挂起等待; 区别于
         # cancel(终止)。None 时零回归(测试/兼容)。
         self._pause_controller = pause_controller
+        # 2026-08-16(阶段2 反馈): 迭代上限询问继续 —— 达到 max_iterations
+        # 不再直接失败, 而是 emit iteration_limit_reached + 挂起等待用户
+        # 决定(continue_iterations 扩展上限继续 / stop_iteration 结束)。
+        # asyncio.Event 初始置位(wait 立即返回, 未触发上限时零回归)。
+        self._limit_event = asyncio.Event()
+        self._limit_event.set()
+        self._limit_pending = False
+        self._limit_stop = False
+        self._limit_confirm_timeout = float(limit_confirm_timeout)
         # Phase 1(2026-08-11): 任务完成后反思(ReflectionEngine + EvolutionRepo),
         # None 时零回归(未配置反思的会话不执行)。_turn_events 收集本轮
         # react_event 供反思生成轨迹摘要。
@@ -435,13 +489,15 @@ class ReactLoop:
             self._turn += 1
         self._iteration = 0
         self._turn_events = []  # Phase 1: 本轮事件收集(反思用)
+        # B-1: 新一轮开始复位 compress_now 请求标记(逐轮独立)
+        self._compress_now_requested = False
         self._transition(ReactLoopState.THINKING)
 
         # 流畅度优化(方向一): 每轮对 user_message 求值一次工具注入子集,
         # 迭代间固定(避免每次迭代重排 schema 破坏 KV Cache 前缀)
         try:
             self._round_tool_schemas = [
-                t.to_openai_schema()
+                self._to_schema(t)
                 for t in self._tool_selector.select(self._tools, user_message)
             ]
         except Exception:
@@ -492,7 +548,19 @@ class ReactLoop:
         # thinking event 仅触发一次(首次模型调用后)
         has_emitted_thinking = False
 
-        while self._iteration < self._max_iterations:
+        # 2026-08-16(阶段2 反馈): while 条件改为无限 + 循环内超限询问 ——
+        # 达到 max_iterations 时 emit iteration_limit_reached 并挂起等待
+        # 用户决定(continue_iterations/stop_iteration); 30s 超时默认继续。
+        # _continue_after_limit 由超限分支置位, 循环内 await 挂起(WS 主循环
+        # 可继续收 continue/stop 消息, 不阻塞)。
+        self._continue_after_limit = False
+        while True:
+            if self._iteration >= self._max_iterations:
+                # 超限询问: 挂起等待用户决定(继续/停止)
+                await self._ask_continue_or_stop()
+                if self._limit_stop:
+                    break
+                # 继续: _max_iterations 已扩展, 继续执行
             self._iteration += 1
             # V1.5 项-5 流程级暂停: 迭代开始前检查(当前迭代完成后暂停请求
             # 于下一次迭代生效; 挂起期间不调用模型/工具, 不消耗 token)。
@@ -599,7 +667,9 @@ class ReactLoop:
             # 下一轮纯文本主模型(带 tools)承担 —— 符合"视觉补短板、文本贯主线"。
             if require_vision:
                 round_schemas = None
-                messages, skipped_images = _inject_image_urls(messages)
+                messages, skipped_images = _inject_image_urls(
+                    messages, workspace=self._workspace_label
+                )
                 # 0.5.1(2026-08-10 蒋先生要求"错误零静默"): 图片超限/读取
                 # 失败 → 明确暴露(能力边界), 不静默跳过让模型瞎答。
                 if skipped_images:
@@ -1088,12 +1158,47 @@ class ReactLoop:
                                     .get("workspace_root", "")
                                 )
                             )
+                            # 2026-08-16 权限放宽(蒋先生要求): file_read 全局
+                            # 读取 —— 不再注入 data_dir 限定工作区(读任意路径
+                            # 免确认, 仅审计记录)。read_artifact 仍注入(限定
+                            # artifact 目录); file_write 保留 data_dir(服务端
+                            # 强制限定写范围, 防绕过; 工作区内写自动放行见
+                            # Phase A 权限判定处)。
                             if ws_root and plan["tool_name"] in (
-                                "file_read",
-                                "file_write",
                                 "read_artifact",
                             ):
                                 args["data_dir"] = ws_root
+                                args["workspace"] = ws_root
+                            if ws_root and plan["tool_name"] in (
+                                "file_write",
+                            ):
+                                args["data_dir"] = ws_root
+                                args["workspace"] = ws_root
+                            # C-1(2026-08-15): 工作区工具族 ws_read/ws_write/
+                            # ws_list/ws_rm —— 服务端强制注入 workspace(模型
+                            # 省略该字段也由服务端补全, 与 file_read/write 同
+                            # 机制; ws_* 只接受 workspace, 无 data_dir 语义)。
+                            if ws_root and plan["tool_name"] in (
+                                "ws_read",
+                                "ws_write",
+                                "ws_list",
+                                "ws_rm",
+                            ):
+                                args["workspace"] = ws_root
+                            # 2026-08-16(阶段2): git 工具族 + pytest_run ——
+                            # 服务端强制注入 workspace(PA 源码根), git 工具
+                            # cwd=pytest_run 解析 backend 目录均依赖此注入。
+                            if ws_root and plan["tool_name"] in (
+                                "git_status",
+                                "git_diff",
+                                "git_commit",
+                                "pytest_run",
+                                "project_scan",
+                                "skill_list",
+                                "skill_create",
+                                "skill_update",
+                                "skill_delete",
+                            ):
                                 args["workspace"] = ws_root
                             # 2026-08-15: code_execution 沙箱内 WORKSPACE env 对齐
                             # —— 会话选定工作区后, 子进程环境变量 WORKSPACE 若仍
@@ -1101,8 +1206,13 @@ class ReactLoop:
                             # 会拿到旧值, 把产物写到 backend/outputs。注入内部参数
                             # _workspace_env(不进模型 schema), 由 handler 覆盖
                             # 沙箱子进程 env, 保持全链路一致。
-                            if plan["tool_name"] == "code_execution" and ws_root:
-                                args["_workspace_env"] = ws_root
+                            # 2026-08-16: 同时注入 session_id(沙箱按会话隔离
+                            # 目录 + artifact 落位带 session 目录, 修复"双
+                            # .sandbox 且无 session 目录"的路径错乱)。
+                            if plan["tool_name"] == "code_execution":
+                                if ws_root:
+                                    args["_workspace_env"] = ws_root
+                                args["session_id"] = str(self._session_id)
                             # T-2(架构修订 A.2.5): 工具执行超时按类别分级
                             # (config tools.timeout.categories), 不再读死键
                             # tool_timeout_sec(恒 120s)。
@@ -1177,6 +1287,17 @@ class ReactLoop:
                     )
                     for p, tr in zip(parallel_plans, outcomes):
                         results_by_idx[p["idx"]] = tr
+
+                # B-1(2026-08-15 compress_now 工具): 模型调用 compress_now →
+                # 置本轮压缩请求标记(本轮结束 _maybe_compress 以
+                # model_suggested 信号触发真实压缩)。不立即压缩: 保证
+                # 当前 tool_result 落库后再压缩, 避免丢本轮结果。
+                if any(
+                    p["tool_name"] == "compress_now"
+                    and results_by_idx[p["idx"]].error is None
+                    for p in plans
+                ):
+                    self._compress_now_requested = True
 
                 # Phase C(按模型原始 tool_calls 顺序): emit tool_result +
                 # 注入防护扫描 + 持久化。
@@ -1347,6 +1468,10 @@ class ReactLoop:
                         "content": result.content,
                     },
                 )
+                # C-2(2026-08-15 大产物文件化引导, 设计文档 §3.3-C2):
+                # 单条 assistant 消息超过阈值时注入提示 —— 长内容建议写入
+                # 工作区文件(ws_write), 上下文保留路径引用(防 token 膨胀)。
+                await self._maybe_guide_large_output(result.content)
                 self._transition(ReactLoopState.IDLE)
                 await self._save_checkpoint()
                 await self._maybe_compress()
@@ -1357,26 +1482,64 @@ class ReactLoop:
                 )
                 return
 
-        # 超出 max_iterations(2026-08-10: 错误零静默 —— 不再输出英文技术文案)
+        # 用户选择停止(break 出口): 正常收尾, 不当作失败
         await self._emit_error_msg(
-            "能力边界",
-            f"本轮执行已达步数上限({self._max_iterations} 步), 已停止。"
-            f"建议拆分任务、简化操作或换一种思路重试。",
+            "已停止",
+            f"已执行 {self._iteration} 步, 按你的要求停止。"
+            f"如需继续可回复'继续执行'。",
         )
-        self._transition(ReactLoopState.ERROR)
+        self._transition(ReactLoopState.IDLE)
         await self._save_checkpoint()
-        # C-3(A.3.5): 迭代上限退出同样触发压缩
         await self._maybe_compress()
-        await self._maybe_reflect(
-            user_message=user_message,
-            final_output="",
-            had_error=True,
+        return
+
+    async def _ask_continue_or_stop(self) -> None:
+        """迭代上限询问(2026-08-16 阶段2 反馈): 达到 max_iterations 时挂起。
+
+        - emit iteration_limit_reached(前端弹"是否继续"确认)
+        - 挂起等待用户决定(continue_iterations / stop_iteration)
+        - 30s 超时默认继续(无人值守不静默中断; 仅扩展上限, 不放大权限)
+        - 继续时扩展 _max_iterations(_ITERATION_CONTINUE_STEP)
+        """
+        await self._emit_event(
+            "iteration_limit_reached",
+            payload={
+                "turn": self._turn,
+                "used": self._iteration,
+                "max": self._max_iterations,
+            },
+            persist=False,
         )
-        await self._collect_failure(
-            failure_type=FailureType.ITERATION_EXHAUSTED,
-            failure_detail=f"达到最大迭代次数 {self._max_iterations}",
-            user_message=user_message,
-        )
+        self._limit_pending = True
+        self._limit_stop = False
+        self._limit_event.clear()
+        try:
+            await asyncio.wait_for(
+                self._limit_event.wait(), timeout=self._limit_confirm_timeout
+            )
+        except asyncio.TimeoutError:
+            self._logger.info(
+                "iteration limit confirm timeout: default continue "
+                "session=%s iter=%d", self._session_id, self._iteration,
+            )
+            self._limit_stop = False
+        finally:
+            self._limit_pending = False
+        if not self._limit_stop:
+            # 继续: 扩展上限(while 循环条件重新判断后进入下一轮)
+            self._max_iterations += _ITERATION_CONTINUE_STEP
+
+    def continue_iterations(self, extra: int | None = None) -> None:
+        """用户选择继续: 扩展迭代上限并唤醒挂起的循环(WS continue_iteration)。"""
+        self._limit_stop = False
+        if extra is not None:
+            self._max_iterations += int(extra)
+        self._limit_event.set()
+
+    def stop_iteration(self) -> None:
+        """用户选择停止: 结束挂起的循环(WS stop_iteration)。"""
+        self._limit_stop = True
+        self._limit_event.set()
 
     async def _emit_delta(self, text: str) -> None:
         """流式增量回调: 产出 delta 事件(前端逐句/逐字渲染)。"""
@@ -1423,6 +1586,47 @@ class ReactLoop:
             )
         except Exception as e:
             self._logger.warning("checkpoint save failed: %s", e)
+
+    async def _maybe_guide_large_output(self, content: str | None) -> None:
+        """C-2(2026-08-15 大产物文件化引导, 设计文档 §3.3-C2)。
+
+        单条 assistant 消息超过阈值(config context.compression.
+        large_output_threshold_chars, 0=关闭)且会话有工作区时, 注入提示:
+        长内容建议写入工作区文件(ws_write), 上下文保留路径引用 ——
+        防 token 膨胀(调研"大中间产物文件化"结论落地)。
+
+        提示写入 active zone 系统消息(下一轮模型可见), 不改变本轮 final。
+        无 workspace / 阈值 0 / 内容未超 → 零行为变化。
+        """
+        try:
+            if not content:
+                return
+            comp_cfg = (self._cfg or {}).get("context", {}).get("compression", {})
+            threshold = int(comp_cfg.get("large_output_threshold_chars", 0) or 0)
+            if threshold <= 0:
+                return
+            if len(content) < threshold:
+                return
+            if not self._workspace_label:
+                return
+            note = (
+                f"[提示] 本次回复内容较长({len(content)} 字符, 超阈值 "
+                f"{threshold})。为控制上下文占用, 若后续需要继续处理这份内容, "
+                f"请用 ws_write 将内容写入工作区文件, 上下文只保留路径引用; "
+                f"不要在对话中重复大段原文。"
+            )
+            await self._context_manager.append_system_message(
+                self._conn,
+                turn=self._turn,
+                content=note,
+                zone="active",
+            )
+            self._logger.info(
+                "large output guidance injected: session=%s turn=%s chars=%d",
+                self._session_id, self._turn, len(content),
+            )
+        except Exception:  # noqa: BLE001 - 引导失败不影响主流程
+            self._logger.warning("large output guidance failed", exc_info=True)
 
     async def _maybe_merge_stable_zone(self) -> bool:
         """§3.10.3 [MVP]: 每 N 轮或 KB 片段超阈值时合并 Stable Zone。
@@ -1584,13 +1788,25 @@ class ReactLoop:
             )
             messages = await self._context_manager.build_messages()
             active_turns = self._turn
-            triggered = self._compressor.maybe_compress(
+            # B-1(2026-08-15 多信号触发, 设计文档 §3.2-B1):
+            # - task_phase / model_suggested 信号默认关闭(config 可开)
+            # - 触发优先级: token_limit > model_suggested > task_phase > turn_limit
+            # - keep_ratio(B-2): 保留最近 ~10% token 原始消息
+            cfg_keep_ratio = float(cfg.get("keep_ratio", 0.1))
+            # model_suggested 信号 = config 开启 AND 本轮模型调用过 compress_now
+            model_suggested = bool(cfg.get("model_suggested", False)) and (
+                self._compress_now_requested
+            )
+            trigger = self._compressor.maybe_compress(
                 messages,
                 active_turns=active_turns,
                 context_window=context_window,
                 compress_adapter=self._compress_adapter,
+                task_phase=bool(cfg.get("task_phase", False)),
+                model_suggested=model_suggested,
+                keep_ratio=cfg_keep_ratio,
             )
-            if not triggered:
+            if not trigger:
                 return
             # 触发 → 执行压缩(滑动窗口 + 可选摘要)。
             # C-1(架构修订 P1-7): 压缩只作用于 active zone —— Frozen/Stable
@@ -1601,7 +1817,12 @@ class ReactLoop:
             result = await self._compressor.execute(
                 meta_msgs,
                 keep_turns=int(cfg.get("keep_turns", 6)),
+                keep_ratio=cfg_keep_ratio,
                 compress_adapter=self._compress_adapter,
+                # C-3(2026-08-15 压缩转存联动): 会话工作区非空时事实型
+                # 消息转存 {workspace}/archive/ 文件, 摘要保留路径引用;
+                # 无 workspace → 维持内联截断(零回归)。
+                workspace=self._workspace_label,
             )
             if not result["compressed_msgs"]:
                 return
@@ -1618,12 +1839,8 @@ class ReactLoop:
                     )
             else:
                 self._compress_failures = 0
-            trigger = (
-                "token_limit"
-                if self._token_estimator.estimate_messages(messages)
-                > context_window * 0.8
-                else "turn_limit"
-            )
+            # B-1(2026-08-15): trigger 直接来自 maybe_compress 返回值
+            # (token_limit/model_suggested/task_phase/turn_limit 枚举)。
             await self._compressor._emit_compress_event(
                 self._conn,
                 session_id=self._session_id,
@@ -2067,3 +2284,16 @@ class ReactLoop:
                 self._tool_selector.record_usage(name)
                 return td
         return None
+
+    def _to_schema(self, td: ToolDef) -> dict:
+        """生成工具 OpenAI schema(A-1: 应用场景级描述覆盖)。
+
+        命中 harness.tool_descriptions 的工具用覆盖描述替换默认 description;
+        未命中 → 与 td.to_openai_schema() 完全一致(零回归)。
+        """
+        schema = td.to_openai_schema()
+        override = self._tool_desc_overrides.get(td.name)
+        if override:
+            fn = schema["function"]
+            fn["description"] = override
+        return schema

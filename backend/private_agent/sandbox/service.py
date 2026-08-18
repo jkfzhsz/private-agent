@@ -113,6 +113,10 @@ class SandboxService:
                 将子进程环境变量 WORKSPACE 覆盖为会话选定工作区(与
                 ReactLoop 的 cfg.system.workspace_root 一致), 防止模型在
                 沙箱内读取到后端全局目录而把产物写错位置。
+                2026-08-16(问题1-C): 同时作为"产物同步目标" —— 沙箱
+                outputs/ 生成的产物复制一份到 {workspace_env}/.sandbox-
+                artifacts/{session_id}/, 使 file_read/_inject_image_urls
+                在会话工作区内闭环读取(图片读取失败根治)。
 
         Returns:
             SandboxResult 包含执行结果和元数据。
@@ -174,6 +178,28 @@ class SandboxService:
         generated_files = self._scan_generated_files(workspace)
         result.generated_files = generated_files
         result.warnings = warnings
+
+        # 6.1 2026-08-16(问题1-C): 产物同步到会话工作区 —— 沙箱 outputs/
+        # 生成的产物复制到 {workspace_env}/.sandbox-artifacts/{session_id}/,
+        # 使 file_read/_inject_image_urls 在会话工作区内闭环读取
+        # (图片读取失败根治: 沙箱路径与会话工作区不一致的历史根因)。
+        if workspace_env and generated_files:
+            try:
+                sync_dir = (
+                    Path(workspace_env) / ".sandbox-artifacts" / session_id
+                )
+                sync_dir.mkdir(parents=True, exist_ok=True)
+                for rel in generated_files:
+                    src = workspace / rel
+                    if not src.is_file():
+                        continue
+                    dest = sync_dir / Path(rel).name
+                    import shutil
+
+                    shutil.copy2(src, dest)
+                result.sync_dir = str(sync_dir)
+            except Exception:  # noqa: BLE001 - 产物同步失败不影响执行结果
+                pass
 
         # 7. stdout 截断(AC-9: 用字符数/4 粗估)
         if self._stdout_artifact_threshold > 0:

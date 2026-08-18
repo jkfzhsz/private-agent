@@ -39,34 +39,34 @@ def _make_tool_result_msg(turn=1, tool_call_id="c1", output="ok"):
 # ── AC-3: maybe_compress 触发条件 ──
 
 def test_maybe_compress_no_trigger_under_limits():
-    """AC-3: token 和 turn 均未超限 → 不触发压缩。"""
+    """AC-3: token 和 turn 均未超限 → 不触发压缩(返回 None)。"""
     compressor = Compressor()
     msgs = [_make_msg("user", "hi" * 50, turn=1), _make_msg("assistant", "ok" * 50, turn=1)]
     result = compressor.maybe_compress(
         msgs, active_turns=3, context_window=2000, compress_adapter=None
     )
-    assert result is False
+    assert result is None  # B-1: 返回 trigger 字符串, 未触发为 None(falsy)
 
 
 def test_maybe_compress_triggers_on_token_limit():
-    """AC-3: token 超限(>0.8*context_window) → 触发压缩。"""
+    """AC-3: token 超限(>0.8*context_window) → 触发压缩(trigger=token_limit)。"""
     compressor = Compressor()
     big_msg = "x" * int(2000 * 0.9 * 3)  # 0.9 * 2000 tokens worth of chars
     msgs = [_make_msg("user", big_msg, turn=1)]
     result = compressor.maybe_compress(
         msgs, active_turns=3, context_window=2000, compress_adapter=None
     )
-    assert result is True
+    assert result == "token_limit"  # B-1: trigger 枚举(truthy)
 
 
 def test_maybe_compress_triggers_on_turn_limit():
-    """AC-4: turn 超限(>10 轮) → 触发压缩。"""
+    """AC-4: turn 超限(>10 轮) → 触发压缩(trigger=turn_limit)。"""
     compressor = Compressor()
     msgs = [_make_msg("user", "hi", turn=i) for i in range(1, 12)]
     result = compressor.maybe_compress(
         msgs, active_turns=11, context_window=50000, compress_adapter=None
     )
-    assert result is True
+    assert result == "turn_limit"
 
 
 # ── AC-5: 滑动窗口 ──

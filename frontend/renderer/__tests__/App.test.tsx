@@ -181,3 +181,34 @@ describe("App 首页与模式选择集成", () => {
     });
   });
 });
+
+// P0-1(2026-08-17): WS 连接状态可视化 —— 侧边栏底部状态卡映射
+//   AC-1: connected → 状态点文案"已连接", 重连按钮消失
+//   AC-2: onclose → "重连中（第 1 次）", 脉冲状态点出现
+describe("P0-1 连接状态可视化", () => {
+  it("connected → 状态卡显示已连接, 无重连按钮", async () => {
+    render(<App />);
+    // 初始 disconnected: 显示"未连接" + 重连按钮(onReconnect 已注入)
+    await waitFor(() => expect(screen.getByText("未连接")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "重连" })).toBeTruthy();
+
+    act(() => {
+      ws().onopen?.();
+    });
+
+    await waitFor(() => expect(screen.getByText("已连接")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "重连" })).toBeNull();
+  });
+
+  it("onclose → 状态卡显示重连中(第 N 次)且次数递增", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("未连接")).toBeTruthy());
+
+    act(() => {
+      ws().onclose?.();
+    });
+
+    // scheduleReconnect 立即 setReconnectCount(0+1) → 第 1 次
+    await waitFor(() => expect(screen.getByText("重连中（第 1 次）")).toBeTruthy());
+  });
+});

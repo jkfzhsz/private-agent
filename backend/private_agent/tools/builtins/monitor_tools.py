@@ -164,6 +164,17 @@ async def _apply_optim_handler(
 ) -> ToolResult:
     """执行已批准的优化方案(高安全: 仅限 optim_log status=approved)。
 
+    2026-08-16(阶段1-b, agent-upgrader 设计文档 §3): 从"模拟执行"改为
+    **真执行** —— approved 后按 plan 逐步执行白名单动作(code_execution /
+    file_write / file_read), 打通"无涯提方案 → 用户审批 → 自动执行"闭环。
+    plan 内动作不再单独触发权限确认(已由 apply_optim 的确认覆盖)。
+
+    安全边界:
+    - 仅 approved 可执行; pending/rejected/applied 拒绝
+    - plan 工具白名单: code_execution(跑脚本/测试) + file_write(写文件)
+      + file_read(只读); 其他工具跳过并记录
+    - 无 plan 时回退低风险 category 路径(context 配置类, 保留旧行为)
+
     Args:
         optim_id: optim_log id(必填)。
     """
@@ -191,22 +202,93 @@ async def _apply_optim_handler(
                 ),
             )
         plan = row["plan_json"] or []
-        # V1 安全边界: 仅允许低风险类别(design §4.4: context 类可自动执行)
+        # asyncpg JSONB 返回 str(2026-08-15 教训): 需解析为 list
+        if isinstance(plan, str):
+            try:
+                plan = json.loads(plan)
+            except Exception:  # noqa: BLE001
+                plan = []
+        if not isinstance(plan, list):
+            plan = []
         category = row["category"] or ""
+
+        # ── 真执行: 按 plan 逐步执行白名单动作 ──────────────────────────
+        if plan:
+            from private_agent.tools.builtins.code_execution import (
+                code_execution_handler,
+            )
+            from private_agent.tools.builtins.file_write import (
+                file_write_handler,
+            )
+
+            allowed = {"code_execution", "file_write", "file_read"}
+            session_id = None
+            if ctx is not None:
+                session_id = getattr(ctx, "session_id", None)
+            results: list[str] = []
+            executed = 0
+            skipped: list[str] = []
+            for i, step in enumerate(plan, start=1):
+                if not isinstance(step, dict):
+                    skipped.append(f"step{i}: 非法步骤(非 dict)")
+                    continue
+                tool_name = str(step.get("tool", ""))
+                step_args = dict(step.get("args") or {})
+                if tool_name not in allowed:
+                    skipped.append(f"step{i}[{tool_name}]: 不在白名单")
+                    continue
+                try:
+                    if tool_name == "code_execution":
+                        if session_id is not None:
+                            step_args.setdefault("session_id", str(session_id))
+                        tr = await code_execution_handler(step_args)
+                    elif tool_name == "file_write":
+                        tr = await file_write_handler(step_args)
+                    else:  # file_read 只读
+                        from private_agent.tools.builtins.file_read import (
+                            file_read_handler,
+                        )
+
+                        tr = await file_read_handler(step_args)
+                except Exception as e:  # noqa: BLE001
+                    results.append(
+                        f"step{i}[{tool_name}] 执行异常: {type(e).__name__}: {e}"
+                    )
+                    continue
+                if tr.error:
+                    results.append(f"step{i}[{tool_name}] 失败: {tr.error}")
+                else:
+                    executed += 1
+                    output_snippet = str(tr.output or "")[:200].replace("\n", " ")
+                    results.append(f"step{i}[{tool_name}] OK: {output_snippet}")
+            skip_note = f"; 跳过 {len(skipped)} 步" if skipped else ""
+            result = (
+                f"已执行优化 #{row['id']} [{category}] {executed} 步{skip_note}\n"
+                + "\n".join(results)
+            )
+            if skipped:
+                result += "\n跳过明细: " + "; ".join(skipped[:5])
+            await conn.execute(
+                "UPDATE optim_log SET status='applied', result=$2, reviewed_at=now() "
+                "WHERE id=$1",
+                int(optim_id),
+                result,
+            )
+            return ToolResult(output=result)
+
+        # ── 无 plan: 回退低风险 category 路径(保留旧模拟行为) ────────────
         if category not in LOW_RISK_ACTIONS and category not in ("context",):
             return ToolResult(
                 output="",
                 error=(
-                    f"category={category} 超出 V1 自动执行白名单 "
+                    f"category={category} 无 plan 且不在自动执行白名单 "
                     f"({sorted(LOW_RISK_ACTIONS)})"
                 ),
             )
-        # 低风险动作模拟执行: 生成执行摘要并回填结果(具体配置写入逻辑在
-        # P3 挂接 config_runtime; 此处保证审批→执行闭环可用且可回滚)
         result = (
             f"已执行优化 #{row['id']} [{category}]: "
             f"{row['proposal'][:80]}...\n"
-            f"plan 步骤数: {len(plan) if isinstance(plan, list) else 0}"
+            f"(无 plan, 仅记录执行摘要)"
         )
         await conn.execute(
             "UPDATE optim_log SET status='applied', result=$2, reviewed_at=now() "
@@ -415,8 +497,9 @@ MONITOR_TOOLS: list[ToolDef] = [
     ToolDef(
         name="apply_optim",
         description=(
-            "执行一条已批准(approved)的优化方案。仅限低风险类别(context 配置类), "
-            "会触发权限确认。"
+            "执行一条已批准(approved)的优化方案: 按 plan 真执行白名单动作"
+            "(code_execution/file_write/file_read), 会触发权限确认。"
+            "plan 内步骤不再单独确认(已由本确认覆盖)。"
         ),
         parameters_schema={
             "type": "object",

@@ -31,13 +31,34 @@ class Compressor:
         active_turns: int,
         context_window: int,
         compress_adapter: Any = None,
-    ) -> bool:
-        if active_turns > 10:
-            return True
+        task_phase: bool = False,
+        model_suggested: bool = False,
+        keep_ratio: float = 0.1,
+    ) -> str | None:
+        """多信号压缩触发判断(B-1, 设计文档 §3.2-B1)。
+
+        触发决策优先级: token_limit > model_suggested > task_phase > turn_limit。
+        返回触发信号名(供 compress 事件记录 trigger), 未触发返回 None。
+
+        Args:
+            messages: 当前上下文消息(用于 token 估算)。
+            active_turns: 当前轮次。
+            context_window: 上下文窗口(token)。
+            compress_adapter: 压缩适配器(预留, 未消费)。
+            task_phase: 任务阶段切换信号(默认 False = 关闭, 零回归)。
+            model_suggested: 模型自主压缩信号(默认 False = 关闭)。
+            keep_ratio: 保留最近原始消息 token 比例(B-2, 默认 0.1)。
+        """
         tokens = self._estimator.estimate_messages(messages)
         if tokens > context_window * 0.8:
-            return True
-        return False
+            return "token_limit"
+        if model_suggested:
+            return "model_suggested"
+        if task_phase:
+            return "task_phase"
+        if active_turns > 10:
+            return "turn_limit"
+        return None
 
     # ── §3.10.3 [MVP] Stable Zone 合并压缩 ──────────────────────────────
 
@@ -83,6 +104,7 @@ class Compressor:
         self,
         messages: list[dict],
         keep_turns: int = 6,
+        keep_ratio: float = 0.1,
     ) -> dict:
         """滑动窗口压缩规划(AI-Agents-in-Depth §2.7.4 第 4 层: 归档式摘要前置)。
 
@@ -93,14 +115,90 @@ class Compressor:
             "compressed": [被标记压缩的消息, 摘要的来源],
         }
 
+        B-2(2026-08-15, 设计文档 §3.2-B2): keep_ratio 保留最近 ~ratio token
+        的原始消息 —— 与 keep_turns 轮次保留取 token 更优者(保留更多消息),
+        防止"轮次多但单轮 token 大"时把大轮次整轮压缩掉。
+
         Args:
             messages: 含内部 metadata(turn) 的消息列表(get_messages_with_meta)。
             keep_turns: 保留最近轮次数(默认 6, 与 M2 测试基线一致)。
+            keep_ratio: 保留最近原始消息 token 比例(默认 0.1 = 最近 10%)。
         """
-        marked = self._sliding_window(messages, keep_turns=keep_turns)
+        # 轮次窗口
+        turn_kept = self._sliding_window(messages, keep_turns=keep_turns)
+        # token 窗口(按消息顺序累积至 total × keep_ratio)
+        ratio_kept = self._sliding_window_by_ratio(messages, keep_ratio=keep_ratio)
+        # 取"保留更多"者(B-2: 两者取 token 更优者 —— 保留更多原始消息)
+        if self._kept_tokens(ratio_kept) > self._kept_tokens(turn_kept):
+            marked = ratio_kept
+        else:
+            marked = turn_kept
         kept = [m for m in marked if not m.get("compressed")]
         compressed = [m for m in marked if m.get("compressed")]
         return {"kept": kept, "compressed": compressed}
+
+    @staticmethod
+    def _kept_tokens(marked: list[dict]) -> int:
+        """估算保留消息(未压缩)的 token 总量(比较用, 精度要求不高)。"""
+        est = TokenEstimator()
+        kept = [m for m in marked if not m.get("compressed")]
+        return est.estimate_messages(kept)
+
+    def _sliding_window_by_ratio(
+        self, messages: list[dict], keep_ratio: float = 0.1
+    ) -> list[dict]:
+        """按 token 比例保留最近消息(替代按轮次, B-2)。
+
+        从消息末尾向前累积 token, 保留最近 ~keep_ratio 总量的原始消息;
+        保留工具配对完整性(与 _sliding_window 同语义: tool_result 配对
+        在保留区间内的 tool_calls 消息不被压缩)。
+        """
+        if not messages:
+            return messages
+        total = self._estimator.estimate_messages(messages)
+        budget = int(total * max(0.0, min(1.0, keep_ratio)))
+        if budget <= 0:
+            # ratio=0: 不保留任何 active 消息(全压缩; frozen/stable 仍跳过)
+            keep_from_idx = len(messages)
+        else:
+            # 从末尾向前累加, 找到保留起点
+            keep_from_idx = 0
+            acc = 0
+            for i in range(len(messages) - 1, -1, -1):
+                m = messages[i]
+                acc += self._estimator.estimate_messages([m])
+                if acc >= budget:
+                    keep_from_idx = i
+                    break
+                keep_from_idx = i
+
+        # 收集 tool_call_id 映射(配对保护)
+        tool_call_turns: dict[str, int] = {}
+        for m in messages:
+            for tc in m.get("tool_calls", []):
+                cid = tc.get("id", "")
+                if cid:
+                    tool_call_turns[cid] = m.get("turn", 0)
+
+        result = []
+        for idx, m in enumerate(messages):
+            msg = dict(m)
+            if msg.get("zone") is not None and msg.get("zone") != "active":
+                result.append(msg)
+                continue
+            if idx >= keep_from_idx:
+                result.append(msg)
+                continue
+            # 保留区间之前: 检查工具配对
+            tid = msg.get("tool_call_id", "")
+            if tid and tid in tool_call_turns:
+                if tool_call_turns[tid] >= 0:  # 配对在保留区内(简化: 全保留)
+                    msg["compressed"] = False
+                    result.append(msg)
+                    continue
+            msg["compressed"] = True
+            result.append(msg)
+        return result
 
     @staticmethod
     def _is_factual(content: str) -> bool:
@@ -144,7 +242,9 @@ class Compressor:
         messages: list[dict],
         *,
         keep_turns: int = 6,
+        keep_ratio: float = 0.1,
         compress_adapter: Any = None,
+        workspace: str = "",
     ) -> dict:
         """执行一次完整压缩(AI-Agents-in-Depth §2.7.4): 滑动窗口 + 可选摘要。
 
@@ -154,15 +254,27 @@ class Compressor:
         summary_error=True 供上层熔断计数(避免在反复失败的会话上持续烧钱,
         §2.7.4 第 5 层)。
 
+        B-2(2026-08-15): keep_ratio 保留最近 ~10% token 原始消息(与
+        keep_turns 取 token 更优者, 见 plan_compression)。
+
+        C-3(2026-08-15 压缩转存联动, 设计文档 §3.3-C3): workspace 非空时
+        事实型消息写入 {workspace}/archive/ctx-{turn}.md(文件化转存, 替代
+        20000 字符内联截断), 摘要含 "[事实快照见 ws:archive/ctx-{turn}.md]"
+        路径引用; workspace 为空 → 维持现有 factual_snapshot 内联截断
+        (零回归)。
+
         Returns:
             {
                 "messages": 压缩后的消息列表(含摘要, 供 context_manager 回写),
                 "summary": 摘要消息 dict 或 None,
                 "compressed_msgs": 被压缩的原始消息列表,
                 "summary_error": 摘要 LLM 调用是否失败(True 时已降级滑动窗口),
+                "archive_path": 事实转存文件相对路径或 None(C-3),
             }
         """
-        plan = self.plan_compression(messages, keep_turns=keep_turns)
+        plan = self.plan_compression(
+            messages, keep_turns=keep_turns, keep_ratio=keep_ratio
+        )
         compressed = plan["compressed"]
         if not compressed:
             return {
@@ -186,6 +298,7 @@ class Compressor:
             m for m in compressed if m not in factual_msgs
         ]
         factual_snapshot: dict | None = None
+        archive_path: str | None = None
         if factual_msgs:
             # 事实快照: 原文合并保留(超长截断 + 标注可追溯)
             factual_text = "\n\n".join(
@@ -193,16 +306,34 @@ class Compressor:
                 for m in factual_msgs
             )
             max_factual_chars = 20000  # ≈ 5K token 事实快照预算
-            if len(factual_text) > max_factual_chars:
-                factual_text = (
-                    factual_text[:max_factual_chars]
-                    + "\n…(事实快照已按预算截断, 完整内容见压缩存档)"
-                )
-            factual_snapshot = {
-                "role": "user",
-                "content": f"[事实快照(原文保留)]\n{factual_text}",
-                "compressed_from_factual": True,
-            }
+            # C-3(2026-08-15 压缩转存联动): 有 workspace 时事实型消息写入
+            # {workspace}/archive/ctx-{turn}.md 文件化转存(替代内联截断),
+            # 摘要保留路径引用; 无 workspace → 维持现有内联截断(零回归)。
+            archive_rel = self._write_factual_archive(
+                factual_text, workspace=workspace
+            )
+            if archive_rel:
+                archive_path = archive_rel
+                factual_snapshot = {
+                    "role": "user",
+                    "content": (
+                        f"[事实快照见 ws:{archive_rel}]"
+                        f"\n(完整事实已转存工作区 archive/ 文件, 可随时用 "
+                        f"ws_read 读取; 以下为关键开头预览)\n{factual_text[:max_factual_chars]}"
+                    ),
+                    "compressed_from_factual": True,
+                }
+            else:
+                if len(factual_text) > max_factual_chars:
+                    factual_text = (
+                        factual_text[:max_factual_chars]
+                        + "\n…(事实快照已按预算截断, 完整内容见压缩存档)"
+                    )
+                factual_snapshot = {
+                    "role": "user",
+                    "content": f"[事实快照(原文保留)]\n{factual_text}",
+                    "compressed_from_factual": True,
+                }
             result_messages.insert(0, factual_snapshot)
         if summarizable and compress_adapter is not None:
             try:
@@ -219,7 +350,38 @@ class Compressor:
             "factual_snapshot": factual_snapshot,
             "compressed_msgs": compressed,
             "summary_error": summary_error,
+            "archive_path": archive_path,
         }
+
+    @staticmethod
+    def _write_factual_archive(factual_text: str, workspace: str) -> str | None:
+        """C-3: 事实快照转存工作区 archive/ 文件, 返回相对路径。
+
+        写入 {workspace}/archive/ctx-{hash8}.md(按内容 hash 命名, 天然去重,
+        幂等)。workspace 为空/写入失败 → 返回 None(调用方回退内联截断)。
+
+        Returns:
+            archive/ctx-{hash8}.md 相对路径(供 ws_read 引用)或 None。
+        """
+        if not workspace:
+            return None
+        try:
+            import hashlib
+            import os
+
+            ws_root = os.path.abspath(
+                os.path.expanduser(os.path.expandvars(workspace))
+            )
+            archive_dir = os.path.join(ws_root, "archive")
+            os.makedirs(archive_dir, exist_ok=True)
+            digest = hashlib.sha256(factual_text.encode("utf-8")).hexdigest()[:8]
+            filename = f"ctx-{digest}.md"
+            filepath = os.path.join(archive_dir, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(factual_text)
+            return f"archive/{filename}"
+        except Exception:  # noqa: BLE001 - 转存失败回退内联截断
+            return None
 
     def _sliding_window(
         self, messages: list[dict], keep_turns: int = 6

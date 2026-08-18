@@ -111,6 +111,15 @@ class SkillManifest(BaseModel):
     # sessions.workspace(ReactLoop 据此路由 file_write/sandbox 等)。
     # 空 = 使用全局默认 workspace_root。
     workspace: str = ""
+    # 2026-08-15(A-1 Agent Harness 工程化): 场景级 harness 配置单元
+    # (可版本化, 随 skill.yaml 文件存储; 缺省空 dict = 零行为变化)。
+    # 结构见 docs/next-phase-plan-2026-08-15-agent-harness.md §3.1-A1:
+    #   enabled: bool            # false 时整体跳过本 harness
+    #   prompt_vars: dict        # system_prompt.md 中 {{var}} 占位符渲染
+    #   tool_descriptions: dict  # 工具描述覆盖(仅影响暴露给模型的 schema)
+    #   compression: dict        # 场景级压缩参数覆盖(keep_turns/keep_ratio)
+    #   middleware: list         # 预留(当前恒空 = 零行为变化)
+    harness: dict = Field(default_factory=dict)
     dependencies: SkillDependencies = Field(default_factory=SkillDependencies)
     permissions: SkillPermissions = Field(default_factory=SkillPermissions)
     prompt_vars: list[str] = Field(default_factory=list)

@@ -158,6 +158,31 @@ class SkillManager:
         system_prompt = self._replace_template_vars(
             skill.system_prompt, skill_name, session_id, created_at
         )
+        # A-1(2026-08-15 Agent Harness): [Scene Profile] 块注入。
+        # 结构化场景画像(persona/role/values/workflow/rules)渲染为
+        # "[Scene Profile]" 块追加到 system_prompt 末尾 —— 激活(activate_skill)
+        # 与运行时(_get_system_prompt)走同一 build_system_prompt, 保证
+        # frozen hash 一致(AC-3)。harness 未配置或 scene_profile 为空 →
+        # 返回空块, 输出与现状完全一致(零回归)。
+        try:
+            harness = skill.manifest.harness or {}
+            if harness.get("enabled") and skill.manifest.scene_profile:
+                from private_agent.skills.harness import (
+                    build_scene_profile_block,
+                    render_prompt_vars,
+                )
+
+                block = build_scene_profile_block(
+                    skill.manifest.scene_profile,
+                    prompt_vars=harness.get("prompt_vars") or {},
+                )
+                if block:
+                    system_prompt = render_prompt_vars(
+                        system_prompt, harness.get("prompt_vars") or {}
+                    )
+                    system_prompt = f"{system_prompt}\n\n{block}"
+        except Exception:  # noqa: BLE001 - harness 渲染失败不影响主流程
+            pass
         # 少样本注入(蓝图 §7.7)
         if skill.manifest.examples.enabled:
             examples = await self.example_loader.load(

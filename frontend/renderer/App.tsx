@@ -7,27 +7,50 @@
 // - 重连机制:指数退避(1s,2s,4s,8s,max 16s),重连后发送 replay(session_id + last_turn)
 // - ACK 机制:收到 react_event 后发送 ack(session_id + turn)
 // - session_id 管理:首次连接时从 URL 参数获取或生成
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import LiquidBackground from "./components/LiquidBackground";
 import Sidebar, { type ViewKey, SIDEBAR_EXPANDED_WIDTH } from "./components/Sidebar";
 import ArtifactPanel, { type Artifact, PANEL_EXPANDED_WIDTH } from "./components/ArtifactPanel";
-import AgentLibraryView from "./views/AgentLibraryView";
-import HomeView from "./views/HomeView";
-import KnowledgeView from "./views/KnowledgeView";
-import MemoryView from "./views/MemoryView";
-import SettingsView from "./views/SettingsView";
+// P3-3(2026-08-17): 视图代码分割 —— 按需加载(首屏只载 HomeView 依赖, 其余懒加载)
 import RobotAvatar from "./components/RobotAvatar";
+import ConfirmDialog from "./components/ConfirmDialog";
+import { ToastHost, toast } from "./components/Toast";
 import { deAIfy } from "./utils/deAIfy";
+import { renderFinalText } from "./utils/renderFinal";
+import { ICON_THINKING, ICON_TASKS } from "./utils/icons";
+// P3-2 批次1(2026-08-17): 工具函数与小组件自 chatUi.tsx 导入(自本文件拆出)
+import {
+  ThinkingWait,
+  MsgActionBtn,
+  formatPayload,
+  errorCategoryColor,
+  sceneDisplayName,
+  extractImagePaths,
+  imagePathToUrl,
+  getSessionIdFromUrl,
+  notifyUser,
+  SCENE_NAME_MAP,
+} from "./utils/chatUi";
 import "./styles/design-tokens.css";
 
 import { adminFetch } from "./utils/apiClient";
+
+// P3-3(2026-08-17): 视图懒加载(替换静态 import)—— 首屏包体显著减小,
+// 切视图时才拉取对应 chunk
+const HomeView = lazy(() => import("./views/HomeView"));
+const KnowledgeView = lazy(() => import("./views/KnowledgeView"));
+const MemoryView = lazy(() => import("./views/MemoryView"));
+const SettingsView = lazy(() => import("./views/SettingsView"));
+const AgentLibraryView = lazy(() => import("./views/AgentLibraryView"));
 
 // V1.5 项-1(ADR-012 §3.4 M3): 子任务卡片面板(WS 即时刷新 + DB 轮询兜底)
 import SubagentPanel, {
   createSubagent,
   type SubagentState,
 } from "./components/SubagentPanel";
+import { TurnCard, type TurnGroupData, type ReactEvent, type EventType } from "./components/TurnCard";
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 类型定义
@@ -35,49 +58,9 @@ import SubagentPanel, {
 
 type ConnStatus = "connected" | "disconnected" | "reconnecting";
 
-type EventType =
-  | "user"
-  | "thinking"
-  | "tool_call"
-  | "tool_result"
-  | "delta"
-  | "final"
-  | "error"
-  // V2 P1: 沙箱流式输出 + 权限确认(蓝图 §6.10 / §5.12)
-  | "sandbox_output"
-  | "tool_confirmation_required"
-  | "tool_confirmation_result"
-  // V1.5 项-5: 流程级暂停/继续(仅 WS 推送, 不入事件列表)
-  | "turn_paused"
-  | "turn_resumed";
-
-interface ReactEvent {
-  id: number;
-  session_id: number;
-  turn: number;
-  event_type: EventType;
-  payload: Record<string, unknown>;
-  ts: number;
-  replayed?: boolean;
-}
-
 // 2026-08-12 perf: 预计算的 turn 分组数据 —— render 阶段从 O(turn_events × 11)
 // 次遍历降为 O(1) 解构。delta/thinking 累积更新时 turnGroups useMemo 重算
 // 一次(O(n) 全表遍历), 所有 turn 卡片共享预计算结果, 避免每卡片重复 find/filter。
-interface TurnGroupData {
-  user?: ReactEvent;
-  thinking?: ReactEvent;
-  final?: ReactEvent;
-  error?: ReactEvent;
-  confirmResult?: ReactEvent;
-  toolEvents: ReactEvent[];
-  confirmEvents: ReactEvent[];
-  sandboxText: string;
-  deltaText: string;
-  finalText: string;
-  thinkingText: string;
-}
-
 interface WSMessage {
   type: string;
   session_id?: number;
@@ -112,20 +95,23 @@ const WS_URL = "ws://localhost:8765/ws";
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 const MAX_RECONNECT_DELAY = 16000;
 
+// P0-2(2026-08-17): 事件底色改引 var(--event-*) token(design-tokens.css 亮/暗双值)
 const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string }> = {
-  user: { bg: "#dbeafe", label: "You", icon: "🧑" },
-  thinking: { bg: "#f5f5f5", label: "Thinking", icon: "💭" },
-  tool_call: { bg: "#e3f2fd", label: "Tool Call", icon: "🔧" },
-  tool_result: { bg: "#e8f5e9", label: "Tool Result", icon: "✅" },
-  delta: { bg: "#e8eaf6", label: "Streaming", icon: "…" },
-  final: { bg: "#e8eaf6", label: "Final", icon: "🎯" },
-  error: { bg: "#ffebee", label: "Error", icon: "❌" },
-  sandbox_output: { bg: "#f1f5f9", label: "Sandbox", icon: "🖥️" },
-  tool_confirmation_required: { bg: "#fef3c7", label: "Permission", icon: "⚠️" },
-  tool_confirmation_result: { bg: "#f3e8ff", label: "Permission Result", icon: "🔐" },
+  user: { bg: "var(--event-user-bg)", label: "You", icon: "🧑" },
+  thinking: { bg: "var(--event-thinking-bg)", label: "Thinking", icon: "💭" },
+  tool_call: { bg: "var(--event-tool_call-bg)", label: "Tool Call", icon: "🔧" },
+  tool_result: { bg: "var(--event-tool_result-bg)", label: "Tool Result", icon: "✅" },
+  delta: { bg: "var(--event-delta-bg)", label: "Streaming", icon: "…" },
+  final: { bg: "var(--event-final-bg)", label: "Final", icon: "🎯" },
+  error: { bg: "var(--event-error-bg)", label: "Error", icon: "❌" },
+  sandbox_output: { bg: "var(--event-sandbox_output-bg)", label: "Sandbox", icon: "🖥️" },
+  tool_confirmation_required: { bg: "var(--event-tool_confirmation_required-bg)", label: "Permission", icon: "⚠️" },
+  tool_confirmation_result: { bg: "var(--event-tool_confirmation_result-bg)", label: "Permission Result", icon: "🔐" },
   // V1.5 项-5: 流程级暂停/继续(不入事件列表, 仅类型完整)
-  turn_paused: { bg: "#fff3e0", label: "Paused", icon: "⏸" },
-  turn_resumed: { bg: "#e8f5e9", label: "Resumed", icon: "▶" },
+  turn_paused: { bg: "var(--event-turn_paused-bg)", label: "Paused", icon: "⏸" },
+  turn_resumed: { bg: "var(--event-turn_resumed-bg)", label: "Resumed", icon: "▶" },
+  // 2026-08-16(阶段2 反馈): 迭代上限询问(不入事件列表, 仅类型完整)
+  iteration_limit_reached: { bg: "var(--event-iteration_limit_reached-bg)", label: "Iteration Limit", icon: "🔄" },
 };
 
 // M3 AC-9: tool_result 中 outputs/*.png 等图片路径解析(蓝图 §7.12)
@@ -136,166 +122,23 @@ const IMAGE_PATH_RE = /(?:^|[^\w/])((?:\/?outputs\/)?[\w\-\u4e00-\u9fff]+\.(?:pn
 
 // 0.5.0 M1(2026-08-08): 场景技术标识 → 中文名显示映射(与后端 skill.yaml
 // scene_name 同步; activeSkill 存技术标识, 显示层映射为子瞻/白圭/清和)。
-const SCENE_NAME_MAP: Record<string, string> = {
-  office: "子瞻",
-  data_analysis: "白圭",
-  frontend_design: "清和",
+const SCENE_ALLOWED_CATEGORIES: Record<string, string[]> = {
+  office: ["documents", "writing"],
+  data_analysis: ["documents"],
+  frontend_design: ["design", "engineering"],
+  monitor: ["engineering", "meta"],
 };
-const sceneDisplayName = (skill: string | null): string => {
-  if (!skill) return "未锁定场景";
-  return SCENE_NAME_MAP[skill] ?? skill;
-};
-
-function extractImagePaths(text: string): string[] {
-  if (!text) return [];
-  const paths: string[] = [];
-  let m: RegExpExecArray | null;
-  IMAGE_PATH_RE.lastIndex = 0;
-  while ((m = IMAGE_PATH_RE.exec(text)) !== null) {
-    paths.push(m[1]);
-  }
-  // 去重,保留顺序
-  return Array.from(new Set(paths));
-}
-
+// P3-2 批次1: 主组件专用常量(文件服务基址 + 任务抽屉按钮样式)
 const FILES_BASE = "http://127.0.0.1:8765/files/outputs";
-
-function imagePathToUrl(path: string): string {
-  // 取 outputs/ 之后的部分作为 filename,拼接后端文件服务绝对地址
-  // (vite 5173 下相对路径会请求前端自身导致 404)
-  // 2026-08-10 22:00: [\w\-\.] → [\w\-\u4e00-\u9fff] 支持中文文件名
-  const match = path.match(/outputs\/([\w\-\u4e00-\u9fff]+)$/i);
-  const filename = match ? match[1] : path.replace(/^\/?outputs\//, "");
-  return `${FILES_BASE}/${filename}`;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// 辅助函数
-// ──────────────────────────────────────────────────────────────────────────────
-
-function getSessionIdFromUrl(): number {
-  const params = new URLSearchParams(window.location.search);
-  const raw = params.get("session_id");
-  if (raw) {
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isNaN(n) && n > 0) return n;
-  }
-  // 首次连接生成一个随机 session_id(占位,实际由后端创建 session 后回传)
-  return Math.floor(Math.random() * 100000) + 1;
-}
-
-// V1.1-3.8 任务抽屉按钮
 const taskBtnStyle: React.CSSProperties = {
   fontSize: 12,
   padding: "5px 14px",
   borderRadius: 10,
   border: "1px solid var(--border-strong)",
   background: "var(--panel-bg-solid)",
-  // 2026-08-08: 硬编码 #334155 在暗色下(深底)几乎看不见 → 语义变量
   color: "var(--text-primary)",
   cursor: "pointer",
 };
-
-// V1.4-8.4 系统通知(任务完成/失败): 仅应用在后台时提醒, 避免前台打扰
-function notifyUser(title: string, body: string): void {
-  try {
-    if (typeof Notification === "undefined") return;
-    if (document.visibilityState === "visible") return; // 前台不打扰
-    if (Notification.permission === "granted") {
-      new Notification(title, { body });
-    } else if (Notification.permission !== "denied") {
-      void Notification.requestPermission().then((p) => {
-        if (p === "granted") new Notification(title, { body });
-      });
-    }
-  } catch {
-    /* 通知失败静默 */
-  }
-}
-
-// V1.1-3.3 消息操作条按钮
-function MsgActionBtn({
-  label,
-  title,
-  onClick,
-  danger,
-}: {
-  label: string;
-  title: string;
-  onClick: () => void;
-  danger?: boolean;
-}): JSX.Element {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        fontSize: 11,
-        border: "1px solid var(--border-color)",
-        background: "var(--surface-1)",
-        color: danger ? "#dc2626" : "var(--text-secondary)",
-        borderRadius: 10,
-        padding: "3px 10px",
-        cursor: "pointer",
-        lineHeight: 1.5,
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background = danger ? "#fee2e2" : "#eef2ff";
-        e.currentTarget.style.color = danger ? "#b91c1c" : "#4f46e5";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = "#f9fafb";
-        e.currentTarget.style.color = danger ? "#dc2626" : "#6b7280";
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function formatPayload(eventType: EventType, payload: Record<string, unknown>): string {
-  switch (eventType) {
-    case "user":
-      return String(payload.content ?? "");
-    case "thinking":
-      // 推理过程: reasoning 增量优先, 兼容旧版 content 字段
-      return String(payload.reasoning ?? payload.content ?? "");
-    case "tool_call": {
-      const name = payload.tool_name ?? payload.name ?? "unknown";
-      const args = payload.arguments ?? payload.args ?? "";
-      return `${name}(${typeof args === "string" ? args : JSON.stringify(args)})`;
-    }
-    case "tool_result":
-      return String(payload.output ?? payload.result ?? JSON.stringify(payload));
-    case "final":
-      return deAIfy(String(payload.content ?? ""));
-    case "delta":
-      return deAIfy(String(payload.content ?? ""));
-    case "error":
-      return String(payload.message ?? JSON.stringify(payload));
-    case "sandbox_output":
-      // 沙箱终端流式输出: 仅显示 chunk 内容
-      return String(payload.chunk ?? "");
-    case "tool_confirmation_required":
-      return String(payload.message ?? "需要确认");
-    case "tool_confirmation_result":
-      return payload.approved ? "已批准" : "已拒绝";
-    default:
-      return JSON.stringify(payload);
-  }
-}
-
-// 0.5.1(2026-08-10 蒋先生要求"错误零静默"): 错误分类着色 —— 按消息前缀
-// 【设定问题】橙 / 【程序异常】红 / 【能力边界】蓝, 让用户一眼区分问题归因
-function errorCategoryColor(message?: unknown): string | null {
-  const msg = String(message ?? "");
-  if (msg.includes("【设定问题】")) return "#d97706";
-  if (msg.includes("【程序异常】")) return "#dc2626";
-  if (msg.includes("【能力边界】")) return "#2563eb";
-  return null;
-}
-
-
 // ──────────────────────────────────────────────────────────────────────────────
 // 视图组件(评估已移除; 设置/知识库/记忆见 views/ 目录; 首页见 HomeView)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -342,6 +185,19 @@ export default function App(): JSX.Element {
   // 阶段三批次3(T3.4): 编辑重发纠正沉淀 —— 记录被编辑的原消息(发送时提取 correction 记忆)
   const [editingOriginal, setEditingOriginal] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnStatus>("disconnected");
+  // P0-1(2026-08-17): 重连尝试序号(响应式, 供侧边栏"重连中(第 N 次)"展示)
+  const [reconnectCount, setReconnectCount] = useState(0);
+  // P0-3(2026-08-17): 玻璃确认弹层状态(替代 window.confirm; 异步确认, 确认后才执行动作)
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const [deleteTurnConfirm, setDeleteTurnConfirm] = useState<number | null>(null);
+  const [truncateConfirm, setTruncateConfirm] = useState<number | null>(null);
+  const [iterLimitConfirm, setIterLimitConfirm] = useState<{
+    used: number;
+    max: number;
+    sid: number;
+  } | null>(null);
+  // P1-4(2026-08-17): 对话顶部工具条收纳 —— 「⋯ 更多」下拉(会话设置/任务/关闭对话)
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   // 对话文档上传: 文件引用(上传成功后记录, 发送时附带路径)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingUpload, setPendingUpload] = useState<{ name: string; path: string } | null>(null);
@@ -359,7 +215,7 @@ export default function App(): JSX.Element {
   // 2026-08-12 Phase 2: 会话附加技能(多技能调用) —— 已挂载技能名列表
   const [supplementarySkills, setSupplementarySkills] = useState<string[]>([]);
   const [availableSkills, setAvailableSkills] = useState<
-    { name: string; version: string; enabled: boolean; description?: string; display_name?: string; model_scope?: string[] }[]
+    { name: string; version: string; enabled: boolean; description?: string; display_name?: string; model_scope?: string[]; scenario?: string }[]
   >([]);
   const [sessionId, setSessionId] = useState<number>(() => getSessionIdFromUrl());
   const [realSessionId, setRealSessionId] = useState<number | null>(null);
@@ -532,10 +388,37 @@ export default function App(): JSX.Element {
 
   // 0.5.1(2026-08-10 蒋先生反馈): 对话自动滚动 —— 消息/流式内容变化时
   // 滚动到底部, 避免用户提问后需手动下拉。
+  // 2026-08-16(蒋先生反馈): 修复"锁定在最后一句" —— 原实现无条件
+  // scrollTop=scrollHeight, 流式更新时把用户正在翻看的历史强制拉回底部。
+  // 优化: 滚动位置感知 —— 用户主动上翻(离开底部)时暂停自动跟随, 回到
+  // 底部附近(120px 内)自动恢复; 仅"新回合开始/结束生成"时强制回底部。
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef<boolean>(true);
+
+  // 监听滚动: 用户主动上翻 → stickToBottom=false; 回到底部附近 → true
+  const handleChatScroll = useCallback((): void => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = dist < 120;
+  }, []);
+
+  // 新回合开始(isGenerating 由 false→true)时强制回底部(看新消息起点)
+  const prevGeneratingRef = useRef<boolean>(false);
   useEffect(() => {
     const el = chatScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const started = isGenerating && !prevGeneratingRef.current;
+    prevGeneratingRef.current = isGenerating;
+    if (started) {
+      stickToBottomRef.current = true;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    // 流式内容变化: 仅当用户停留在底部(或未主动上翻)时才跟随
+    if (stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [turnGroups, isGenerating, view]);
 
   const toggleThinking = (turn: number): void => {
@@ -684,7 +567,7 @@ export default function App(): JSX.Element {
       setView("chat");
     } catch (e) {
       // eslint-disable-next-line no-alert
-      window.alert(`激活 ${skill} 失败: ${String(e)}`);
+      toast.error(`激活 ${skill} 失败: ${String(e)}`);
     }
   };
 
@@ -692,7 +575,8 @@ export default function App(): JSX.Element {
   const handleSwitchSession = (
     id: number,
     skillName?: string | null,
-    modelId?: string | null
+    modelId?: string | null,
+    kind?: string | null
   ): void => {
     if (id === sessionId && view === "chat") return;
     // 0.5.0 P2: 切换会话前保存当前窗口快照(输入框/事件流不丢失)
@@ -731,8 +615,23 @@ export default function App(): JSX.Element {
       .catch(() => {
         /* 查询失败静默 */
       });
-    // 进入对话视图(恢复该会话的 skill, 若无 skill 则回首页选模式)
-    setView(skillName ? "chat" : "home");
+    // 2026-08-16(蒋先生反馈): 进入对话视图 —— 场景会话(skillName 非空)
+    // 与主智能体(monitor, locked_skill_name 恒 NULL)都进 chat; 仅无 skill
+    // 的通用会话回首页选模式(修复: 无涯会话恢复后跳主页 + AI 从头思考)。
+    const isMonitor = kind === "monitor";
+    // 2026-08-18(蒋先生反馈): 侧边栏点历史会话进入时同步 activeSlot ——
+    // 原实现不设置, 从场景会话切回无涯历史会话时 activeSlot 仍停留在原
+    // slot(≠0), 导致优化审批面板(activeSlot===0 条件)不渲染"审批栏消失"。
+    // monitor → slot 0; 场景按技术标识映射 1/2/3(与 HomeView slotHasSession 一致)
+    if (isMonitor) {
+      activeSlotRef.current = 0;
+      setActiveSlot(0);
+    } else if (skillName === "office" || skillName === "data_analysis" || skillName === "frontend_design") {
+      const slot = skillName === "office" ? 1 : skillName === "data_analysis" ? 2 : 3;
+      activeSlotRef.current = slot;
+      setActiveSlot(slot);
+    }
+    setView(skillName || isMonitor ? "chat" : "home");
   };
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -767,6 +666,11 @@ export default function App(): JSX.Element {
 
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 2026-08-17(实机修复 P0-1): WS 心跳 —— 断网时 TCP 挂起, onclose 不触发,
+  // 状态点永远停在"已连接"。应用层每 15s ping, 35s 无任何消息(含 pong) → 强制 close
+  // 触发 onclose → reconnecting(黄点脉冲)/重连。后端 main.py 已有 ping→pong 处理。
+  const heartbeatTimerRef = useRef<number | null>(null);
+  const lastActiveRef = useRef<number>(Date.now());
   const eventIdRef = useRef<number>(0);
   const manualCloseRef = useRef<boolean>(false);
   // 0.5.1 A-1(C-4 事件级去重): 已见事件 id 集合 + 最大 id 锚点。
@@ -914,7 +818,7 @@ export default function App(): JSX.Element {
       setView("chat");
     } catch (e) {
       // eslint-disable-next-line no-alert
-      window.alert(`进入监控窗口失败: ${String(e)}`);
+      toast.error(`进入监控窗口失败: ${String(e)}`);
     }
   }, [saveWindowSnapshot, bumpSlots]);
 
@@ -1113,7 +1017,7 @@ export default function App(): JSX.Element {
       const target =
         [...msgs].reverse().find((m) => m.role === "assistant" && m.content) ?? msgs[0];
       if (!target) return;
-      if (!window.confirm("删除这条回复? (软删除, 不影响会话其余内容)")) return;
+      // P0-3(2026-08-17): 确认前置改为玻璃弹层(requestDeleteTurn), 此处只执行删除
       try {
         const resp = await adminFetch(`http://127.0.0.1:8765/admin/messages/${target.id}`, {
           method: "DELETE",
@@ -1126,6 +1030,10 @@ export default function App(): JSX.Element {
     },
     [getTurnMessages]
   );
+  // P0-3(2026-08-17): 删除回复 → 先弹玻璃确认
+  const requestDeleteTurn = useCallback((turn: number): void => {
+    setDeleteTurnConfirm(turn);
+  }, []);
 
   const copyText = useCallback(async (text: string): Promise<void> => {
     try {
@@ -1141,8 +1049,8 @@ export default function App(): JSX.Element {
   const uploadImage = useCallback(async (file: File): Promise<void> => {
     const MAX = 5 * 1024 * 1024; // 图片 ≤5MB(token 成本控制, 方案 §8.4)
     if (file.size > MAX) {
-      // eslint-disable-next-line no-alert
-      window.alert("图片超过 5MB 限制");
+      // P0-3(2026-08-17): alert → Toast
+      toast.error("图片超过 5MB 限制");
       return;
     }
     try {
@@ -1170,7 +1078,7 @@ export default function App(): JSX.Element {
       setPendingImage({ name: data.name, path: data.path, preview });
     } catch (e) {
       // eslint-disable-next-line no-alert
-      window.alert(`图片上传失败: ${String(e)}`);
+      toast.error(`图片上传失败: ${String(e)}`);
     }
   }, [realSessionId, sessionId]);
 
@@ -1324,7 +1232,12 @@ export default function App(): JSX.Element {
       setSettingsMsg("请输入有效的轮次(>=0)");
       return;
     }
-    if (!window.confirm(`截断上下文: 保留 0~${afterTurn} 轮, 之后的对话将被移出上下文(可从会话导出追溯)。确定?`)) return;
+    // P0-3(2026-08-17): 确认前置改为玻璃弹层
+    setTruncateConfirm(afterTurn);
+  }, [truncateTurn]);
+
+  // P0-3(2026-08-17): 截断执行(弹层确认后)
+  const doTruncateConfirmed = useCallback(async (afterTurn: number): Promise<void> => {
     try {
       const resp = await adminFetch(
         `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}/truncate`,
@@ -1340,7 +1253,7 @@ export default function App(): JSX.Element {
     } catch (e) {
       setSettingsMsg(`截断失败: ${String(e)}`);
     }
-  }, [truncateTurn, realSessionId, sessionId]);
+  }, [realSessionId, sessionId]);
 
   const loadSystemPrompt = useCallback(async (): Promise<void> => {
     setSystemPromptText(null);
@@ -1460,6 +1373,124 @@ export default function App(): JSX.Element {
     top: { message: string; count: number }[];
   } | null>(null);
   const [diagBusy, setDiagBusy] = useState(false);
+
+  // 2026-08-16(阶段1-c, G1 优化审批列表): monitor 窗口优化审批面板
+  type OptimItem = {
+    id: number;
+    ts: string | null;
+    proposal: string;
+    category: string;
+    status: string;
+    plan: unknown[];
+    result: string | null;
+    session_id: number | null;
+  };
+  const [optimItems, setOptimItems] = useState<OptimItem[]>([]);
+  const [optimBusy, setOptimBusy] = useState(false);
+  const [optimError, setOptimError] = useState(false);
+  // 2026-08-17(蒋先生反馈): 审批面板移到输入框上方并默认折叠 —— 无待审批
+  // 时仅一行横幅; 有待审批时自动展开(审批后收起)
+  const [optimOpen, setOptimOpen] = useState(false);
+  const optimPending = useMemo(
+    () => optimItems.filter((i) => i.status === "pending").length,
+    [optimItems]
+  );
+  // 有待审批出现时自动展开(用户无需手动点开; 审批后回落为折叠横幅)
+  useEffect(() => {
+    if (optimPending > 0) setOptimOpen(true);
+  }, [optimPending]);
+
+  const loadOptimLog = useCallback(async (): Promise<void> => {
+    setOptimBusy(true);
+    try {
+      const resp = await adminFetch(
+        "http://127.0.0.1:8765/admin/optim-log?limit=20"
+      );
+      if (!resp.ok) {
+        // 2026-08-16(阶段5 反馈修复): 失败不再静默 —— 空态显示"加载失败"
+        // 而非误导性"暂无待审批"(此前 401/网络错误被吞, 用户以为无涯没提交)
+        setOptimError(true);
+        return;
+      }
+      setOptimError(false);
+      const data = (await resp.json()) as OptimItem[];
+      setOptimItems(Array.isArray(data) ? data : []);
+    } catch {
+      setOptimError(true);
+    } finally {
+      setOptimBusy(false);
+    }
+  }, []);
+
+  // monitor 窗口打开时加载 + 会话切换后刷新; 2026-08-16: 渲染条件放宽
+  // (monitor 会话内也常驻可见, 此前 !activeSkill 导致会话内面板不渲染,
+  // 用户"看不到选项卡"), 且可见期间每 8s 轮询(无涯提交 optim_plan 后
+  // 自动出现, 无需手动刷新)。
+  useEffect(() => {
+    if (activeSlot !== 0) return;
+    void loadOptimLog();
+    const timer = setInterval(() => void loadOptimLog(), 8000);
+    return () => clearInterval(timer);
+  }, [activeSlot, activeSkill, loadOptimLog, view]);
+
+  const reviewOptim = useCallback(
+    async (id: number, status: "approved" | "rejected"): Promise<void> => {
+      try {
+        await adminFetch(`http://127.0.0.1:8765/admin/optim-log/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status }),
+        });
+        await loadOptimLog();
+        // 2026-08-18(蒋先生反馈): 审批后无涯不行动, 需再发一句话才执行 ——
+        // 后端 review 只更新 DB, 无涯 WS 连接收不到任何通知(无涯无运行入口)。
+        // 审批时用户必在无涯窗口(面板仅 activeSlot===0 渲染), 直接经 WS
+        // 注入一条系统消息触发无涯立即执行 apply_optim(副作用: 对话流多一条
+        // 【系统】消息, 透明可审计)。
+        sendWs({
+          type: "user",
+          session_id: realSessionId ?? sessionId,
+          content:
+            status === "approved"
+              ? `【系统】优化建议 #${id} 已批准，请立即执行 apply_optim 实施该方案。`
+              : `【系统】优化建议 #${id} 已被拒绝，无需执行。`,
+        });
+      } catch {
+        /* 静默 */
+      }
+    },
+    [loadOptimLog, sendWs, realSessionId, sessionId]
+  );
+
+  // 2026-08-16(阶段1-d, G2): 会话工具装配视图(通道收敛可感知)
+  type ToolsAssembly = {
+    scene: string;
+    kind: string;
+    workspace: string;
+    mcp_servers: string[];
+    monitor_tools: string[];
+    builtin_tools: string[];
+    anchor_tools: string[];
+  };
+  const [toolsAssembly, setToolsAssembly] = useState<ToolsAssembly | null>(null);
+
+  const loadToolsAssembly = useCallback(async (): Promise<void> => {
+    const sid = realSessionId ?? sessionId;
+    if (!sid || sid <= 0) return;
+    try {
+      const resp = await adminFetch(
+        `http://127.0.0.1:8765/admin/sessions/${sid}/tools-assembly`
+      );
+      if (!resp.ok) return;
+      const data = (await resp.json()) as ToolsAssembly;
+      setToolsAssembly(data);
+    } catch {
+      /* 加载失败静默 */
+    }
+  }, [realSessionId, sessionId]);
+  useEffect(() => {
+    void loadToolsAssembly();
+  }, [loadToolsAssembly, view]);
 
   const loadDiagnostics = useCallback(async (): Promise<void> => {
     setDiagBusy(true);
@@ -1735,6 +1766,17 @@ export default function App(): JSX.Element {
           }
           if (msg.event_type === "turn_resumed") {
             setIsPaused(false);
+            return;
+          }
+          // 2026-08-16(阶段2 反馈): 迭代上限询问 —— 长任务 20 步到达时
+          // 弹确认框, 用户选择继续(扩展上限)或停止(正常收尾)。
+          if (msg.event_type === "iteration_limit_reached") {
+            const used = Number(msg.payload?.used ?? 0);
+            const max = Number(msg.payload?.max ?? 0);
+            const sid = (msg.session_id as number) ??
+              (realSessionIdRef.current ?? sessionIdRef.current);
+            // P0-3(2026-08-17): window.confirm → 玻璃确认弹层(异步确认, 选择在 JSX 处理)
+            setIterLimitConfirm({ used, max, sid });
             return;
           }
           // 流式增量: 追加到该 turn 的最后一条 delta 事件(累积显示, 不刷爆列表)
@@ -2026,9 +2068,13 @@ export default function App(): JSX.Element {
       case "error":
         // 0.5.1: 确认相关错误(unknown confirmation_id 等超时竞态)
         // → 关闭全局确认弹窗, 避免用户对已过期确认重复操作
+        // 2026-08-16(蒋先生反馈"切换 LLM 后对话框锁定无法输入"): 确认超时
+        // 的 error 必须先清遮罩 —— 否则 pendingConfirm 全屏遮罩(inset:0,
+        // zIndex 9999)永久覆盖输入区, 输入框"完全无法打字"。此清除必须在
+        // 会话归属分发之前执行(后台会话的确认超时同样要解全局锁)。
         if (
           msg.message &&
-          /confirmation|permission/i.test(String(msg.message))
+          /confirmation|permission|timeout/i.test(String(msg.message))
         ) {
           setPendingConfirm(null);
         }
@@ -2093,7 +2139,39 @@ export default function App(): JSX.Element {
 
       ws.onopen = () => {
         setStatus("connected");
+        setReconnectCount(0);
         reconnectAttemptRef.current = 0;
+        // 2026-08-17(实机修复): 启动心跳 —— 15s 一次 ping; 25s 无任何消息
+        // (含 pong) 视为链路失效。超时后**不依赖 close() 触发 onclose**
+        // (后端进程死亡时 close 帧发不出, onclose 可能挂起数分钟),
+        // 直接走既有重连链路(黄灯 + 指数退避)。
+        lastActiveRef.current = Date.now();
+        if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = window.setInterval(() => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            if (Date.now() - lastActiveRef.current > 25000) {
+              // 静默超时(断网/TCP 挂起): 清理旧连接, 直接进入重连
+              if (heartbeatTimerRef.current) {
+                clearInterval(heartbeatTimerRef.current);
+                heartbeatTimerRef.current = null;
+              }
+              const dead = wsRef.current;
+              wsRef.current = null;
+              if (dead) {
+                dead.onclose = null; // 防止半死连接晚到 onclose 二次触发重连
+                try {
+                  dead.close();
+                } catch {
+                  /* ignore */
+                }
+              }
+              setStatus("reconnecting");
+              scheduleReconnect();
+            } else {
+              sendWs({ type: "ping" });
+            }
+          }
+        }, 15000);
         // 重连后发送 replay(首次连接 last_turn=0; 切换历史会话 full=true 全量加载)
         // 0.5.0 P6(2026-08-09): 用 sessionIdRef 读当前会话(connect 不再依赖
         // sessionId, 否则切换会话会触发 close+重连, 重连期间输入框不可用)
@@ -2112,6 +2190,8 @@ export default function App(): JSX.Element {
 
       ws.onmessage = (ev: MessageEvent) => {
         try {
+          // 2026-08-17(实机修复): 任何消息(含 pong)都算链路活跃
+          lastActiveRef.current = Date.now();
           const msg: WSMessage = JSON.parse(ev.data);
           handleMessage(msg);
         } catch {
@@ -2125,6 +2205,10 @@ export default function App(): JSX.Element {
 
       ws.onclose = () => {
         wsRef.current = null;
+        if (heartbeatTimerRef.current) {
+          clearInterval(heartbeatTimerRef.current);
+          heartbeatTimerRef.current = null;
+        }
         if (manualCloseRef.current) {
           setStatus("disconnected");
           return;
@@ -2145,6 +2229,8 @@ export default function App(): JSX.Element {
   const scheduleReconnect = useCallback((): void => {
     if (manualCloseRef.current) return;
     const attempt = reconnectAttemptRef.current;
+    // P0-1(2026-08-17): 即将进行的尝试序号同步到 state, 供侧边栏展示
+    setReconnectCount(attempt + 1);
     const delay = RECONNECT_DELAYS[Math.min(attempt, RECONNECT_DELAYS.length - 1)];
     const actualDelay = attempt >= RECONNECT_DELAYS.length ? MAX_RECONNECT_DELAY : delay;
     if (reconnectTimerRef.current) {
@@ -2163,8 +2249,8 @@ export default function App(): JSX.Element {
       if (!file) return;
       const MAX = 15 * 1024 * 1024;
       if (file.size > MAX) {
-        // eslint-disable-next-line no-alert
-        window.alert("文件超过 15MB 限制");
+      // P0-3(2026-08-17): alert → Toast
+      toast.error("文件超过 15MB 限制");
         return;
       }
       try {
@@ -2194,7 +2280,7 @@ export default function App(): JSX.Element {
         setPendingUpload({ name: data.name, path: data.path });
       } catch (e) {
         // eslint-disable-next-line no-alert
-        window.alert(`上传失败: ${String(e)}`);
+        toast.error(`上传失败: ${String(e)}`);
       }
     },
     [realSessionId, sessionId]
@@ -2338,6 +2424,11 @@ export default function App(): JSX.Element {
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
+      // 2026-08-17(实机修复): 卸载时清理心跳定时器
+      if (heartbeatTimerRef.current) {
+        clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
       const ws = wsRef.current;
       if (ws) {
         ws.onclose = null;
@@ -2350,7 +2441,7 @@ export default function App(): JSX.Element {
   // 加载默认工作区(画地为牢选择器显示用; 会话工作区后端持久化)
   useEffect(() => {
     let cancelled = false;
-    adminFetch("http://localhost:8765/admin/workspaces")
+    adminFetch("http://127.0.0.1:8765/admin/workspaces")
       .then((r) => r.json())
       .then((data) => {
         if (!cancelled) {
@@ -2401,7 +2492,7 @@ export default function App(): JSX.Element {
     const path = workspaceInput.trim();
     try {
       const resp = await adminFetch(
-        `http://localhost:8765/admin/sessions/${realSessionId ?? sessionId}/workspace`,
+        `http://127.0.0.1:8765/admin/sessions/${realSessionId ?? sessionId}/workspace`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -2410,13 +2501,14 @@ export default function App(): JSX.Element {
       );
       const data = await resp.json();
       if (!resp.ok) {
-        window.alert(`工作区设置失败: ${data.error ?? data.detail ?? `HTTP ${resp.status}`}`);
+        // P0-3(2026-08-17): alert → Toast
+        toast.error(`工作区设置失败: ${data.error ?? data.detail ?? `HTTP ${resp.status}`}`);
         return;
       }
       setWorkspace(data.workspace ?? null);
       setWorkspacePanelOpen(false);
     } catch (err) {
-      window.alert(`工作区设置失败: ${String(err)}`);
+      toast.error(`工作区设置失败: ${String(err)}`);
     }
   }, [realSessionId, sessionId, workspaceInput]);
 
@@ -2447,7 +2539,7 @@ export default function App(): JSX.Element {
     if (target <= 0) return;
     try {
       const resp = await adminFetch(
-        `http://localhost:8765/admin/sessions/${target}/model`,
+        `http://127.0.0.1:8765/admin/sessions/${target}/model`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2458,7 +2550,8 @@ export default function App(): JSX.Element {
       if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
       setSessionModel(modelId);
     } catch (err) {
-      window.alert(`切换模型失败: ${String(err)}`);
+      // P0-3(2026-08-17): alert → Toast
+      toast.error(`切换模型失败: ${String(err)}`);
     }
   };
 
@@ -2514,6 +2607,9 @@ export default function App(): JSX.Element {
           toggleTheme={toggleTheme}
           agentName={agentName}
           onRenameAgent={(n) => renameAgent(n)}
+          // P0-1(2026-08-17): 重连次数 + 手动重连入口
+          reconnectCount={reconnectCount}
+          onReconnect={() => connect()}
           // 0.5.0 P4: PA 图标点击 → 开启主智能体对话(改名已迁设置页)
           onOpenMonitor={() => void enterMonitorWindow()}
           // 0.5.0 P5: 主智能体是否有未关闭对话(PA 图标状态圆点)
@@ -2538,18 +2634,25 @@ export default function App(): JSX.Element {
         >
           <main style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
             {view === "home" && (
-              <HomeView
-                onPickMode={handlePickMode}
-                activeSkill={activeSkill}
-                sessionId={realSessionId ?? sessionId}
-                theme={theme}
-                // 0.5.0 P5: 场景按钮状态圆点(绿=对话中/红=无对话)
-                slotActive={(skill) =>
-                  slotHasSession(
-                    skill === "office" ? 1 : skill === "data_analysis" ? 2 : 3
-                  )
+              // P3-3: HomeView 懒加载 Suspense 边界
+              <Suspense
+                fallback={
+                  <div style={{ padding: 24, fontSize: 13, color: "var(--text-tertiary)" }}>加载中…</div>
                 }
-              />
+              >
+                <HomeView
+                  onPickMode={handlePickMode}
+                  activeSkill={activeSkill}
+                  sessionId={realSessionId ?? sessionId}
+                  theme={theme}
+                  // 0.5.0 P5: 场景按钮状态圆点(绿=对话中/红=无对话)
+                  slotActive={(skill) =>
+                    slotHasSession(
+                      skill === "office" ? 1 : skill === "data_analysis" ? 2 : 3
+                    )
+                  }
+                />
+              </Suspense>
             )}
             {/* 0.5.0 P3/P4: 监控窗口(主智能体, 无场景 skill)
                 —— 2026-08-08 蒋先生反馈: 用户要的是可对话的主智能体, 不是监控面板。
@@ -2591,7 +2694,7 @@ export default function App(): JSX.Element {
                         0.5.0 P6(2026-08-09): 统一渲染后主智能体(无 skill)显示主智能体名 */}
                     {renderChatAssistantName()}
                   </span>
-                  <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                  <span className="fs-11 text-tertiary">
                     session={realSessionId ?? sessionId}
                   </span>
                   {/* 2026-08-12 Phase 2: 选择技能(多技能调用) —— 原"切换技能"
@@ -2607,73 +2710,138 @@ export default function App(): JSX.Element {
                   >
                     ➕ 选择技能
                   </button>
-                  {/* 已挂载附加技能 chip(点击移除) */}
-                  {supplementarySkills.map((sn) => {
-                    const info = availableSkills.find((s) => s.name === sn);
-                    return (
+                  {/* 已挂载附加技能 chip(点击移除); P1-4: 窄窗口(<1100px)折叠为最多 2 个 + "+N" */}
+                  {supplementarySkills
+                    .slice(
+                      0,
+                      typeof window !== "undefined" && window.innerWidth < 1100 ? 2 : Infinity
+                    )
+                    .map((sn) => {
+                      const info = availableSkills.find((s) => s.name === sn);
+                      return (
+                        <span
+                          key={sn}
+                          title={`移除附加技能 ${sn}`}
+                          onClick={() => void removeSupplementarySkill(sn)}
+                          style={{
+                            fontSize: 12, padding: "4px 10px", borderRadius: 10,
+                            border: "1px solid rgba(139,92,246,0.4)",
+                            background: "rgba(139,92,246,0.08)",
+                            color: "var(--accent-soft-text)",
+                            cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap",
+                          }}
+                        >
+                          {info?.display_name || info?.name || sn} ×
+                        </span>
+                      );
+                    })}
+                  {typeof window !== "undefined" &&
+                    window.innerWidth < 1100 &&
+                    supplementarySkills.length > 2 && (
                       <span
-                        key={sn}
-                        title={`移除附加技能 ${sn}`}
-                        onClick={() => void removeSupplementarySkill(sn)}
+                        title={`还有 ${supplementarySkills.length - 2} 个附加技能`}
                         style={{
                           fontSize: 12, padding: "4px 10px", borderRadius: 10,
-                          border: "1px solid rgba(139,92,246,0.4)",
-                          background: "rgba(139,92,246,0.08)",
-                          color: "var(--accent-soft-text)",
-                          cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap",
+                          border: "1px solid var(--border-color)",
+                          background: "var(--chip-bg)",
+                          color: "var(--text-secondary)",
+                          flexShrink: 0, whiteSpace: "nowrap",
                         }}
                       >
-                        {info?.display_name || info?.name || sn} ×
+                        +{supplementarySkills.length - 2}
                       </span>
-                    );
-                  })}
-                  <span style={{ flex: 1 }} />
-                  {/* V1.1-3.5 会话设置(记忆开关/截断/系统提示词) */}
-                  <button
-                    onClick={() => void openSettings()}
-                    title="会话设置(记忆/截断/系统提示词)"
-                    style={{
-                      fontSize: 12, padding: "4px 10px", borderRadius: 10,
-                      border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
-                      color: "var(--text-primary)",
-                    }}
-                  >
-                    ⚙ 设置
-                  </button>
-                  {/* V1.1-3.8 任务状态(轮次/工具/错误/重试) */}
-                  <button
-                    onClick={() => {
-                      setTasksOpen(true);
-                      void loadTasks();
-                    }}
-                    title="任务执行状态"
-                    style={{
-                      fontSize: 12, padding: "4px 10px", borderRadius: 10,
-                      border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
-                      color: "var(--text-primary)",
-                    }}
-                  >
-                    📋 任务
-                  </button>
-                  {/* 0.5.0 P5: 关闭当前对话(主动结束 → 归档历史任务, 状态圆点转红)。
-                      未关闭的对话切换页面不打断, 可随时点图标回来继续 */}
-                  <button
-                    onClick={() => {
-                      // eslint-disable-next-line no-alert
-                      if (!window.confirm("关闭当前对话?将归档至历史任务, 可随时恢复。")) return;
-                      closeWindow(activeSlot);
-                    }}
-                    title="关闭对话(归档至历史任务)"
-                    style={{
-                      fontSize: 12, padding: "4px 10px", borderRadius: 10,
-                      border: "1px solid rgba(239,68,68,0.4)",
-                      background: "rgba(239,68,68,0.06)",
-                      cursor: "pointer",
-                      color: "#ef4444",
-                    }}
-                  >
-                    🗑 关闭对话
-                  </button>
+                    )}
+                  <span className="flex-1" />
+                  {/* P1-4(2026-08-17): 设置/任务/关闭对话 收纳进「⋯ 更多」下拉
+                      场景 chip + session + 选择技能 + 技能 chips 保留平铺 */}
+                  <div style={{ position: "relative", flexShrink: 0 }}>
+                    <button
+                      onClick={() => setMoreMenuOpen((v) => !v)}
+                      title="更多操作"
+                      style={{
+                        fontSize: 14, padding: "2px 10px", borderRadius: 10,
+                        border: "1px solid var(--border-strong)", background: "var(--panel-bg-solid)", cursor: "pointer",
+                        color: "var(--text-primary)", lineHeight: 1.6,
+                      }}
+                    >
+                      ⋯
+                    </button>
+                    {moreMenuOpen && (
+                      <>
+                        {/* 点击外部关闭下拉 */}
+                        <div
+                          style={{ position: "fixed", inset: 0, zIndex: 59 }}
+                          onClick={() => setMoreMenuOpen(false)}
+                        />
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: "100%",
+                            right: 0,
+                            marginTop: 6,
+                            width: 190,
+                            background: "var(--panel-bg-solid)",
+                            border: "1px solid var(--border-color)",
+                            borderRadius: 12,
+                            boxShadow: "0 10px 30px rgba(15,23,42,0.15)",
+                            padding: 6,
+                            zIndex: 60,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 2,
+                          }}
+                        >
+                        {/* V1.1-3.5 会话设置(记忆开关/截断/系统提示词) */}
+                        <button
+                          className="pop-menu-item"
+                          onClick={() => {
+                            setMoreMenuOpen(false);
+                            void openSettings();
+                          }}
+                          title="会话设置(记忆/截断/系统提示词)"
+                        >
+                          <span className="flex-center gap-10">
+                            <span className="icon-cell">⚙</span>
+                            <span>会话设置</span>
+                          </span>
+                          <span style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1 }}>›</span>
+                        </button>
+                        {/* V1.1-3.8 任务状态(轮次/工具/错误/重试) */}
+                        <button
+                          className="pop-menu-item"
+                          onClick={() => {
+                            setMoreMenuOpen(false);
+                            setTasksOpen(true);
+                            void loadTasks();
+                          }}
+                          title="任务执行状态"
+                        >
+                          <span className="flex-center gap-10">
+                            <span className="icon-cell">📋</span>
+                            <span>任务状态</span>
+                          </span>
+                          <span style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1 }}>›</span>
+                        </button>
+                        {/* 0.5.0 P5: 关闭当前对话(主动结束 → 归档历史任务, 状态圆点转红) */}
+                        <button
+                          className="pop-menu-item"
+                          onClick={() => {
+                            setMoreMenuOpen(false);
+                            setCloseConfirmOpen(true);
+                          }}
+                          title="关闭对话(归档至历史任务)"
+                          style={{ color: "var(--danger-text)" }}
+                        >
+                          <span className="flex-center gap-10">
+                            <span className="icon-cell">🗑</span>
+                            <span>关闭对话</span>
+                          </span>
+                          <span style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1 }}>›</span>
+                        </button>
+                      </div>
+                      </>
+                    )}
+                  </div>
                 </div>
                 {/* V1.5 项-4: 断点恢复横幅(interrupted 会话 + 存在 checkpoint) */}
                 {resumeInfo?.resumable && !isGenerating && (
@@ -2694,7 +2862,7 @@ export default function App(): JSX.Element {
                   >
                     <span>⚠️ 该会话曾被中断
                       {resumeInfo.checkpoint_turn ? `(已完成至第 ${resumeInfo.checkpoint_turn} 轮)` : ""}，可断点继续</span>
-                    <span style={{ flex: 1 }} />
+                    <span className="flex-1" />
                     <button
                       onClick={() => resumeSession()}
                       style={{
@@ -2709,6 +2877,7 @@ export default function App(): JSX.Element {
                 )}
                 <div
                   ref={chatScrollRef}
+                  onScroll={handleChatScroll}
                   style={{
                     flex: 1,
                     minHeight: 0,
@@ -2716,6 +2885,42 @@ export default function App(): JSX.Element {
                     padding: 4,
                   }}
                 >
+        {/* 2026-08-16(阶段1-d, G2): monitor 窗口工具装配视图 —— 展示无涯
+            实际装配的工具/MCP/工作区(通道收敛可感知) */}
+        {activeSlot === 0 && !activeSkill && toolsAssembly && (
+          <div
+            style={{
+              marginBottom: 12, borderRadius: 12,
+              border: "1px solid var(--border-strong)",
+              background: "var(--panel-bg-solid)",
+              padding: 12,
+            }}
+          >
+            <div className="subhead">
+              🧰 工具装配
+              <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginLeft: 8, fontWeight: 400 }}>
+                {toolsAssembly.workspace ? `工作区: ${toolsAssembly.workspace}` : "无工作区"}
+              </span>
+            </div>
+            <div style={{ fontSize: 11, lineHeight: 1.7, color: "var(--text-secondary)" }}>
+              <div>
+                <b>MCP 装配</b>: {(toolsAssembly.mcp_servers ?? []).length > 0
+                  ? (toolsAssembly.mcp_servers ?? []).join(", ")
+                  : "(无, 走全量)"}
+              </div>
+              <div>
+                <b>锚点工具</b>: {(toolsAssembly.anchor_tools ?? []).length > 0
+                  ? (toolsAssembly.anchor_tools ?? []).join(", ")
+                  : "(未配置)"}
+              </div>
+              {(toolsAssembly.monitor_tools ?? []).length > 0 && (
+                <div>
+                  <b>专属工具</b>: {(toolsAssembly.monitor_tools ?? []).join(", ")}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         {turnGroups.length === 0 && (
           <div style={{ color: "var(--text-tertiary)", textAlign: "center", paddingTop: 40, lineHeight: 1.8 }}>
             {/* 0.5.0 P6(2026-08-09): 统一渲染后空态按角色区分 —— 主智能体显示监控引导 */}
@@ -2730,466 +2935,46 @@ export default function App(): JSX.Element {
             )}
           </div>
         )}
-        {turnGroups.map(([turn, g]) => {
-          // 2026-08-12 perf: 所有派生字段已在 turnGroups useMemo 预计算,
-          // render 阶段 O(1) 解构, 不再每卡片做 find/filter/map+join。
-          const {
-            user: userEv,
-            thinking: thinkingEv,
-            final: finalEv,
-            error: errorEv,
-            confirmResult: confirmResultEv,
-            toolEvents,
-            confirmEvents,
-            sandboxText,
-            deltaText,
-            finalText,
-            thinkingText,
-          } = g;
-          // 有用户消息但还没有最终文本 → AI 正在思考
-          const isPending = !!userEv && !finalText && !errorEv;
-          const thinkingOpen = openThinkingTurns.has(turn);
-
-          return (
-            <div key={turn} style={{ marginBottom: 14 }}>
-              {userEv && (
-                <div
-                  style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}
-                >
-                  <div
-                    style={{
-                      backgroundColor: "var(--chat-user-bg)",
-                      borderRadius: "12px 12px 2px 12px",
-                      padding: "8px 14px",
-                      maxWidth: "80%",
-                      color: "var(--text-primary)",
-                    }}
-                  >
-                    <pre
-                      style={{
-                        margin: 0,
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                        fontSize: 13,
-                        fontFamily: "inherit",
-                      }}
-                    >
-                      {formatPayload("user", userEv.payload)}
-                    </pre>
-                  </div>
-                  {/* 阶段三批次3(T3.4): 编辑重发(最后一条 user 消息, 非生成中) */}
-                  {!isGenerating &&
-                    turnGroups.length > 0 &&
-                    turn === turnGroups[turnGroups.length - 1][0] && (
-                      <button
-                        onClick={() => {
-                          const orig = formatPayload("user", userEv.payload);
-                          setEditingOriginal(orig);
-                          setInput(orig);
-                          inputRef.current?.focus();
-                        }}
-                        title="编辑并重发(自动沉淀纠正记忆)"
-                        style={{
-                          alignSelf: "center",
-                          marginLeft: 6,
-                          padding: "4px 8px",
-                          fontSize: 11,
-                          borderRadius: 10,
-                          border: "1px solid var(--border)",
-                          background: "var(--panel-bg)",
-                          color: "var(--text-tertiary)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        ✎ 编辑
-                      </button>
-                    )}
-                </div>
-              )}
-
-              {userEv && (
-                <div style={{ display: "flex", gap: 10 }}>
-                  {/* 2026-08-08: 助手头像统一桌面图标原图 + 名字(场景会话=场景名, 否则主智能体名) */}
-                  <RobotAvatar size={32} style={{ marginTop: 2 }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>
-                      {renderChatAssistantName()}
-                    </div>
-
-                    {isPending && !thinkingEv && (
-                      <div style={{ color: "var(--text-tertiary)", fontSize: 13 }}>
-                        💭 思考中…
-                      </div>
-                    )}
-
-                    {thinkingEv && (
-                      <div
-                        style={{
-                          border: "1px solid var(--border-color)",
-                          borderRadius: 10,
-                          marginBottom: 8,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <button
-                          onClick={() => toggleThinking(turn)}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 6,
-                            width: "100%",
-                            padding: "6px 10px",
-                            border: "none",
-                          background: "var(--surface-1)",
-                          cursor: "pointer",
-                          fontSize: 12,
-                          color: "var(--text-secondary)",
-                            textAlign: "left",
-                          }}
-                        >
-                          <span style={{ fontSize: 11 }}>{thinkingOpen ? "▾" : "▸"}</span>
-                          {thinkingOpen ? "收起推理过程" : "查看推理过程"}
-                          {!thinkingOpen && (
-                            <span style={{ color: "var(--text-tertiary)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {thinkingText.slice(0, 60)}
-                            </span>
-                          )}
-                        </button>
-                        {thinkingOpen && (
-                          <pre
-                            style={{
-                              margin: 0,
-                              padding: "8px 12px",
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              fontSize: 12,
-                              color: "var(--text-secondary)",
-                              maxHeight: 260,
-                              overflowY: "auto",
-                              // 2026-08-07: 去掉斜体(用户反馈)
-                            }}
-                          >
-                            {thinkingText || "（无推理内容）"}
-                          </pre>
-                        )}
-                      </div>
-                    )}
-
-                    {toolEvents.length > 0 &&
-                      toolEvents.map((te) => {
-                        const text = formatPayload(te.event_type, te.payload);
-                        const imagePaths =
-                          te.event_type === "tool_result"
-                            ? extractImagePaths(text)
-                            : [];
-                        // V1.2-6.3: 工具耗时展示
-                        const durationMs =
-                          te.event_type === "tool_result"
-                            ? (te.payload.duration_ms as number | undefined)
-                            : undefined;
-                        return (
-                          <div key={te.id} style={{ marginBottom: 6 }}>
-                            <div
-                              style={{
-                                backgroundColor:
-                                  te.event_type === "tool_call" ? "var(--tool-call-bg)" : "var(--tool-result-bg)",
-                                borderRadius: 10,
-                                padding: "6px 10px",
-                                fontSize: 12,
-                                color: "var(--text-secondary)",
-                              }}
-                            >
-                              {te.event_type === "tool_call" ? (
-                                <>🔧 {text}</>
-                              ) : (
-                                <>✅ {text.slice(0, 120)}{text.length > 120 ? "…" : ""}
-                                  {durationMs != null ? ` · ${durationMs}ms` : ""}
-                                </>
-                              )}
-                            </div>
-                            {imagePaths.length > 0 && (
-                              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
-                                {imagePaths.map((p) => (
-                                  <img
-                                    key={p}
-                                    src={imagePathToUrl(p)}
-                                    alt={p}
-                                    style={{ maxWidth: "100%", borderRadius: 10, border: "1px solid var(--border-color)" }}
-                                  />
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-
-                    {/* V2 P1: 沙箱终端流式输出 */}
-                    {sandboxText && (
-                      <div
-                        style={{
-                          marginBottom: 8,
-                          border: "1px solid var(--border-color)",
-                          borderRadius: 10,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          style={{
-                            padding: "4px 10px",
-                            background: "var(--code-bg)",
-                            fontSize: 11,
-                            fontWeight: 600,
-                            color: "#64748b",
-                            borderBottom: "1px solid var(--border-color)",
-                          }}
-                        >
-                          🖥️ 沙箱输出
-                        </div>
-                        <pre
-                          style={{
-                            margin: 0,
-                            padding: "8px 12px",
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-all",
-                            fontFamily: "Consolas, 'Courier New', monospace",
-                            fontSize: 12,
-                            color: "#334155",
-                            maxHeight: 260,
-                            overflowY: "auto",
-                          }}
-                        >
-                          {sandboxText}
-                        </pre>
-                      </div>
-                    )}
-
-                    {/* V2 P1 + 阶段三批次1(B-8): 权限确认卡片(风险分级 + 来源解释) */}
-                    {confirmEvents.length > 0 &&
-                      confirmEvents.map((ce) => {
-                        const args = ce.payload.args_summary as Record<string, unknown> | undefined;
-                        const argsPreview = args
-                          ? JSON.stringify(args).slice(0, 200)
-                          : "";
-                        const risk = (ce.payload.risk_level as string) || "medium";
-                        const reason = (ce.payload.reason as string) || "";
-                        // 2026-08-15: 人性化描述(老事件无 display 时回退 message)
-                        const display = ce.payload.display as
-                          | { title?: string; summary?: string[] }
-                          | undefined;
-                        const riskColor =
-                          risk === "high" ? "#dc2626" : risk === "medium" ? "#d97706" : "#16a34a";
-                        const riskLabel =
-                          risk === "high" ? "高风险" : risk === "medium" ? "中风险" : "低风险";
-                        return (
-                          <div
-                            key={ce.id}
-                            style={{
-                              marginBottom: 8,
-                              border: "1px solid #fcd34d",
-                              borderRadius: 10,
-                              background: "var(--confirmation-bg)",
-                              padding: "10px 12px",
-                            }}
-                          >
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                              <span style={{ fontSize: 12, fontWeight: 600, color: "#92400e" }}>
-                                ⚠️ {display?.title ?? formatPayload("tool_confirmation_required", ce.payload)}
-                              </span>
-                              <span
-                                style={{
-                                  fontSize: 10,
-                                  fontWeight: 700,
-                                  color: "#fff",
-                                  background: riskColor,
-                                  borderRadius: 10,
-                                  padding: "1px 8px",
-                                }}
-                              >
-                                {riskLabel}
-                              </span>
-                            </div>
-                            {display?.summary && display.summary.length > 0 && (
-                              <div
-                                style={{
-                                  fontSize: 11,
-                                  color: "#92400e",
-                                  marginBottom: 4,
-                                  lineHeight: 1.7,
-                                }}
-                              >
-                                {display.summary.map((line, i) => (
-                                  <div key={i}>· {line}</div>
-                                ))}
-                              </div>
-                            )}
-                            {reason && (
-                              <div style={{ fontSize: 11, color: "#78350f", marginBottom: 4 }}>
-                                原因: {reason}
-                              </div>
-                            )}
-                            {argsPreview && (
-                              <details style={{ margin: "0 0 8px", fontSize: 11 }}>
-                                <summary style={{ cursor: "pointer", color: "#b45309" }}>
-                                  技术详情(原始参数)
-                                </summary>
-                                <pre
-                                  style={{
-                                    margin: "6px 0 0",
-                                    whiteSpace: "pre-wrap",
-                                    wordBreak: "break-all",
-                                    fontSize: 11,
-                                    color: "#b45309",
-                                    fontFamily: "Consolas, monospace",
-                                  }}
-                                >
-                                  {argsPreview}
-                                </pre>
-                              </details>
-                            )}
-                            {confirmResultEv ? (
-                              <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                                {formatPayload("tool_confirmation_result", confirmResultEv.payload)}
-                              </div>
-                            ) : (
-                              <div style={{ display: "flex", gap: 8 }}>
-                                <button
-                                  onClick={() => {
-                                    sendWs({
-                                      type: "tool_confirmation",
-                                      session_id: realSessionId ?? sessionId,
-                                      confirmation_id: ce.payload.confirmation_id,
-                                      approved: true,
-                                    });
-                                  }}
-                                  style={{
-                                    background: "#16a34a",
-                                    color: "#fff",
-                                    border: "none",
-                                    borderRadius: 10,
-                                    padding: "4px 14px",
-                                    fontSize: 12,
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  同意执行
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    sendWs({
-                                      type: "tool_confirmation",
-                                      session_id: realSessionId ?? sessionId,
-                                      confirmation_id: ce.payload.confirmation_id,
-                                      approved: false,
-                                    });
-                                  }}
-                                  style={{
-                                    background: "#dc2626",
-                                    color: "#fff",
-                                    border: "none",
-                                    borderRadius: 10,
-                                    padding: "4px 14px",
-                                    fontSize: 12,
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  拒绝
-                                </button>
-                                {/* 阶段三批次4(B-14): 稍后决定(挂起确认, 不立即拒绝) */}
-                                <button
-                                  onClick={() => {
-                                    sendWs({
-                                      type: "approval_defer",
-                                      session_id: realSessionId ?? sessionId,
-                                      confirmation_id: ce.payload.confirmation_id,
-                                    });
-                                  }}
-                                  title="60 秒后不自动拒绝, 挂起等待后续决定"
-                                  style={{
-                                    background: "#6d28d9",
-                                    color: "#fff",
-                                    border: "none",
-                                    borderRadius: 10,
-                                    padding: "4px 14px",
-                                    fontSize: 12,
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  稍后决定
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-
-                    {finalText && !deletedTurns.has(turn) ? (
-                      // 0.5.0 M1(2026-08-08 修复): 头像与名字由 userEv 外层统一渲染一次,
-                      // finalText 区只渲染气泡容器, 避免同一回复出现两次头像
-                      <div
-                        style={{
-                          backgroundColor: "var(--chat-ai-bg)",
-                          border: "1px solid var(--chat-ai-border)",
-                          borderRadius: 12,
-                          padding: "10px 14px",
-                          color: "var(--text-primary)",
-                        }}
-                      >
-                        <pre
-                          style={{
-                            margin: 0,
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
-                            fontSize: 13,
-                            fontFamily: "inherit",
-                            lineHeight: 1.6,
-                          }}
-                        >
-                          {finalText}
-                        </pre>
-                        {/* V1.1-3.3 消息操作条(非生成中显示) */}
-                        {!isGenerating && (
-                          <div style={{ display: "flex", gap: 4, marginTop: 6, marginLeft: 0, flexWrap: "wrap" }}>
-                            <MsgActionBtn label="🔄 重生成" title="重新生成这条回复" onClick={() => regenerateTurn(turn)} />
-                            <MsgActionBtn
-                              label={starredTurns.has(turn) ? "★ 已收藏" : "☆ 收藏"}
-                              title="收藏/取消收藏"
-                              onClick={() => void toggleStar(turn)}
-                            />
-                            <MsgActionBtn label="🗑 删除" title="软删除这条回复" danger onClick={() => void deleteTurnMessage(turn)} />
-                            <MsgActionBtn label="📋 复制" title="复制回复内容" onClick={() => void copyText(finalText)} />
-                            {finalText.includes("```") && (
-                              <MsgActionBtn label="📄 复制代码" title="提取代码块并复制" onClick={() => void copyCodeBlocks(finalText)} />
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    ) : finalText && deletedTurns.has(turn) ? (
-                      <div style={{ fontSize: 12, color: "var(--text-tertiary)", fontStyle: "italic" }}>
-                        此回复已删除
-                      </div>
-                    ) : null}
-
-                    {errorEv && (
-                      <div
-                        style={{
-                          backgroundColor: "var(--error-bg)",
-                          borderRadius: 10,
-                          padding: "8px 12px",
-                          fontSize: 13,
-                          color:
-                            errorCategoryColor(errorEv.payload?.message) ??
-                            "var(--danger-text)",
-                        }}
-                      >
-                        ❌ {formatPayload("error", errorEv.payload)}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {turnGroups.map(([turn, g]) => (
+          // P3-2 批次2(2026-08-17): 消息渲染拆分为 TurnCard 组件
+          <TurnCard
+            key={turn}
+            turn={turn}
+            g={g}
+            isLast={turn === turnGroups[turnGroups.length - 1][0]}
+            isGenerating={isGenerating}
+            thinkingOpen={openThinkingTurns.has(turn)}
+            onToggleThinking={() => toggleThinking(turn)}
+            deleted={deletedTurns.has(turn)}
+            starred={starredTurns.has(turn)}
+            assistantName={renderChatAssistantName()}
+            onRegenerate={() => regenerateTurn(turn)}
+            onToggleStar={() => void toggleStar(turn)}
+            onRequestDelete={() => requestDeleteTurn(turn)}
+            onCopy={(t) => void copyText(t)}
+            onCopyCode={(t) => void copyCodeBlocks(t)}
+            onEditOriginal={(content) => {
+              setEditingOriginal(content);
+              setInput(content);
+              inputRef.current?.focus();
+            }}
+            onConfirmAction={(id, approved) =>
+              sendWs({
+                type: "tool_confirmation",
+                session_id: realSessionId ?? sessionId,
+                confirmation_id: id,
+                approved,
+              })
+            }
+            onDeferAction={(id) =>
+              sendWs({
+                type: "approval_defer",
+                session_id: realSessionId ?? sessionId,
+                confirmation_id: id,
+              })
+            }
+          />
+        ))}
 
         {/* V1.5 项-1(ADR-012 §3.4 M3): 子任务卡片面板(委派状态可视化) */}
         <SubagentPanel
@@ -3292,6 +3077,118 @@ export default function App(): JSX.Element {
           </div>
         )}
 
+        {/* 2026-08-17(蒋先生反馈): 优化审批面板移到输入框上方 + 默认折叠 ——
+            原在对话区顶部, 看完对话需上翻很多; 现固定在输入框上方(看完对话
+            自然看到), 无待审批时仅一行低调横幅, 有待审批时自动展开 */}
+        {activeSlot === 0 && (
+          <div
+            style={{
+              marginBottom: 10, borderRadius: 12,
+              border: optimPending > 0
+                ? "1px solid #e6a23c"
+                : "1px solid var(--border-color)",
+              background: "var(--panel-bg-solid)",
+              overflow: "hidden",
+              // 2026-08-18(无涯 #3 补强): 防 flex 压缩 —— 窗口高度不足时
+              // 面板被压缩会把内部滚动条裁出可视区(用户反馈"无滚动条"的另一诱因)
+              flexShrink: 0,
+            }}
+          >
+            <div
+              onClick={() => setOptimOpen((v) => !v)}
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "8px 12px", cursor: "pointer", userSelect: "none",
+              }}
+            >
+              <span className="fs-13 fw-600">
+                ⚡ 优化审批
+              </span>
+              <span className="fs-11 text-tertiary">
+                {optimBusy
+                  ? "加载中…"
+                  : optimError
+                    ? "加载失败"
+                    : optimPending > 0
+                      ? `${optimPending} 条待审批`
+                      : "暂无待审批"}
+              </span>
+              <span className="flex-1" />
+              <span className="fs-11 text-tertiary">
+                {optimOpen ? "▾ 收起" : "▸ 展开"}
+              </span>
+            </div>
+            {optimOpen && (
+              // 2026-08-18(无涯 #3 修复): maxHeight+overflowY auto —— 长提案
+              // 内容超出时滚动条收进面板内部(原无 maxHeight, 外层 overflow:hidden
+              // 直接裁剪超长内容, 按钮不可达)
+              <div style={{ padding: "0 12px 12px", maxHeight: 320, overflowY: "auto" }}>
+                {optimError ? (
+                  <div style={{ fontSize: 12, color: "#e5484d" }}>
+                    加载失败(检查后端是否运行/管理令牌是否已配置)。
+                  </div>
+                ) : optimPending === 0 ? (
+                  <div className="fs-12 text-tertiary">
+                    暂无待审批的优化建议。可让无涯分析系统状态后提交。
+                  </div>
+                ) : (
+                  optimItems
+                    .filter((i) => i.status === "pending")
+                    .map((item) => (
+                      <div
+                        key={item.id}
+                        style={{
+                          padding: "8px 10px", marginBottom: 8, borderRadius: 8,
+                          border: "1px solid var(--border-color)",
+                          background: "var(--panel-bg)",
+                          fontSize: 12,
+                        }}
+                      >
+                        <div className="flex-center gap-8">
+                          <span style={{ fontWeight: 600 }}>#{item.id}</span>
+                          <span style={{
+                            fontSize: 10, padding: "1px 6px", borderRadius: 6,
+                            background: "rgba(139,92,246,0.12)", color: "var(--accent-soft-text)",
+                          }}>
+                            {item.category || "performance"}
+                          </span>
+                          <span style={{ flex: 1, color: "var(--text-tertiary)", fontSize: 11 }}>
+                            {item.ts ? new Date(item.ts).toLocaleString("zh-CN") : ""}
+                          </span>
+                        </div>
+                        <div style={{ marginTop: 4, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                          {item.proposal}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                          <button
+                            onClick={() => void reviewOptim(item.id, "approved")}
+                            style={{
+                              fontSize: 11, padding: "3px 12px", borderRadius: 8,
+                              border: "none", background: "#34c759", color: "#fff",
+                              cursor: "pointer", fontWeight: 600,
+                            }}
+                          >
+                            ✓ 批准执行
+                          </button>
+                          <button
+                            onClick={() => void reviewOptim(item.id, "rejected")}
+                            style={{
+                              fontSize: 11, padding: "3px 12px", borderRadius: 8,
+                              border: "none", background: "var(--border-color)",
+                              color: "var(--text-secondary)", cursor: "pointer",
+                            }}
+                          >
+                            ✕ 拒绝
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* 消息输入框(2026-08-08 无框化: 无边框 + 透明背景, 融入输入卡片) */}
         {/* 2026-08-12 Phase 3: / 召唤技能浮层(absolute 悬浮输入区上方); 包裹 div
             承担原 textarea 的 flex:1 布局, textarea 内部保持自适应 */}
@@ -3332,7 +3229,7 @@ export default function App(): JSX.Element {
                   }}
                 >
                   <span style={{ flexShrink: 0, fontSize: 14 }}>{s.display_name || s.name}</span>
-                  <span style={{ flex: 1, minWidth: 0 }}>
+                  <span className="flex-1-min0">
                     <span style={{ display: "block", fontSize: 11, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {s.description || s.name}
                     </span>
@@ -3391,7 +3288,14 @@ export default function App(): JSX.Element {
                 sendMessage();
               }
             }}
-            placeholder={activeSlot === 0 && !activeSkill ? `向${agentName || "主智能体"}提问(如: 查看系统性能)…` : "输入消息,Enter 发送,Shift+Enter 换行,输入 / 可召唤技能"}
+            placeholder={
+              // P0-1(2026-08-17): 断线/重连时明确提示原因, 而非让用户从按钮变灰推断
+              status !== "connected"
+                ? "连接已断开，正在重连…"
+                : activeSlot === 0 && !activeSkill
+                  ? `向${agentName || "主智能体"}提问(如: 查看系统性能)…`
+                  : "输入消息,Enter 发送,Shift+Enter 换行,输入 / 可召唤技能"
+            }
             rows={2}
             style={{
               flex: 1,
@@ -3457,7 +3361,7 @@ export default function App(): JSX.Element {
                   zIndex: 60,
                 }}
               >
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>工作区设置</div>
+                <div style={{ fontSize: "var(--fs-body)", fontWeight: 600, marginBottom: 4 }}>工作区设置</div>
                 <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8 }}>
                   画地为牢: agent 操作范围限定在该目录(留空 = 默认工作目录)
                 </div>
@@ -3577,29 +3481,14 @@ export default function App(): JSX.Element {
                 { icon: "📎", label: "添加文件", onClick: () => { fileInputRef.current?.click(); setPlusMenuOpen(false); } },
                 { icon: "📋", label: "提示词模板", onClick: () => { setTemplatesOpen(true); setPlusMenuOpen(false); } },
               ].map((item) => (
+                // P1-2(2026-08-17): JS hover → CSS 伪类(style="pop-menu-item")
                 <button
                   key={item.label}
                   onClick={item.onClick}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 10,
-                    padding: "10px 12px",
-                    borderRadius: 8,
-                    border: "none",
-                    background: "transparent",
-                    cursor: "pointer",
-                    fontSize: 13,
-                    color: "var(--text-primary)",
-                    textAlign: "left",
-                    transition: "background 0.15s ease",
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-2)")}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                  className="pop-menu-item"
                 >
-                  <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ width: 18, textAlign: "center" }}>{item.icon}</span>
+                  <span className="flex-center gap-10">
+                    <span className="icon-cell">{item.icon}</span>
                     <span>{item.label}</span>
                   </span>
                   <span style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1 }}>›</span>
@@ -3638,7 +3527,7 @@ export default function App(): JSX.Element {
           ))}
         </select>
 
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         <button
           onClick={isGenerating ? stopGeneration : sendMessage}
           disabled={!isGenerating && (status !== "connected" || !input.trim())}
@@ -3667,16 +3556,23 @@ export default function App(): JSX.Element {
       </div>{/* 统一输入卡片闭合 */}
     </div>
   )}
-          {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} theme={theme} />}
-          {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
-          {view === "memory" && (
-            <MemoryView
-              sessionId={realSessionId ?? sessionId}
-              // V1.5 规划项-8: 记忆来源跳转(切换会话, 有 skill 直达对话视图)
-              onOpenSession={(sid) => handleSwitchSession(sid)}
-            />
-          )}
-          {view === "agents" && <AgentLibraryView onActivate={(skill) => void handlePickMode(skill)} />}
+          {/* P3-3(2026-08-17): 视图懒加载 Suspense 边界 */}
+          <Suspense
+            fallback={
+              <div style={{ padding: 24, fontSize: 13, color: "var(--text-tertiary)" }}>加载中…</div>
+            }
+          >
+            {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} theme={theme} />}
+            {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
+            {view === "memory" && (
+              <MemoryView
+                sessionId={realSessionId ?? sessionId}
+                // V1.5 规划项-8: 记忆来源跳转(切换会话, 有 skill 直达对话视图)
+                onOpenSession={(sid) => handleSwitchSession(sid)}
+              />
+            )}
+            {view === "agents" && <AgentLibraryView onActivate={(skill) => void handlePickMode(skill)} />}
+          </Suspense>
         </main>
 
         {/* V1.1-3.5 会话设置弹窗(记忆开关/上下文截断/系统提示词) */}
@@ -3707,20 +3603,20 @@ export default function App(): JSX.Element {
               }}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-                <span style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)" }}>
+                <span style={{ fontSize: "var(--fs-title)", fontWeight: 700, color: "var(--text-primary)" }}>
                   ⚙ 会话设置
                 </span>
                 <button
                   onClick={() => setSettingsOpen(false)}
-                  style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+                  className="icon-btn-lg"
                 >
                   ×
                 </button>
               </div>
 
               {/* 记忆开关 */}
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>会话记忆</div>
+              <div className="mb-16">
+                <div className="subhead">会话记忆</div>
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
                   <input type="checkbox" checked={memoryEnabled} onChange={() => void toggleMemory()} />
                   开启记忆(自动提取并注入长期记忆)
@@ -3728,8 +3624,8 @@ export default function App(): JSX.Element {
               </div>
 
               {/* V1.3-7.2 自动执行 */}
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>自动执行(工作流)</div>
+              <div className="mb-16">
+                <div className="subhead">自动执行(工作流)</div>
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
                   <input
                     type="checkbox"
@@ -3739,7 +3635,7 @@ export default function App(): JSX.Element {
                   开启后,发一条消息自动连续执行多轮(无需逐条追问)
                 </label>
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-                  <span style={{ fontSize: 12, color: "#64748b" }}>最多</span>
+                  <span className="fs-12 text-tertiary">最多</span>
                   <input
                     type="number"
                     min={1}
@@ -3752,7 +3648,7 @@ export default function App(): JSX.Element {
                       border: "1px solid var(--border-strong)", fontSize: 13,
                     }}
                   />
-                  <span style={{ fontSize: 12, color: "#64748b" }}>轮</span>
+                  <span className="fs-12 text-tertiary">轮</span>
                   <button
                     onClick={() => void saveAutoExec()}
                     style={{
@@ -3764,16 +3660,16 @@ export default function App(): JSX.Element {
                     保存
                   </button>
                 </div>
-                <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>
+                <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 6 }}>
                   每轮模型自动继续(直到任务完成或达到轮次上限); 可在任意时刻点"停止"
                 </div>
               </div>
 
               {/* 上下文截断 */}
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>上下文截断</div>
+              <div className="mb-16">
+                <div className="subhead">上下文截断</div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontSize: 12, color: "#64748b" }}>保留 0 ~</span>
+                  <span className="fs-12 text-tertiary">保留 0 ~</span>
                   <input
                     type="number"
                     min={0}
@@ -3784,7 +3680,7 @@ export default function App(): JSX.Element {
                       border: "1px solid var(--border-strong)", fontSize: 13,
                     }}
                   />
-                  <span style={{ fontSize: 12, color: "#64748b" }}>轮</span>
+                  <span className="fs-12 text-tertiary">轮</span>
                   <button
                     onClick={() => void doTruncate()}
                     style={{
@@ -3796,20 +3692,21 @@ export default function App(): JSX.Element {
                     截断
                   </button>
                 </div>
-                <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>
+                <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 6 }}>
                   之后的对话将移出模型上下文(软删除, 可从会话导出追溯)
                 </div>
               </div>
 
               {/* 系统提示词 */}
               <div style={{ marginBottom: 8 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>系统提示词</div>
+                <div className="subhead">系统提示词</div>
                 <button
                   onClick={() => void loadSystemPrompt()}
                   style={{
                     fontSize: 12, padding: "5px 14px", borderRadius: 10,
                     border: "1px solid var(--border-strong)", background: "var(--code-bg)",
-                    color: "#334155", cursor: "pointer", marginBottom: 8,
+                    // 2026-08-17: 硬编码深色 → 语义 token(暗色可读)
+                    color: "var(--text-primary)", cursor: "pointer", marginBottom: 8,
                   }}
                 >
                   {systemPromptText === null ? "查看完整系统提示词" : "重新加载"}
@@ -3822,7 +3719,7 @@ export default function App(): JSX.Element {
                       width: "100%", boxSizing: "border-box", minHeight: 180,
                       resize: "vertical", fontSize: 12, fontFamily: "Consolas, monospace",
                       border: "1px solid var(--border-color)", borderRadius: 10, padding: 10,
-                      color: "#334155", background: "var(--code-bg)",
+                      color: "var(--text-primary)", background: "var(--code-bg)",
                     }}
                   />
                 )}
@@ -3867,7 +3764,7 @@ export default function App(): JSX.Element {
                 <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)" }}>📋 提示词模板</span>
                 <button
                   onClick={() => setTemplatesOpen(false)}
-                  style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+                  className="icon-btn-lg"
                 >
                   ×
                 </button>
@@ -3904,7 +3801,7 @@ export default function App(): JSX.Element {
 
               {/* 模板列表 */}
               {templates.length === 0 && (
-                <div style={{ fontSize: 12, color: "#94a3b8", textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", padding: "16px 0" }}>
                   暂无模板。在输入区写好内容后点"+ 保存当前输入"。
                 </div>
               )}
@@ -3928,7 +3825,7 @@ export default function App(): JSX.Element {
                       }}
                     >
                       <div style={{ fontWeight: 600 }}>{t.name}</div>
-                      <div style={{ fontSize: 10, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <div style={{ fontSize: 10, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {t.content}
                       </div>
                     </button>
@@ -3973,8 +3870,8 @@ export default function App(): JSX.Element {
               }}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-                <span style={{ fontSize: 16, fontWeight: 700 }}>
-                  📋 任务执行状态
+                <span style={{ fontSize: "var(--fs-title)", fontWeight: 700 }}>
+                  {ICON_TASKS} 任务执行状态
                   {tasksData && (
                     <span
                       style={{
@@ -4002,7 +3899,7 @@ export default function App(): JSX.Element {
                 </span>
                 <button
                   onClick={() => setTasksOpen(false)}
-                  style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+                  className="icon-btn-lg"
                 >
                   ×
                 </button>
@@ -4060,10 +3957,10 @@ export default function App(): JSX.Element {
                   }}
                 >
                   {eventsLoading && (
-                    <div style={{ fontSize: 12, color: "#94a3b8", padding: 8 }}>加载中…</div>
+                    <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: 8 }}>加载中…</div>
                   )}
                   {!eventsLoading && (!eventsLog || eventsLog.length === 0) && (
-                    <div style={{ fontSize: 12, color: "#94a3b8", padding: 8 }}>暂无事件记录</div>
+                    <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: 8 }}>暂无事件记录</div>
                   )}
                   {(eventsLog ?? []).map((ev) => (
                     <div
@@ -4081,7 +3978,7 @@ export default function App(): JSX.Element {
                         style={{
                           flexShrink: 0,
                           width: 64,
-                          color: "#94a3b8",
+                          color: "var(--text-tertiary)",
                           fontVariantNumeric: "tabular-nums",
                         }}
                       >
@@ -4110,7 +4007,8 @@ export default function App(): JSX.Element {
                           overflow: "hidden",
                           textOverflow: "ellipsis",
                           whiteSpace: "nowrap",
-                          color: "#475569",
+                          // 2026-08-17: 硬编码深色 → 语义 token
+                          color: "var(--text-secondary)",
                         }}
                         title={ev.summary}
                       >
@@ -4138,7 +4036,7 @@ export default function App(): JSX.Element {
                   }}
                 >
                   {diagBusy && (
-                    <div style={{ fontSize: 12, color: "#94a3b8" }}>加载中…</div>
+                    <div className="fs-12 text-tertiary">加载中…</div>
                   )}
                   {usageData && (
                     <div>
@@ -4155,12 +4053,12 @@ export default function App(): JSX.Element {
                           },
                         ].map((s) => (
                           <div key={s.label} style={{ background: "var(--panel-bg-solid)", borderRadius: 10, padding: "8px 10px" }}>
-                            <div style={{ fontSize: 10, color: "#94a3b8" }}>{s.label}</div>
-                            <div style={{ fontSize: 14, fontWeight: 700, color: "#334155" }}>{s.value}</div>
+                            <div className="fs-10 text-tertiary">{s.label}</div>
+                            <div style={{ fontSize: "var(--fs-subtitle)", fontWeight: 700, color: "var(--text-primary)" }}>{s.value}</div>
                           </div>
                         ))}
                       </div>
-                      <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 4 }}>
+                      <div style={{ fontSize: 10, color: "var(--text-tertiary)", marginTop: 4 }}>
                         输入 {usageData.input_tokens.toLocaleString()} · 输出 {usageData.output_tokens.toLocaleString()}
                       </div>
                     </div>
@@ -4189,29 +4087,29 @@ export default function App(): JSX.Element {
                         </div>
                       ))}
                       {(errorsData.top ?? []).length === 0 && (
-                        <div style={{ fontSize: 11, color: "#94a3b8" }}>暂无错误记录 🎉</div>
+                        <div className="fs-11 text-tertiary">暂无错误记录 🎉</div>
                       )}
                     </div>
                   )}
                   {!diagBusy && !usageData && !errorsData && (
-                    <div style={{ fontSize: 12, color: "#94a3b8" }}>暂无诊断数据</div>
+                    <div className="fs-12 text-tertiary">暂无诊断数据</div>
                   )}
                 </div>
               )}
 
               {!tasksData && !tasksLoading && (
-                <div style={{ fontSize: 12, color: "#94a3b8", padding: "20px 0", textAlign: "center" }}>
+                <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: "20px 0", textAlign: "center" }}>
                   暂无任务数据
                 </div>
               )}
 
               {tasksData && tasksData.total_turns === 0 && (
-                <div style={{ fontSize: 12, color: "#94a3b8", padding: "20px 0", textAlign: "center" }}>
+                <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: "20px 0", textAlign: "center" }}>
                   还没有执行轮次
                 </div>
               )}
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="flex-col gap-8">
                 {(tasksData?.turns ?? []).map((t) => {
                   const toolCalls = t.events.tool_call ?? 0;
                   const hasError = !!t.error;
@@ -4226,24 +4124,24 @@ export default function App(): JSX.Element {
                       }}
                     >
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 13, fontWeight: 700 }}>第 {t.turn} 轮</span>
+                        <span style={{ fontSize: "var(--fs-body)", fontWeight: 700 }}>第 {t.turn} 轮</span>
                         {toolCalls > 0 && (
-                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                          <span className="fs-11 text-tertiary">
                             🔧 工具调用 {toolCalls} 次
                           </span>
                         )}
                         {(t.events.thinking ?? 0) > 0 && (
-                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                          <span className="fs-11 text-tertiary">
                             💭 推理 {(t.events.thinking ?? 0)} 段
                           </span>
                         )}
                         {(t.events.tool_result ?? 0) > 0 && (
-                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                          <span className="fs-11 text-tertiary">
                             ✅ 结果 {(t.events.tool_result ?? 0)} 个
                           </span>
                         )}
                         {t.last_ts && (
-                          <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: "auto" }}>
+                          <span style={{ fontSize: 10, color: "var(--text-tertiary)", marginLeft: "auto" }}>
                             {new Date(t.last_ts).toLocaleTimeString()}
                           </span>
                         )}
@@ -4309,10 +4207,30 @@ export default function App(): JSX.Element {
                 const enabled = availableSkills.filter((s) => s.enabled);
                 const dsSkills = enabled.filter((s) => matches(s.model_scope));
                 const genSkills = enabled.filter((s) => !matches(s.model_scope));
-                const groups: { label: string; list: typeof enabled }[] = [];
+                // 2026-08-16(§14 场景归类): 当前场景允许的类目过滤 ——
+                // monitor(activeSlot 0)或场景技能由 scene_skills 常量决定;
+                // 未锁定/无配置 = 全部允许(向后兼容)。
+                const sceneKey =
+                  activeSlot === 0 && !activeSkill ? "monitor" : activeSkill;
+                const allowedCats =
+                  (sceneKey && SCENE_ALLOWED_CATEGORIES[sceneKey]) || null;
+                const inAllowed = (s: (typeof enabled)[number]): boolean =>
+                  !allowedCats ||
+                  allowedCats.includes((s.scenario ?? "").trim());
+                const groups: { label: string; list: typeof enabled; locked: boolean }[] = [];
                 if (dsSkills.length > 0)
-                  groups.push({ label: `🎯 当前模型专属 (${effectiveModel || "auto"})`, list: dsSkills });
-                if (genSkills.length > 0) groups.push({ label: "通用技能", list: genSkills });
+                  groups.push({
+                    label: `🎯 当前模型专属 (${effectiveModel || "auto"})`,
+                    list: dsSkills, locked: false,
+                  });
+                if (genSkills.length > 0) groups.push({ label: "通用技能", list: genSkills, locked: false });
+                // §14: 非当前场景类目技能单独分组(灰显, 不可勾选)
+                const lockedSkills = enabled.filter((s) => !inAllowed(s));
+                if (lockedSkills.length > 0)
+                  groups.push({
+                    label: `🔒 不属于当前场景 (${sceneDisplayName(sceneKey)})`,
+                    list: lockedSkills, locked: true,
+                  });
                 return groups.map((g) => (
                   <div key={g.label} style={{ marginBottom: 10 }}>
                     <div style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "4px 2px 6px" }}>
@@ -4321,6 +4239,7 @@ export default function App(): JSX.Element {
                     {g.list.map((s) => {
                       const isMain = activeSkill === s.name;
                       const checked = pickerSelected.includes(s.name);
+                      const locked = g.locked || !inAllowed(s);
                       return (
                         <label
                           key={s.name}
@@ -4329,15 +4248,17 @@ export default function App(): JSX.Element {
                             width: "100%", padding: "10px 14px", marginBottom: 8,
                             borderRadius: 10, border: "1px solid var(--border-strong)",
                             background: checked ? "rgba(139,92,246,0.08)" : "var(--panel-bg-solid)",
-                            fontSize: 14, cursor: isMain ? "default" : "pointer", textAlign: "left",
+                            fontSize: 14,
+                            cursor: isMain || locked ? "not-allowed" : "pointer",
+                            textAlign: "left", opacity: locked ? 0.5 : 1,
                           }}
                         >
                           <input
                             type="checkbox"
                             checked={checked}
-                            disabled={isMain}
+                            disabled={isMain || locked}
                             onChange={() => {
-                              if (isMain) return;
+                              if (isMain || locked) return;
                               setPickerSelected((prev) =>
                                 prev.includes(s.name)
                                   ? prev.filter((n) => n !== s.name)
@@ -4345,12 +4266,17 @@ export default function App(): JSX.Element {
                               );
                             }}
                           />
-                          <span style={{ flex: 1, minWidth: 0 }}>
+                          <span className="flex-1-min0">
                             <span style={{ display: "block", fontWeight: 600 }}>
                               {s.name}
                               {isMain && (
                                 <span style={{ fontSize: 10, marginLeft: 6, padding: "1px 6px", borderRadius: 8, background: "rgba(139,92,246,0.12)", color: "var(--accent-soft-text)" }}>
                                   主技能
+                                </span>
+                              )}
+                              {s.scenario && (
+                                <span style={{ fontSize: 10, marginLeft: 6, padding: "1px 6px", borderRadius: 8, background: "rgba(100,116,139,0.1)", color: "var(--text-tertiary)" }}>
+                                  {s.scenario}
                                 </span>
                               )}
                             </span>
@@ -4382,7 +4308,7 @@ export default function App(): JSX.Element {
                   style={{
                     flex: 1, padding: "8px", borderRadius: 10, border: "none",
                     background: "var(--gradient-indigo)", color: "var(--on-accent)",
-                    cursor: "pointer", fontSize: 13, fontWeight: 600,
+                    cursor: "pointer", fontSize: "var(--fs-body)", fontWeight: 600,
                   }}
                 >
                   挂载选中技能
@@ -4410,8 +4336,22 @@ export default function App(): JSX.Element {
               alignItems: "center",
               justifyContent: "center",
             }}
+            onClick={() => {
+              // 2026-08-16(蒋先生反馈"切换 LLM 后对话框锁定无法输入"):
+              // 确认弹窗残留(超时/断连未收到清除事件)会以全屏遮罩永久覆盖
+              // 输入区。点击遮罩背景 = 拒绝该确认并关闭(与"拒绝"按钮同语义,
+              // 后端 60s 超时自动拒绝兜底, 此处仅解 UI 锁死)。
+              sendWs({
+                type: "tool_confirmation",
+                session_id: pendingConfirm.session_id,
+                confirmation_id: pendingConfirm.confirmation_id,
+                approved: false,
+              });
+              setPendingConfirm(null);
+            }}
           >
             <div
+              onClick={(e) => e.stopPropagation()}
               style={{
                 width: 460,
                 maxWidth: "92vw",
@@ -4475,7 +4415,8 @@ export default function App(): JSX.Element {
                 <div
                   style={{
                     fontSize: 11,
-                    color: "#b45309",
+                    // 2026-08-17: 硬编码琥珀 → 语义 token
+                    color: "var(--warning-text)",
                     marginBottom: 4,
                   }}
                 >
@@ -4513,7 +4454,8 @@ export default function App(): JSX.Element {
                       whiteSpace: "pre-wrap",
                       wordBreak: "break-all",
                       fontSize: 11,
-                      color: "#b45309",
+                      // 2026-08-17: 硬编码琥珀 → 语义 token(亮暗双值)
+                      color: "var(--warning-text)",
                       fontFamily: "Consolas, monospace",
                       background: "var(--panel-bg-hover)",
                       borderRadius: 8,
@@ -4582,6 +4524,74 @@ export default function App(): JSX.Element {
             </div>
           </div>
         )}
+
+        {/* P0-3(2026-08-17): 全局 Toast 通知(右上角, 3s 自动消失) */}
+        <ToastHost />
+
+        {/* P0-3(2026-08-17): 玻璃确认弹层(替代 window.confirm) */}
+        <ConfirmDialog
+          open={closeConfirmOpen}
+          title="关闭当前对话"
+          body="将归档至历史任务, 可随时恢复。"
+          confirmText="关闭"
+          danger
+          onConfirm={() => {
+            setCloseConfirmOpen(false);
+            closeWindow(activeSlot);
+          }}
+          onCancel={() => setCloseConfirmOpen(false)}
+        />
+        <ConfirmDialog
+          open={deleteTurnConfirm !== null}
+          title="删除这条回复?"
+          body="软删除, 不影响会话其余内容。"
+          confirmText="删除"
+          danger
+          onConfirm={() => {
+            const turn = deleteTurnConfirm;
+            setDeleteTurnConfirm(null);
+            if (turn !== null) void deleteTurnMessage(turn);
+          }}
+          onCancel={() => setDeleteTurnConfirm(null)}
+        />
+        <ConfirmDialog
+          open={truncateConfirm !== null}
+          title="截断上下文"
+          body={
+            truncateConfirm !== null
+              ? `保留 0~${truncateConfirm} 轮, 之后的对话将被移出上下文(可从会话导出追溯)。确定?`
+              : ""
+          }
+          confirmText="截断"
+          danger
+          onConfirm={() => {
+            const afterTurn = truncateConfirm;
+            setTruncateConfirm(null);
+            if (afterTurn !== null) void doTruncateConfirmed(afterTurn);
+          }}
+          onCancel={() => setTruncateConfirm(null)}
+        />
+        <ConfirmDialog
+          open={iterLimitConfirm !== null}
+          title="已达步数上限"
+          body={
+            iterLimitConfirm !== null
+              ? `本轮已达步数上限(${iterLimitConfirm.used}/${iterLimitConfirm.max} 步)。\n\n长任务可继续执行(每次扩展 10 步)。是否继续?`
+              : ""
+          }
+          confirmText="继续执行"
+          cancelText="停止"
+          onConfirm={() => {
+            const c = iterLimitConfirm;
+            setIterLimitConfirm(null);
+            if (c) sendWs({ type: "continue_iteration", session_id: c.sid });
+          }}
+          onCancel={() => {
+            const c = iterLimitConfirm;
+            setIterLimitConfirm(null);
+            if (c) sendWs({ type: "stop_iteration", session_id: c.sid });
+          }}
+        />
       </div>
     </div>
   );

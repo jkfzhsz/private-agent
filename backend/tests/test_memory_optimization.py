@@ -122,9 +122,15 @@ async def test_evict_archives_before_deactivate(conn):
     """archive_before_evict=True: 驱逐前摘要入 archive, 原记忆 deactivate。"""
     repo = MemoriesRepo(conn)
     # 低重要性 + 超期 → 触发 deactivate_expired
+    # 2026-08-16: last_accessed_at 显式设 2 天前 —— 原依赖 now() 秒级竞态
+    # (全量回归插入与驱逐同秒时 last_accessed_at < cutoff 不成立 → evicted=0,
+    # 单跑有秒级间隔所以通过)。显式过去时间消除竞态。
+    from datetime import datetime, timedelta, timezone
+
     await repo.insert(Memory(
         type="fact", content="很久以前的一条低价值记忆内容", importance=0.1,
         scope="global", source_session_id=None,
+        last_accessed_at=datetime.now(timezone.utc) - timedelta(days=2),
     ))
     mgr = MemoryManager(
         memories_repo=repo,

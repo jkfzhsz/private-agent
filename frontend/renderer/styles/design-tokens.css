@@ -6,6 +6,17 @@
   --text-secondary: #64748b;
   --text-tertiary: #94a3b8;
 
+  /* P2-3(2026-08-17): 排版阶梯 —— 统一标题/正文/辅助字号层级(审计 V4)
+   * hero: 页面大标题 / title: 区块标题 / subtitle: 小节标题 /
+   * body: 正文 / caption: 辅助 / micro: 角标 / tiny: 最小 */
+  --fs-hero: 20px;
+  --fs-title: 16px;
+  --fs-subtitle: 14px;
+  --fs-body: 13px;
+  --fs-caption: 12px;
+  --fs-micro: 11px;
+  --fs-tiny: 10px;
+
   /* 磨砂玻璃 */
   --glass-bg: rgba(255, 255, 255, 0.55);
   --glass-border: rgba(255, 255, 255, 0.7);
@@ -63,6 +74,33 @@
   --neutral-bg: #f1f5f9;
   --neutral-text: #64748b;
 
+  /* P0-2(2026-08-17): 事件标签底色 token(原 EVENT_STYLES 硬编码 hex, 暗色不随主题) */
+  --event-user-bg: #dbeafe;
+  --event-thinking-bg: #f5f5f5;
+  --event-tool_call-bg: #e3f2fd;
+  --event-tool_result-bg: #e8f5e9;
+  --event-delta-bg: #e8eaf6;
+  --event-final-bg: #e8eaf6;
+  --event-error-bg: #ffebee;
+  --event-sandbox_output-bg: #f1f5f9;
+  --event-tool_confirmation_required-bg: #fef3c7;
+  --event-tool_confirmation_result-bg: #f3e8ff;
+  --event-turn_paused-bg: #fff3e0;
+  --event-turn_resumed-bg: #e8f5e9;
+  --event-iteration_limit_reached-bg: #fef3c7;
+
+  /* P0-2(2026-08-17): 子代理状态卡底色/文字 token(SubagentPanel, 原硬编码同病) */
+  --subagent-pending-bg: #e2e8f0;
+  --subagent-pending-color: #475569;
+  --subagent-running-bg: #dbeafe;
+  --subagent-running-color: #1d4ed8;
+  --subagent-succeeded-bg: #d1fae5;
+  --subagent-succeeded-color: #047857;
+  --subagent-failed-bg: #fee2e2;
+  --subagent-failed-color: #b91c1c;
+  --subagent-cancelled-bg: #e2e8f0;
+  --subagent-cancelled-color: #64748b;
+
   /* 液体 Blob 调色盘(§2.3) */
   --blob-1: 168, 216, 255; /* Sky Blue */
   --blob-2: 147, 197, 253; /* Blue */
@@ -84,6 +122,200 @@
 
   /* 动效(§8.1) */
   --transition-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* P0-1(2026-08-17): 连接状态点脉冲(重连中黄点呼吸) */
+@keyframes status-pulse {
+  0% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* P0-3(2026-08-17): Toast 右上角滑入 */
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * P1-2(2026-08-17): 全局交互三态 —— active/focus-visible + 按钮 hover 收敛
+ * 审计 I4: JS onMouseEnter 改样式 → CSS 伪类统一; 补齐 :active 按下态与
+ * :focus-visible 键盘焦点态(此前键盘导航者看不到焦点位置)。
+ * ══════════════════════════════════════════════════════════════════════ */
+button:active {
+  transform: scale(0.98);
+}
+:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.6);
+  outline-offset: 2px;
+}
+
+/* 消息操作条按钮(原 MsgActionBtn JS hover + 硬编码色) */
+.msg-action-btn {
+  font-size: 11px;
+  border: 1px solid var(--border-color);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border-radius: 10px;
+  padding: 3px 10px;
+  cursor: pointer;
+  line-height: 1.5;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.msg-action-btn:hover {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+.msg-action-btn.danger {
+  color: var(--danger-text);
+}
+.msg-action-btn.danger:hover {
+  background: var(--error-bg);
+  color: var(--danger-text);
+}
+[data-theme="dark"] .msg-action-btn:hover {
+  background: rgba(49, 46, 129, 0.4);
+  color: #a5b4fc;
+}
+[data-theme="dark"] .msg-action-btn.danger:hover {
+  background: rgba(127, 29, 29, 0.4);
+}
+
+/* 侧边栏行内操作按钮(原 ActionBtn JS hover 改色) */
+.icon-action-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.icon-action-btn:hover {
+  color: var(--text-primary);
+}
+.icon-action-btn.danger:hover {
+  color: var(--danger-text);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * P2-4(2026-08-17): 窄窗适配 —— 最小窗口 960px 下的布局收窄
+ * 审计 A1: 设置页 sidebar 固定 224px, 窄窗下挤压内容区; 首页模式卡
+ * 3 列在窄窗下每卡过窄。媒体查询按视口收窄, 视觉零回归(≥1280px 不变)。
+ * ══════════════════════════════════════════════════════════════════════ */
+@media (max-width: 1180px) {
+  .settings-sidebar {
+    width: 184px;
+  }
+  .mode-card {
+    padding: 12px 14px;
+    gap: 8px;
+  }
+}
+@media (max-width: 1040px) {
+  .settings-sidebar {
+    width: 160px;
+  }
+}
+
+/* 危险 hover 图标按钮(记忆删除等: 常态 tertiary, hover 转红) */
+.danger-hover-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.danger-hover-btn:hover {
+  color: var(--danger-text);
+}
+
+/* 弹层菜单项(原 App plus 菜单 JS hover) */
+.pop-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.pop-menu-item:hover {
+  background: var(--surface-2);
+}
+
+/* P1-2: 侧边栏历史记录 hover 高亮(原 JS 改背景 rgba(139,92,246,0.08)) */
+.hover-highlight {
+  transition: background 0.15s ease;
+}
+.hover-highlight:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+
+/* P1-2: 首页三场景模式卡 hover 位移(原 JS onMouseEnter 改 transform) */
+.mode-card {
+  transition: transform 0.25s var(--transition-smooth), box-shadow 0.25s var(--transition-smooth);
+}
+.mode-card:hover {
+  transform: translateY(-2px);
+}
+.mode-card:active {
+  transform: translateY(0) scale(0.98);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * P2-1(2026-08-17 批次 A): 语义 utility class —— 收敛高频内联样式
+ * 审计 V1: 986 处内联 style 中, 文本色/字号/flex 布局为最高频重复片段。
+ * 抽原子 utility(纯样式迁移, 视觉零变化), 逐步替换 style={{...}}。
+ * ══════════════════════════════════════════════════════════════════════ */
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-tertiary { color: var(--text-tertiary); }
+.fs-10 { font-size: 10px; }
+.fs-11 { font-size: 11px; }
+.fs-12 { font-size: 12px; }
+.fs-13 { font-size: 13px; }
+.fw-600 { font-weight: 600; }
+.flex-center { display: flex; align-items: center; }
+.flex-col { display: flex; flex-direction: column; }
+.gap-4 { gap: 4px; }
+.gap-6 { gap: 6px; }
+.gap-8 { gap: 8px; }
+.gap-10 { gap: 10px; }
+/* P2-1 批次 D(2026-08-17): 小文件高频复合样式 */
+.pad-lg { padding: 20px 24px; }
+.flex-1 { flex: 1; }
+.flex-1-min0 { flex: 1; min-width: 0; }
+.view-scroll { flex: 1; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; scrollbar-gutter: stable; }
+.title-block { font-size: var(--fs-title); font-weight: 600; letter-spacing: -0.02em; }
+.page-title { font-size: 32px; font-weight: 700; letter-spacing: -0.03em; color: var(--text-primary); }
+.fw-500 { font-weight: 500; }
+.btn-outline-sm { flex-shrink: 0; padding: 6px 12px; font-size: 12px; border: 1px solid rgba(148,163,184,0.4); border-radius: 6px; }
+/* P2-1 批次 E(2026-08-17): App.tsx 长尾复合样式 */
+.subhead { font-size: var(--fs-body); font-weight: 600; margin-bottom: 8px; }
+.icon-cell { width: 18px; text-align: center; }
+.icon-btn-lg { border: none; background: transparent; font-size: 18px; cursor: pointer; color: var(--text-tertiary); }
+.mb-16 { margin-bottom: 16px; }
+
+/* P1-2: "思考中"三点跳动 */
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+/* 2026-08-17(实机修复 P0-1 衍生): 消除 Chromium <pre> UA 暗色背景
+ * 问题: Electron 暗色窗口下 <pre> 元素继承 chromium UA 样式显示深色矩形,
+ * 内联 style 默认不覆盖 → 用户消息气泡(蓝色 chat-user-bg)内出现"黑色条"。
+ * 修复: 全局 transparent 兜底; 设计本意有背景的 pre(代码块/沙箱等)
+ * 靠内联 style 优先级保留(本规则选择器 specificity 低于内联)。
+ * 同步避免 sandbox 终端/error 输出/tool result 等 <pre> 出现同类问题。 */
+pre {
+  background: transparent;
 }
 
 /* 磨砂玻璃面板(§5.1) + 厚度感(顶部受光高光 + 分层投影) */
@@ -339,6 +571,33 @@ body,
   --on-accent: #ffffff;
   --info-bg: rgba(5, 150, 105, 0.28);
   --info-text: #6ee7b7;
+
+  /* P0-2(2026-08-17): 事件标签底色暗色覆盖(深底浅字, 与玻璃/chat 气泡同风格) */
+  --event-user-bg: rgba(30, 64, 175, 0.35);
+  --event-thinking-bg: rgba(51, 65, 85, 0.55);
+  --event-tool_call-bg: rgba(30, 64, 175, 0.3);
+  --event-tool_result-bg: rgba(6, 78, 59, 0.35);
+  --event-delta-bg: rgba(49, 46, 129, 0.35);
+  --event-final-bg: rgba(49, 46, 129, 0.35);
+  --event-error-bg: rgba(127, 29, 29, 0.45);
+  --event-sandbox_output-bg: rgba(51, 65, 85, 0.6);
+  --event-tool_confirmation_required-bg: rgba(120, 53, 15, 0.45);
+  --event-tool_confirmation_result-bg: rgba(91, 33, 182, 0.4);
+  --event-turn_paused-bg: rgba(124, 45, 18, 0.4);
+  --event-turn_resumed-bg: rgba(6, 78, 59, 0.35);
+  --event-iteration_limit_reached-bg: rgba(120, 53, 15, 0.45);
+
+  /* P0-2(2026-08-17): 子代理状态卡暗色覆盖 */
+  --subagent-pending-bg: rgba(51, 65, 85, 0.6);
+  --subagent-pending-color: #cbd5e1;
+  --subagent-running-bg: rgba(30, 64, 175, 0.35);
+  --subagent-running-color: #93c5fd;
+  --subagent-succeeded-bg: rgba(6, 78, 59, 0.35);
+  --subagent-succeeded-color: #6ee7b7;
+  --subagent-failed-bg: rgba(127, 29, 29, 0.45);
+  --subagent-failed-color: #fca5a5;
+  --subagent-cancelled-bg: rgba(51, 65, 85, 0.6);
+  --subagent-cancelled-color: #94a3b8;
 }
 
 [data-theme="dark"] .glass-panel,
@@ -417,8 +676,10 @@ body,
   background: transparent !important;
 }
 
-/* 代码块/预格式文本: 暗色下保持深底浅字 */
-[data-theme="dark"] pre,
+/* 行内代码: 暗色下深底浅字(2026-08-17 修正: 原规则含 pre, 会把所有
+   <pre> 元素(含用户消息气泡内的 pre)染成深色矩形 → 用户气泡显示"黑色条"。
+   本意深底的 pre(代码块/沙箱/tool result)均已有内联 background(var(--code-bg)
+   等, 内联优先级高于本规则), 全局 pre 规则冗余且有害 → 仅保留行内 code。 */
 [data-theme="dark"] code {
   background: rgba(15, 23, 42, 0.7);
   color: var(--text-primary);

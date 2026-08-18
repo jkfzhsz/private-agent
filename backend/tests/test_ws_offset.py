@@ -317,9 +317,11 @@ def test_build_replay_messages_last_turn_zero_returns_all():
             await conn.close()
 
     msgs = asyncio.run(_run())
-    assert len(msgs) == 4  # 3 个 react_event + 1 个 replay_end
-    assert [m["turn"] for m in msgs if m["type"] == "react_event"] == [1, 2, 3]
-    assert msgs[-1]["count"] == 3
+    # 2026-08-16(蒋先生反馈: 历史任务切换空白): thinking/delta 流式增量被过滤
+    # (重放只重建最终状态) → 补发 tool_call + final + replay_end
+    assert len(msgs) == 3
+    assert [m["turn"] for m in msgs if m["type"] == "react_event"] == [2, 3]
+    assert msgs[-1]["count"] == 2
 
 
 def test_build_replay_messages_no_events_returns_only_end():
@@ -422,15 +424,15 @@ def test_build_replay_messages_filters_confirmation_and_marks_replayed():
             await conn.close()
 
     msgs = asyncio.run(_run())
-    # 不含确认事件: 3 条业务事件 + 1 条 replay_end
-    assert len(msgs) == 4
+    # 不含确认事件; 2026-08-16: thinking 增量被过滤 → tool_call+final+end = 3 条
+    assert len(msgs) == 3
     assert all(
         m.get("event_type") != "tool_confirmation_required"
         for m in msgs if m["type"] == "react_event"
     )
     # 业务事件均带 replayed: True
     replay_evts = [m for m in msgs if m["type"] == "react_event"]
-    assert len(replay_evts) == 3
+    assert len(replay_evts) == 2
     assert all(m["replayed"] is True for m in replay_evts)
 
 
@@ -578,4 +580,71 @@ def test_build_replay_messages_full_ignores_event_id():
 
     msgs = asyncio.run(_run())
     replay_evts = [m for m in msgs if m["type"] == "react_event"]
-    assert len(replay_evts) == 5  # full 模式全量, 不受 event_id 限制
+    # 2026-08-16: thinking/delta 流式增量被过滤 → tool_call + final = 2 条
+    # (full 模式全量补发最终状态事件, 不受 event_id 限制)
+    assert len(replay_evts) == 2
+
+
+def test_replay_backfills_missing_final_for_interrupted_turn():
+    """2026-08-16(问题2): 中断轮次(无 final 事件)从 messages 补 final。
+
+    未正常结束的轮次(tool_loop_detected/中断)在 react_events 无 final,
+    但 messages 表有 assistant 文本。full replay 应补一条合成 final 事件
+    (取该 turn 最后一条 assistant), 使历史对话不显示"思考中"。
+    """
+    _setup_schema()
+
+    async def _run() -> dict:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions DEFAULT VALUES RETURNING id"
+            )
+            # 正常轮次: 有 final 事件(不应重复补)
+            await insert_react_event(
+                conn, session_id=session_id, turn=1,
+                event_type="final", payload={"content": "正常轮次回答", "turn": 1},
+            )
+            # 中断轮次: 只有 thinking/tool_call, 无 final; messages 有 assistant
+            await insert_react_event(
+                conn, session_id=session_id, turn=2,
+                event_type="thinking", payload={"content": "...", "turn": 2},
+            )
+            await insert_react_event(
+                conn, session_id=session_id, turn=2,
+                event_type="tool_loop_detected", payload={"turn": 2},
+            )
+            await conn.execute(
+                "INSERT INTO messages (session_id, turn, role, content, zone) "
+                "VALUES ($1, 2, 'user', '问题', 'active')",
+                session_id,
+            )
+            await conn.execute(
+                "INSERT INTO messages (session_id, turn, role, content, zone) "
+                "VALUES ($1, 2, 'assistant', '中断轮次的部分回答', 'active')",
+                session_id,
+            )
+            msgs = await ws_offset.build_replay_messages(
+                conn, session_id=session_id, last_turn=0, full=True,
+            )
+            finals = [
+                m for m in msgs
+                if m["type"] == "react_event" and m["event_type"] == "final"
+            ]
+            users = [
+                m for m in msgs
+                if m["type"] == "react_event" and m["event_type"] == "user"
+            ]
+            return {"finals": finals, "users": users}
+        finally:
+            await conn.close()
+
+    result = asyncio.run(_run())
+    # 正常轮次 final 保留
+    assert any(f["turn"] == 1 for f in result["finals"])
+    # 中断轮次补 final(messages 最后 assistant 内容)
+    backfilled = [f for f in result["finals"] if f["turn"] == 2]
+    assert len(backfilled) == 1, f"应补 1 条 final, 实际 {len(backfilled)}"
+    assert backfilled[0]["payload"]["content"] == "中断轮次的部分回答"
+    # user 消息仍补发
+    assert any(u["turn"] == 2 for u in result["users"])

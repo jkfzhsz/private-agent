@@ -3,9 +3,36 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { adminFetch, getAdminToken, isAdminTokenConfigured, setAdminToken } from "../utils/apiClient";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { ICON_EDIT } from "../utils/icons";
+import { toast } from "../components/Toast";
 
 const API_BASE = "http://localhost:8765/admin";
 const FILES_BASE = "http://127.0.0.1:8765/files/outputs";
+
+// P2-1 批次 C(2026-08-17): 设置页高频样式常量化 —— 减少内联 style + 跨子组件复用
+// (style={CONST} 引用不计入内联样式; 视觉零变化)
+const LBL_W72: React.CSSProperties = { width: 72, flexShrink: 0 };
+const LBL_W56: React.CSSProperties = { width: 56, flexShrink: 0 };
+const INPUT_BASE: React.CSSProperties = {
+  flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6,
+  border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)",
+};
+const INPUT_W90: React.CSSProperties = {
+  width: 90, padding: "6px 8px", borderRadius: 6,
+  border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)",
+};
+const COL_GAP4: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 4, fontSize: 12 };
+const ROW_GAP8: React.CSSProperties = { display: "flex", gap: 8, alignItems: "center" };
+const ROW_SM: React.CSSProperties = { display: "flex", alignItems: "center", gap: 6, fontSize: 12 };
+const ROW_CHECK: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+  color: "var(--text-secondary)", cursor: "pointer",
+};
+const SEC_TITLE: React.CSSProperties = { fontSize: "var(--fs-title)", fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 };
+const BTN_SM: React.CSSProperties = { fontSize: 12, padding: "6px 12px" };
+const BTN_MD: React.CSSProperties = { fontSize: 12, padding: "6px 14px" };
+const PAD_LG: React.CSSProperties = { padding: "20px 24px" };
 
 interface ProviderInfo {
   name: string;
@@ -53,7 +80,7 @@ function CollapsibleSection({
   const [open, setOpen] = useState(defaultOpen);
   const toggle = (): void => setOpen((o) => !o);
   return (
-    <div className="glass-panel animate-in" style={{ padding: "20px 24px" }}>
+    <div className="glass-panel animate-in" style={PAD_LG}>
       <div
         style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -62,14 +89,14 @@ function CollapsibleSection({
         onClick={toggle}
       >
         <div>
-          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+          <div style={SEC_TITLE}>
             {title}
             {count !== undefined && (
               <span style={{ fontSize: 12, color: "var(--text-tertiary)", marginLeft: 8 }}>({count})</span>
             )}
           </div>
           {subtitle && (
-            <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{subtitle}</div>
+            <div className="fs-12 text-tertiary">{subtitle}</div>
           )}
         </div>
         <button
@@ -216,10 +243,10 @@ function AgentNameSection(): JSX.Element {
                 }}
               >
                 {/* 第一行: 名称 + 保存 */}
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div className="flex-center gap-10">
                   <div style={{ width: 120, flexShrink: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{row.label}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{row.sub}</div>
+                    <div className="fs-13 fw-600">{row.label}</div>
+                    <div className="fs-11 text-tertiary">{row.sub}</div>
                   </div>
                   <input
                     value={value}
@@ -306,7 +333,7 @@ function AgentNameSection(): JSX.Element {
               </div>
             );
           })}
-          <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+          <div className="fs-11 text-tertiary">
             场景工作区: 该场景智能体新建会话时自动使用, 产物(文件/脚本/输出)落各自目录; 留空则使用全局默认工作区。
           </div>
           {msg && (
@@ -379,6 +406,14 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
   // 2026-08-10: 设置中心导航状态(当前页 + 顶部栏搜索词)
   const [activeKey, setActiveKey] = useState<string>("models");
   const [navQuery, setNavQuery] = useState("");
+  // P0-3(2026-08-17): 玻璃确认弹层(替代 window.confirm; 可选取消副作用)
+  const [confirmReq, setConfirmReq] = useState<{
+    title: string;
+    body: string;
+    danger?: boolean;
+    run: () => void;
+    onCancelSideEffect?: () => void;
+  } | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -411,7 +446,8 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
       if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
       await load();
     } catch (err) {
-      window.alert(`删除失败: ${String(err)}`);
+      // P0-3(2026-08-17): alert → Toast
+      toast.error(`删除失败: ${String(err)}`);
     }
   };
 
@@ -439,7 +475,7 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
               onUpdated={load}
             />
           )}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div className="flex-col gap-8">
             {/* V1.4-8.2: 按 group 分组 + sort_order 排序渲染 */}
             {(() => {
               const groups = new Map<string, ProviderInfo[]>();
@@ -460,7 +496,7 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
                   >
                     {gname} ({list.length})
                   </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div className="flex-col gap-8">
                     {list.map((p) => (
                       <ProviderRow key={p.name} provider={p} onSaved={load} onDelete={handleDeleteProvider} />
                     ))}
@@ -493,7 +529,7 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
           subtitle={`协议版本: ${protocol || "—"} · 可新增/删除/测试连通性(改动重启后端后生效)`}
           count={mcpServers.length}
         >
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div className="flex-col gap-8">
             {mcpServers.map((s) => (
               <McpRow key={s.id} server={s} onChange={load} />
             ))}
@@ -573,6 +609,7 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
   const activePage = pages[activeKey] ?? pages.models;
 
   return (
+    <>
     <div className="settings-layout">
       {/* 左侧分组导航 */}
       <div className="settings-sidebar">
@@ -636,7 +673,7 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
               <span style={{ color: "var(--text-secondary)" }}>{activePage.title}</span>
             </div>
             <div className="settings-page-title">{activePage.title}</div>
-            <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{activePage.subtitle}</div>
+            <div className="fs-12 text-tertiary">{activePage.subtitle}</div>
           </div>
           <input
             className="settings-search"
@@ -671,6 +708,26 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
         </div>
       </div>
     </div>
+
+    {/* P0-3(2026-08-17): 玻璃确认弹层(替代 window.confirm) */}
+    <ConfirmDialog
+      open={confirmReq !== null}
+      title={confirmReq?.title ?? ""}
+      body={confirmReq?.body ?? ""}
+      confirmText="确认"
+      danger={confirmReq?.danger}
+      onConfirm={() => {
+        const r = confirmReq;
+        setConfirmReq(null);
+        r?.run();
+      }}
+      onCancel={() => {
+        const r = confirmReq;
+        setConfirmReq(null);
+        r?.onCancelSideEffect?.();
+      }}
+    />
+    </>
   );
 }
 
@@ -724,7 +781,8 @@ function DatabaseSection(): JSX.Element {
   const save = async (): Promise<void> => {
     // 2026-08-06: 密码已配置时可留空(不修改); 未配置且为空 → 阻止
     if (!password.trim() && !passwordConfigured) {
-      window.alert("请输入数据库密码(首次配置必填; 已配置后可留空不修改)");
+      // P0-3(2026-08-17): alert → Toast
+      toast.error("请输入数据库密码(首次配置必填; 已配置后可留空不修改)");
       return;
     }
     setBusy(true);
@@ -754,8 +812,8 @@ function DatabaseSection(): JSX.Element {
   };
 
   return (
-    <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
-      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+    <div className="glass-panel animate-in delay-1" style={PAD_LG}>
+      <div style={SEC_TITLE}>
         🗄️ 数据库
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
@@ -787,7 +845,7 @@ function DatabaseSection(): JSX.Element {
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
         {/* 2026-08-15: minWidth 0 防 input intrinsic 宽度撑破 */}
         <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 0 }}>
-          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span className="flex-center gap-6">
             密码
             {/* 2026-08-06: 密码配置状态徽标(空框不再误导) */}
             <span
@@ -870,7 +928,7 @@ function DatabaseSection(): JSX.Element {
             style={{
               fontSize: 11, padding: "4px 10px", borderRadius: 6,
               border: "1px solid #cbd5e1", background: "var(--panel-bg-solid)", cursor: "pointer",
-              color: "#475569", flexShrink: 0,
+              color: "var(--text-secondary)", flexShrink: 0,
             }}
           >
             复制
@@ -932,14 +990,14 @@ function SecuritySection(): JSX.Element {
   };
 
   return (
-    <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
-      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+    <div className="glass-panel animate-in delay-1" style={PAD_LG}>
+      <div style={SEC_TITLE}>
         安全管理
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
         控制面鉴权 token(X-Admin-Token) · 桌面版自动注入无需配置 · 浏览器(dev)模式手动录入
       </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <div style={ROW_GAP8}>
         <input
           type="password"
           value={tokenInput}
@@ -1023,8 +1081,8 @@ function PermissionModeSection({ sessionId }: { sessionId: number }): JSX.Elemen
   const allModes = ["default", "plan", "acceptEdits", "cautious", "deny_all"];
 
   return (
-    <div className="glass-panel animate-in delay-1" style={{ padding: "20px 24px" }}>
-      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+    <div className="glass-panel animate-in delay-1" style={PAD_LG}>
+      <div style={SEC_TITLE}>
         权限模式
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
@@ -1309,7 +1367,7 @@ function SkillsSection(): JSX.Element {
           技能管理
           <span style={{ fontSize: 12, color: "var(--text-tertiary)", marginLeft: 8 }}>({skills.length})</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div className="flex-center gap-8">
           <button
             className="btn-secondary"
             style={{ fontSize: 12, padding: "4px 12px", cursor: "pointer" }}
@@ -1364,14 +1422,14 @@ function SkillsSection(): JSX.Element {
                     }}
                     disabled={renameBusy}
                     style={{
-                      fontSize: 13, fontWeight: 600, flexShrink: 0, width: 160,
+                      fontSize: "var(--fs-body)", fontWeight: 600, flexShrink: 0, width: 160,
                       padding: "2px 6px", borderRadius: 4,
                       border: "1px solid var(--border-strong, #94a3b8)",
                       background: "var(--input-bg)", color: "var(--text-primary)",
                     }}
                   />
                 ) : (
-                  <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>
+                  <span style={{ fontSize: "var(--fs-body)", fontWeight: 600, flexShrink: 0 }}>
                     {s.display_name || s.name}
                   </span>
                 )}
@@ -1470,7 +1528,7 @@ function SkillsSection(): JSX.Element {
           >
             <label
               style={{
-                fontSize: 13, fontWeight: 600, cursor: zipBusy ? "not-allowed" : "pointer",
+                fontSize: "var(--fs-body)", fontWeight: 600, cursor: zipBusy ? "not-allowed" : "pointer",
                 display: "inline-flex", alignItems: "center", gap: 6,
                 padding: "8px 16px", borderRadius: 8,
                 background: "var(--gradient-indigo)", color: "var(--on-accent)",
@@ -1486,7 +1544,7 @@ function SkillsSection(): JSX.Element {
                 onChange={(e) => void uploadZip(e)}
               />
             </label>
-            <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+            <span className="fs-11 text-tertiary">
               选 zip 即自动解析安装(skill.yaml + system_prompt.md + references/ 等全部文件)
             </span>
             {zipMsg && (
@@ -1499,7 +1557,7 @@ function SkillsSection(): JSX.Element {
           {zipResult && (
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
               {zipResult.installed && zipResult.installed.length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div className="flex-col gap-8">
                   {zipResult.installed.map((s) => (
                     <div
                       key={s.name}
@@ -1509,8 +1567,8 @@ function SkillsSection(): JSX.Element {
                       }}
                     >
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 14, fontWeight: 700 }}>✅ {s.display_name || s.name}</span>
-                        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                        <span style={{ fontSize: "var(--fs-subtitle)", fontWeight: 700 }}>✅ {s.display_name || s.name}</span>
+                        <span className="fs-11 text-tertiary">
                           {s.name} · {s.files ?? 0} 个文件
                         </span>
                       </div>
@@ -1540,7 +1598,7 @@ function SkillsSection(): JSX.Element {
                     background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.3)",
                   }}
                 >
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "#d32f2f", marginBottom: 6 }}>
+                  <div style={{ fontSize: "var(--fs-body)", fontWeight: 600, color: "#d32f2f", marginBottom: 6 }}>
                     ❌ {zipResult.failed.length} 个技能安装失败
                   </div>
                   {zipResult.failed.map((f) => (
@@ -1561,8 +1619,8 @@ function SkillsSection(): JSX.Element {
           )}
 
           {/* 上传新技能(高级: 手动填写) */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>高级: 手动填写 skill.yaml</div>
+          <div className="flex-col gap-8">
+            <div className="fs-13 fw-600">高级: 手动填写 skill.yaml</div>
             <input
               type="text"
               value={name}
@@ -1615,15 +1673,15 @@ function SkillsSection(): JSX.Element {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <span style={{ fontSize: 16, fontWeight: 700 }}>
-                ✏️ 编辑系统提示词 · {promptEditor.name}
+              <span style={{ fontSize: "var(--fs-title)", fontWeight: 700 }}>
+                {ICON_EDIT} 编辑系统提示词 · {promptEditor.name}
                 <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-tertiary)", fontWeight: 400 }}>
                   v{promptEditor.version}
                 </span>
               </span>
               <button
                 onClick={() => setPromptEditor(null)}
-                style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "#64748b" }}
+                style={{ border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: "var(--text-tertiary)" }}
               >
                 ×
               </button>
@@ -1638,12 +1696,12 @@ function SkillsSection(): JSX.Element {
                 flex: 1, minHeight: 320, resize: "vertical",
                 fontFamily: "Consolas, monospace", fontSize: 13,
                 border: "1px solid var(--border-color)", borderRadius: 8, padding: 12,
-                color: "#334155", background: "var(--code-bg)",
+                color: "var(--text-primary)", background: "var(--code-bg)",
                 whiteSpace: "pre", lineHeight: 1.6,
               }}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12 }}>
-              <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+              <span className="fs-12 text-tertiary">
                 token 估算: {promptEditor.tokens ?? "—"}（保存后刷新）
               </span>
               <span style={{ flex: 1 }} />
@@ -1783,7 +1841,7 @@ function UpdateSection(): JSX.Element {
         >
           {checking ? "检查中..." : "检查更新"}
         </button>
-        <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+        <span className="fs-12 text-tertiary">
           当前版本 v{window.pa?.versions?.app || "0.1.0"}
         </span>
       </div>
@@ -1865,6 +1923,8 @@ function ProviderRow({
   const [multimodal, setMultimodal] = useState(provider.multimodal ?? false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // P0-3(2026-08-17): 删除 provider 玻璃确认弹层(本地 state)
+  const [confirmReq, setConfirmReq] = useState<{ title: string; body: string; danger?: boolean; run: () => void } | null>(null);
 
   const beginEdit = (): void => {
     setBaseUrl(provider.base_url ?? "");
@@ -1934,6 +1994,7 @@ function ProviderRow({
   };
 
   return (
+    <>
     <div
       style={{
         padding: "12px 14px",
@@ -1949,8 +2010,8 @@ function ProviderRow({
           }}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 14, fontWeight: 600 }}>{provider.name}</span>
+          <div className="flex-center gap-8">
+            <span style={{ fontSize: "var(--fs-subtitle)", fontWeight: 600 }}>{provider.name}</span>
             {provider.kind === "local" && (
               <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--accent-soft-bg)", color: "var(--accent-soft-text)" }}>
                 本地
@@ -1991,11 +2052,14 @@ function ProviderRow({
             <button
               className="btn-ghost"
               style={{ fontSize: 12, padding: "5px 10px", color: "var(--danger-text)" }}
-              onClick={() => {
-                if (window.confirm(`确定删除模型 provider「${provider.name}」？删除后需重新配置才能使用。`)) {
-                  onDelete(provider.name);
-                }
-              }}
+              onClick={() =>
+                setConfirmReq({
+                  title: "删除模型 provider",
+                  body: `确定删除模型 provider「${provider.name}」？删除后需重新配置才能使用。`,
+                  danger: true,
+                  run: () => onDelete(provider.name),
+                })
+              }
               title="删除此模型"
             >
               删除
@@ -2023,43 +2087,43 @@ function ProviderRow({
 
       {editing && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(148,163,184,0.15)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API 地址</span>
+          <div className="flex-center gap-8">
+            <span className="fs-12 text-secondary" style={LBL_W72}>API 地址</span>
             <input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               placeholder="https://..."
-              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={INPUT_BASE}
             />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>模型名</span>
+          <div className="flex-center gap-8">
+            <span className="fs-12 text-secondary" style={LBL_W72}>模型名</span>
             <input
               value={modelName}
               onChange={(e) => setModelName(e.target.value)}
               placeholder="model-name"
-              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={INPUT_BASE}
             />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API Key</span>
+          <div className="flex-center gap-8">
+            <span className="fs-12 text-secondary" style={LBL_W72}>API Key</span>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={provider.api_key_configured ? "已配置(留空不修改)" : "输入新 Key"}
-              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={INPUT_BASE}
             />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>参数上限</span>
+          <div className="flex-center gap-8">
+            <span className="fs-12 text-secondary" style={LBL_W72}>参数上限</span>
             <input
               type="number"
               min={256}
               value={maxInput}
               onChange={(e) => setMaxInput(Number(e.target.value))}
               title="最大输入 tokens"
-              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={INPUT_W90}
             />
             <input
               type="number"
@@ -2067,7 +2131,7 @@ function ProviderRow({
               value={maxOutput}
               onChange={(e) => setMaxOutput(Number(e.target.value))}
               title="最大输出 tokens"
-              style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={INPUT_W90}
             />
             <input
               type="number"
@@ -2077,7 +2141,7 @@ function ProviderRow({
               title="最大轮次"
               style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
             />
-            <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>输入/输出/轮次</span>
+            <span className="fs-10 text-tertiary">输入/输出/轮次</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             {/* V1.4-8.2: 分组 + 类型 */}
@@ -2095,27 +2159,43 @@ function ProviderRow({
               <option value="cloud">云端模型</option>
               <option value="local">本地模型</option>
             </select>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
+            <label style={ROW_CHECK}>
               <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
               启用
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }} title="勾选后, 当用户发送图片时降级链将跳过纯文本模型, 直接从本模型开始调用">
+            <label style={ROW_CHECK} title="勾选后, 当用户发送图片时降级链将跳过纯文本模型, 直接从本模型开始调用">
               <input type="checkbox" checked={multimodal} onChange={(e) => setMultimodal(e.target.checked)} />
               多模态
             </label>
-            <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void save()} disabled={busy}>
+            <button className="btn-primary" style={BTN_MD} onClick={() => void save()} disabled={busy}>
               保存
             </button>
-            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setEditing(false)} disabled={busy}>
+            <button className="btn-ghost" style={BTN_SM} onClick={() => setEditing(false)} disabled={busy}>
               取消
             </button>
-            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => void test()} disabled={busy}>
+            <button className="btn-ghost" style={BTN_SM} onClick={() => void test()} disabled={busy}>
               测试连通性
             </button>
           </div>
         </div>
       )}
+
+      {/* P0-3(2026-08-17): 删除 provider 玻璃确认弹层 */}
+      <ConfirmDialog
+        open={confirmReq !== null}
+        title={confirmReq?.title ?? ""}
+        body={confirmReq?.body ?? ""}
+        confirmText="删除"
+        danger
+        onConfirm={() => {
+          const r = confirmReq;
+          setConfirmReq(null);
+          r?.run();
+        }}
+        onCancel={() => setConfirmReq(null)}
+      />
     </div>
+    </>
   );
 }
 
@@ -2304,10 +2384,10 @@ function FallbackChainEditor({
         </div>
       )}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
-        <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void save()} disabled={busy}>
+        <button className="btn-primary" style={BTN_MD} onClick={() => void save()} disabled={busy}>
           保存
         </button>
-        <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={cancel} disabled={busy}>
+        <button className="btn-ghost" style={BTN_SM} onClick={cancel} disabled={busy}>
           取消
         </button>
         {error && <span style={{ fontSize: 12, color: "var(--danger-text)" }}>{error}</span>}
@@ -2392,45 +2472,45 @@ function ProviderAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "var(--panel-bg)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>名称</span>
+      <div className="flex-center gap-8">
+        <span className="fs-12 text-secondary" style={LBL_W72}>名称</span>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如 deepseek-flash / qwen-2.5（字母/数字/下划线/连字符/小数点）" style={inputStyle} />
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API 地址</span>
+      <div className="flex-center gap-8">
+        <span className="fs-12 text-secondary" style={LBL_W72}>API 地址</span>
         <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://.../v1" style={inputStyle} />
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>模型名</span>
+      <div className="flex-center gap-8">
+        <span className="fs-12 text-secondary" style={LBL_W72}>模型名</span>
         <input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="model-name" style={inputStyle} />
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>API Key</span>
+      <div className="flex-center gap-8">
+        <span className="fs-12 text-secondary" style={LBL_W72}>API Key</span>
         <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="可选, 留空稍后录入" style={inputStyle} />
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 72, flexShrink: 0 }}>参数上限</span>
-        <input type="number" min={256} value={maxInput} onChange={(e) => setMaxInput(Number(e.target.value))} title="最大输入 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }} />
-        <input type="number" min={64} value={maxOutput} onChange={(e) => setMaxOutput(Number(e.target.value))} title="最大输出 tokens" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }} />
+      <div className="flex-center gap-8">
+        <span className="fs-12 text-secondary" style={LBL_W72}>参数上限</span>
+        <input type="number" min={256} value={maxInput} onChange={(e) => setMaxInput(Number(e.target.value))} title="最大输入 tokens" style={INPUT_W90} />
+        <input type="number" min={64} value={maxOutput} onChange={(e) => setMaxOutput(Number(e.target.value))} title="最大输出 tokens" style={INPUT_W90} />
         <input type="number" min={1} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value))} title="最大轮次" style={{ width: 70, padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }} />
-        <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>输入/输出/轮次</span>
+        <span className="fs-10 text-tertiary">输入/输出/轮次</span>
       </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
+      <div style={ROW_GAP8}>
+        <label style={ROW_CHECK}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           启用并加入降级链
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }} title="勾选后, 当用户发送图片时降级链将跳过纯文本模型, 直接从本模型开始调用">
+        <label style={ROW_CHECK} title="勾选后, 当用户发送图片时降级链将跳过纯文本模型, 直接从本模型开始调用">
           <input type="checkbox" checked={multimodal} onChange={(e) => setMultimodal(e.target.checked)} />
           多模态
         </label>
-        <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void submit()} disabled={busy}>
+        <button className="btn-primary" style={BTN_MD} onClick={() => void submit()} disabled={busy}>
           添加
         </button>
-        <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setOpen(false)} disabled={busy}>
+        <button className="btn-ghost" style={BTN_SM} onClick={() => setOpen(false)} disabled={busy}>
           取消
         </button>
-        {msg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{msg}</span>}
+        {msg && <span className="fs-12 text-secondary">{msg}</span>}
       </div>
     </div>
   );
@@ -2544,7 +2624,7 @@ function McpRow({
   return (
     // 2026-08-15(蒋先生反馈): 单行 9 元素窄窗口溢出 → flexWrap 换行
     <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", padding: "12px 14px", borderRadius: "var(--radius-sm)", background: "var(--panel-bg)" }}>
-      <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{server.id}</span>
+      <span style={{ fontSize: "var(--fs-body)", fontWeight: 600, flexShrink: 0 }}>{server.id}</span>
       <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 10, background: "var(--info-bg)", color: "var(--info-text)", flexShrink: 0 }}>
         {server.type}
       </span>
@@ -2802,11 +2882,11 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
             spellCheck={false}
             style={{ minHeight: 130, fontFamily: "monospace", fontSize: 11, padding: "8px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", background: "var(--panel-bg)", resize: "vertical" }}
           />
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void importJson()} disabled={busy}>
+          <div style={ROW_GAP8}>
+            <button className="btn-primary" style={BTN_MD} onClick={() => void importJson()} disabled={busy}>
               导入
             </button>
-            <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setOpen(false)}>
+            <button className="btn-ghost" style={BTN_SM} onClick={() => setOpen(false)}>
               取消
             </button>
             {msg && <span style={{ fontSize: 12, color: msg.startsWith("✅") ? "var(--success-text)" : "var(--text-secondary)" }}>{msg}</span>}
@@ -2815,8 +2895,8 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
       ) : (
         <>
       {/* V1.5 项-2: 从模板添加(连接器开箱即用, 选中即填充) */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>从模板</span>
+      <div style={ROW_GAP8}>
+        <span className="fs-12 text-secondary" style={LBL_W56}>从模板</span>
         <select
           value=""
           onChange={(e) => applyTemplate(e.target.value)}
@@ -2844,13 +2924,13 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           ⚠️ 需补充: {templateNotes.join("；")}
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>名称</span>
+      <div style={ROW_GAP8}>
+        <span className="fs-12 text-secondary" style={LBL_W56}>名称</span>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="server 名称(唯一)"
-          style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+          style={INPUT_BASE}
         />
         <div style={{ display: "flex", gap: 4 }}>
           {(["http", "stdio"] as const).map((t) => (
@@ -2871,50 +2951,50 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
         </div>
       </div>
       {type === "http" ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>URL</span>
+        <div className="flex-center gap-8">
+          <span className="fs-12 text-secondary" style={LBL_W56}>URL</span>
           <input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="http://127.0.0.1:port/mcp"
-            style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+            style={INPUT_BASE}
           />
         </div>
       ) : (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>命令</span>
+          <div className="flex-center gap-8">
+            <span className="fs-12 text-secondary" style={LBL_W56}>命令</span>
             <input
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               placeholder="npx"
-              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={INPUT_BASE}
             />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>参数</span>
+          <div className="flex-center gap-8">
+            <span className="fs-12 text-secondary" style={LBL_W56}>参数</span>
             <input
               value={args}
               onChange={(e) => setArgs(e.target.value)}
               placeholder="空格分隔, 如 -y @modelcontextprotocol/server-filesystem C:/tmp"
-              style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+              style={INPUT_BASE}
             />
           </div>
         </>
       )}
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>API Key</span>
+      <div className="flex-center gap-8">
+        <span className="fs-12 text-secondary" style={LBL_W56}>API Key</span>
         <input
           type="password"
           value={authToken}
           onChange={(e) => setAuthToken(e.target.value)}
           placeholder="可选, 服务器要求 Bearer 认证时填写(AES 加密存储)"
-          style={{ flex: 1, minWidth: 0, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)" }}
+          style={INPUT_BASE}
         />
       </div>
       {/* V1.2-6.2: 环境变量配置(stdio 子进程注入) */}
       <div style={{ display: "flex", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>环境变量</span>
+        <span className="fs-12 text-secondary" style={LBL_W56}>环境变量</span>
         <textarea
           value={envText}
           onChange={(e) => setEnvText(e.target.value)}
@@ -2924,14 +3004,14 @@ function McpAddForm({ onAdded }: { onAdded: () => void }): JSX.Element {
           style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid rgba(148,163,184,0.3)", fontSize: 12, background: "var(--panel-bg)", resize: "vertical", fontFamily: "monospace" }}
         />
       </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <button className="btn-primary" style={{ fontSize: 12, padding: "6px 14px" }} onClick={() => void submit()} disabled={busy}>
+      <div style={ROW_GAP8}>
+        <button className="btn-primary" style={BTN_MD} onClick={() => void submit()} disabled={busy}>
           添加
         </button>
-        <button className="btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }} onClick={() => setOpen(false)}>
+        <button className="btn-ghost" style={BTN_SM} onClick={() => setOpen(false)}>
           取消
         </button>
-        {msg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{msg}</span>}
+        {msg && <span className="fs-12 text-secondary">{msg}</span>}
       </div>
         </>
       )}
@@ -3033,8 +3113,8 @@ function SandboxSection(): JSX.Element {
   };
 
   return (
-    <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
-      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+    <div className="glass-panel animate-in delay-3" style={PAD_LG}>
+      <div style={SEC_TITLE}>
         沙箱配置
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 16 }}>
@@ -3046,7 +3126,7 @@ function SandboxSection(): JSX.Element {
       ) : (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               启用沙箱
               <input
                 type="checkbox"
@@ -3054,7 +3134,7 @@ function SandboxSection(): JSX.Element {
                 onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
               />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               内存上限 MB
               <input
                 type="number"
@@ -3064,7 +3144,7 @@ function SandboxSection(): JSX.Element {
                 }
               />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               超时秒
               <input
                 type="number"
@@ -3074,7 +3154,7 @@ function SandboxSection(): JSX.Element {
                 }
               />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               磁盘上限 MB
               <input
                 type="number"
@@ -3084,7 +3164,7 @@ function SandboxSection(): JSX.Element {
                 }
               />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               网络
               <input
                 type="checkbox"
@@ -3094,7 +3174,7 @@ function SandboxSection(): JSX.Element {
                 }
               />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               代码扫描
               <input
                 type="checkbox"
@@ -3104,7 +3184,7 @@ function SandboxSection(): JSX.Element {
                 }
               />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               环境变量脱敏
               <input
                 type="checkbox"
@@ -3114,7 +3194,7 @@ function SandboxSection(): JSX.Element {
                 }
               />
             </label>
-            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+            <label style={COL_GAP4}>
               工作目录保留天数
               <input
                 type="number"
@@ -3201,6 +3281,8 @@ function HooksSection(): JSX.Element {
     timeout: 5,
     enabled: true,
   });
+  // P0-3(2026-08-17): 删除 hook 玻璃确认弹层(本地 state)
+  const [confirmReq, setConfirmReq] = useState<{ title: string; body: string; danger?: boolean; run: () => void } | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -3274,7 +3356,6 @@ function HooksSection(): JSX.Element {
   };
 
   const remove = async (name: string): Promise<void> => {
-    if (!window.confirm(`删除 hook "${name}"?`)) return;
     try {
       const resp = await adminFetch(`${API_BASE}/hooks/${encodeURIComponent(name)}`, {
         method: "DELETE",
@@ -3294,6 +3375,7 @@ function HooksSection(): JSX.Element {
   } as const;
 
   return (
+    <>
     <div
       className="glass-panel animate-in delay-2"
       style={{ padding: "18px 22px", display: "flex", flexDirection: "column", gap: 12 }}
@@ -3301,7 +3383,7 @@ function HooksSection(): JSX.Element {
       <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>
         工作流钩子 (Hooks)
       </div>
-      <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+      <div className="fs-12 text-tertiary">
         在关键事件点执行外部命令/HTTP 请求/MCP 工具(可改写输入、追加上下文、阻断执行)
       </div>
 
@@ -3309,9 +3391,9 @@ function HooksSection(): JSX.Element {
 
       {/* 列表 */}
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {loading && <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>加载中…</div>}
+        {loading && <div className="fs-12 text-tertiary">加载中…</div>}
         {!loading && hooks.length === 0 && (
-          <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>暂无 hooks</div>
+          <div className="fs-12 text-tertiary">暂无 hooks</div>
         )}
         {hooks.map((h) => (
           <div
@@ -3357,7 +3439,14 @@ function HooksSection(): JSX.Element {
               ✏️
             </button>
             <button
-              onClick={() => void remove(h.name)}
+              onClick={() =>
+                setConfirmReq({
+                  title: "删除 hook",
+                  body: `删除 hook "${h.name}"?`,
+                  danger: true,
+                  run: () => void remove(h.name),
+                })
+              }
               style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--danger-text)", fontSize: 13 }}
             >
               ×
@@ -3437,7 +3526,7 @@ function HooksSection(): JSX.Element {
             title="超时(秒)"
             style={{ ...inputStyle, width: 60 }}
           />
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          <label style={ROW_SM}>
             <input
               type="checkbox"
               checked={form.enabled}
@@ -3459,6 +3548,22 @@ function HooksSection(): JSX.Element {
         </div>
       </div>
     </div>
+
+    {/* P0-3(2026-08-17): 删除 hook 玻璃确认弹层 */}
+    <ConfirmDialog
+      open={confirmReq !== null}
+      title={confirmReq?.title ?? ""}
+      body={confirmReq?.body ?? ""}
+      confirmText="删除"
+      danger
+      onConfirm={() => {
+        const r = confirmReq;
+        setConfirmReq(null);
+        r?.run();
+      }}
+      onCancel={() => setConfirmReq(null)}
+    />
+    </>
   );
 }
 
@@ -3469,6 +3574,14 @@ function DataSection(): JSX.Element {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const restoreRef = useRef<HTMLInputElement | null>(null);
+  // P0-3(2026-08-17): 还原确认玻璃弹层(本地 state)
+  const [confirmReq, setConfirmReq] = useState<{
+    title: string;
+    body: string;
+    danger?: boolean;
+    run: () => void;
+    onCancelSideEffect?: () => void;
+  } | null>(null);
   // 批量导出
   const [batchIds, setBatchIds] = useState("");
   const [batchContent, setBatchContent] = useState<string | null>(null);
@@ -3497,12 +3610,22 @@ function DataSection(): JSX.Element {
     }
   };
 
+  // P0-3(2026-08-17): 还原 → 玻璃确认弹层(确认后执行; 取消时清空 file input)
   const doRestore = async (file: File | undefined | null): Promise<void> => {
     if (!file) return;
-    if (!window.confirm("还原将覆盖当前全部会话/记忆/配置(先备份再操作)。确定继续?")) {
-      if (restoreRef.current) restoreRef.current.value = "";
-      return;
-    }
+    setConfirmReq({
+      title: "还原备份",
+      body: "还原将覆盖当前全部会话/记忆/配置(先备份再操作)。确定继续?",
+      danger: true,
+      run: () => void doRestoreExec(file),
+      onCancelSideEffect: () => {
+        if (restoreRef.current) restoreRef.current.value = "";
+      },
+    });
+  };
+
+  const doRestoreExec = async (file: File | undefined | null): Promise<void> => {
+    if (!file) return;
     setBusy(true);
     setMsg(null);
     try {
@@ -3570,6 +3693,7 @@ function DataSection(): JSX.Element {
   };
 
   return (
+    <>
     <div className="glass-panel animate-in delay-2" style={{ padding: "18px 22px", display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>数据管理</div>
 
@@ -3592,14 +3716,14 @@ function DataSection(): JSX.Element {
             onChange={(e) => void doRestore(e.target.files?.[0])}
           />
         </label>
-        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+        <span className="fs-11 text-tertiary">
           备份含: 运行时配置(含 API Key 密文)/技能/会话/消息/记忆/知识库文档
         </span>
       </div>
 
       {/* 会话批量导出 */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>会话批量导出:</span>
+        <span className="fs-12 text-secondary">会话批量导出:</span>
         <input
           className="flow-input"
           style={{ width: 220 }}
@@ -3617,6 +3741,26 @@ function DataSection(): JSX.Element {
         )}
       </div>
     </div>
+
+    {/* P0-3(2026-08-17): 还原确认玻璃弹层 */}
+    <ConfirmDialog
+      open={confirmReq !== null}
+      title={confirmReq?.title ?? ""}
+      body={confirmReq?.body ?? ""}
+      confirmText="确认"
+      danger={confirmReq?.danger}
+      onConfirm={() => {
+        const r = confirmReq;
+        setConfirmReq(null);
+        r?.run();
+      }}
+      onCancel={() => {
+        const r = confirmReq;
+        setConfirmReq(null);
+        r?.onCancelSideEffect?.();
+      }}
+    />
+    </>
   );
 }
 
@@ -3643,6 +3787,8 @@ function SystemSection(): JSX.Element {
   const [proxyHttps, setProxyHttps] = useState("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // P0-3(2026-08-17): 清理缓存玻璃确认弹层(本地 state)
+  const [confirmReq, setConfirmReq] = useState<{ title: string; body: string; run: () => void } | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -3688,7 +3834,6 @@ function SystemSection(): JSX.Element {
   };
 
   const doClearCache = async (): Promise<void> => {
-    if (!window.confirm("清理 outputs 产物目录中超过保留期的临时文件? 不影响对话与配置。")) return;
     setBusy(true);
     setMsg(null);
     try {
@@ -3713,6 +3858,7 @@ function SystemSection(): JSX.Element {
   } as const;
 
   return (
+    <>
     <div className="glass-panel animate-in delay-2" style={{ padding: "18px 22px", display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>系统设置</div>
 
@@ -3724,7 +3870,7 @@ function SystemSection(): JSX.Element {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 12, color: "var(--text-secondary)" }}>
         <span>{cfg?.app_name ?? "Private Agent"} v{cfg?.version ?? "—"}</span>
         <span>数据库: {cfg?.database ?? "—"}</span>
-        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span className="flex-center gap-6">
           Master Key:
           <span
             style={{
@@ -3741,7 +3887,7 @@ function SystemSection(): JSX.Element {
 
       {/* 配置行 */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+        <label style={ROW_SM}>
           日志级别
           <select value={logLevel} onChange={(e) => setLogLevel(e.target.value)} style={inputStyle}>
             {["DEBUG", "INFO", "WARNING", "ERROR"].map((l) => (
@@ -3749,7 +3895,7 @@ function SystemSection(): JSX.Element {
             ))}
           </select>
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+        <label style={ROW_SM}>
           日志保留(天)
           <input
             type="number"
@@ -3760,7 +3906,7 @@ function SystemSection(): JSX.Element {
             style={{ ...inputStyle, width: 64 }}
           />
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+        <label style={ROW_SM}>
           HTTP 代理
           <input
             value={proxyHttp}
@@ -3769,7 +3915,7 @@ function SystemSection(): JSX.Element {
             style={{ ...inputStyle, width: 170 }}
           />
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+        <label style={ROW_SM}>
           HTTPS 代理
           <input
             value={proxyHttps}
@@ -3782,7 +3928,13 @@ function SystemSection(): JSX.Element {
           保存
         </button>
         <button
-          onClick={() => void doClearCache()}
+          onClick={() =>
+            setConfirmReq({
+              title: "清理产物缓存",
+              body: "清理 outputs 产物目录中超过保留期的临时文件? 不影响对话与配置。",
+              run: () => void doClearCache(),
+            })
+          }
           disabled={busy}
           style={{ fontSize: 12, padding: "6px 14px", borderRadius: 8, border: "1px solid #d97706", background: "var(--confirmation-bg)", color: "#92400e", cursor: "pointer" }}
         >
@@ -3790,6 +3942,21 @@ function SystemSection(): JSX.Element {
         </button>
       </div>
     </div>
+
+    {/* P0-3(2026-08-17): 清理缓存玻璃确认弹层 */}
+    <ConfirmDialog
+      open={confirmReq !== null}
+      title={confirmReq?.title ?? ""}
+      body={confirmReq?.body ?? ""}
+      confirmText="确认"
+      onConfirm={() => {
+        const r = confirmReq;
+        setConfirmReq(null);
+        r?.run();
+      }}
+      onCancel={() => setConfirmReq(null)}
+    />
+    </>
   );
 }
 
@@ -3929,8 +4096,8 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
   };
 
   return (
-    <div className="glass-panel animate-in delay-3" style={{ padding: "20px 24px" }}>
-      <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+    <div className="glass-panel animate-in delay-3" style={PAD_LG}>
+      <div style={SEC_TITLE}>
         主题与壁纸
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
@@ -4062,7 +4229,7 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
             )}
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="flex-center gap-8">
             <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>水平位置</span>
             <input
               type="range"
@@ -4078,7 +4245,7 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
             />
             <span style={{ fontSize: 12, color: "var(--text-tertiary)", width: 34, textAlign: "right" }}>{posX}%</span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="flex-center gap-8">
             <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>垂直位置</span>
             <input
               type="range"
@@ -4097,7 +4264,7 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
           <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: -4 }}>
             💡 放大后背景才有可移动的空间: 拖动位置会自动放大到 130%, 也可手动调"缩放"
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="flex-center gap-8">
             <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>缩放</span>
             <input
               type="range"
@@ -4109,7 +4276,7 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
             />
             <span style={{ fontSize: 12, color: "var(--text-tertiary)", width: 34, textAlign: "right" }}>{scale}%</span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="flex-center gap-8">
             <span style={{ fontSize: 12, color: "var(--text-secondary)", width: 56 }}>旋转</span>
             {[0, 90, 180, 270].map((deg) => (
               <button
@@ -4130,14 +4297,14 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
                 {deg === 0 ? "0°" : `${deg}°`}
               </button>
             ))}
-            <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>横竖屏调整</span>
+            <span className="fs-11 text-tertiary">横竖屏调整</span>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div className="flex-center gap-10">
             <button className="btn-ghost" onClick={() => void saveStyle()} disabled={busy}>
               保存样式
             </button>
-            {msg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{msg}</span>}
+            {msg && <span className="fs-12 text-secondary">{msg}</span>}
           </div>
           {/* 2026-08-04: 资源加载失败时直接显示原因,避免静默空白 */}
           {loadError && (

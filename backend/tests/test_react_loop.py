@@ -18,7 +18,7 @@ from private_agent.core.react_loop import ReactLoop, ReactLoopState
 from private_agent.models.base import ChatResult, ModelCapability
 from private_agent.storage import migrations
 from private_agent.storage.react_events import insert_react_event
-from private_agent.tools.defs import ECHO_TOOL, DATETIME_TOOL, ToolDef
+from private_agent.tools.defs import ECHO_TOOL, DATETIME_TOOL, ToolDef, ToolResult
 
 TEST_DSN = os.environ.get(
     "PA_TEST_DSN",
@@ -908,9 +908,11 @@ def test_run_turn_multiple_tool_calls_in_one_response():
 
 
 def test_run_turn_max_iterations_stops_with_error_event():
-    """迭代达到 max_iterations 时停止并产出 error event。
+    """迭代达到 max_iterations 时询问用户, 30s 超时默认继续(不直接失败)。
 
     Source: spec Edge cases "max_iterations 防死循环"
+    2026-08-16(阶段2 反馈): 超限改为询问继续 —— 测试传小确认超时(0.1s)
+    模拟 30s 超时默认继续的行为; 响应耗尽后 adapter 无响应 → 模型报错收尾。
     """
     _setup_schema()
 
@@ -940,6 +942,7 @@ def test_run_turn_max_iterations_stops_with_error_event():
                 tools=[ECHO_TOOL],
                 conn=conn,
                 max_iterations=3,
+                limit_confirm_timeout=0.1,
             )
             await loop.run_turn("loop")
             events = []
@@ -950,9 +953,10 @@ def test_run_turn_max_iterations_stops_with_error_event():
             await conn.close()
 
     types, final_state = asyncio.run(_run())
-    # 最后一个事件应为 error
-    assert types[-1] == "error"
-    assert final_state == ReactLoopState.ERROR
+    # 2026-08-16: 超限不再直接 error —— 应发出 iteration_limit_reached 询问
+    assert "iteration_limit_reached" in types
+    # 0.1s 确认超时默认继续 → 不进入 ERROR(响应耗尽后按模型失败处理)
+    assert final_state != ReactLoopState.ERROR or types[-1] != "error"
 
 
 def test_run_turn_max_iterations_default_is_ten():
@@ -960,6 +964,9 @@ def test_run_turn_max_iterations_default_is_ten():
 
     注: 显式关闭 Doom Loop 检测(loop.enabled=false), 本测试只验证
     max_iterations 硬上限, 不被循环检测提前终止(循环检测有独立测试)。
+    2026-08-16(阶段2): 超限询问 30s 超时默认继续 → 10 次后继续直到响应耗尽;
+    本测试传 limit_confirm_timeout=0.1 快速通过询问, 验证上限本身仍生效
+    (第一次询问发生在第 10 次迭代后)。
     """
     _setup_schema()
 
@@ -973,12 +980,16 @@ def test_run_turn_max_iterations_default_is_ten():
             await cm.build_initial(conn)
             adapter = _MockAdapter(
                 responses=[
-                    ChatResult(
-                        content="",
-                        tool_calls=[_echo_tool_call(f"call_{i}", "x")],
-                        used_provider="mock",
-                    )
-                    for i in range(30)
+                    *[
+                        ChatResult(
+                            content="",
+                            tool_calls=[_echo_tool_call(f"call_{i}", "x")],
+                            used_provider="mock",
+                        )
+                        for i in range(14)
+                    ],
+                    # 最后: 正常 content, 让循环自然结束
+                    ChatResult(content="done", used_provider="mock"),
                 ]
             )
             loop = ReactLoop(
@@ -988,6 +999,7 @@ def test_run_turn_max_iterations_default_is_ten():
                 tools=[ECHO_TOOL],
                 conn=conn,
                 cfg={"context": {"loop": {"enabled": False}}},
+                limit_confirm_timeout=0.1,
             )
             await loop.run_turn("loop")
             return len(adapter.chat_calls)
@@ -995,8 +1007,9 @@ def test_run_turn_max_iterations_default_is_ten():
             await conn.close()
 
     calls = asyncio.run(_run())
-    # 默认 max_iterations=10,adapter 应被调用 10 次
-    assert calls == 10
+    # 默认 max_iterations=10: 首次询问发生在第 10 次迭代后; 0.1s 超时默认
+    # 继续(+10 步) → 继续消费到 content 结尾(15 次调用内自然结束)
+    assert 10 <= calls <= 15, f"上限 10 应触发首次询问, 实际 {calls}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1248,9 +1261,14 @@ def test_tool_injection_skips_mcp_tools_but_applies_to_file_tools():
     assert "workspace" not in captured.get("mcp", {}), (
         f"MCP 工具被注入 workspace: {captured.get('mcp')}"
     )
-    # 内置文件工具: 必须注入(路径校验安全网, T-1 原语义)
-    assert captured.get("file", {}).get("data_dir") == r"D:\work"
-    assert captured.get("file", {}).get("workspace") == r"D:\work"
+    # 内置文件工具: 2026-08-16 起不再强制注入 data_dir(全局读取, 免确认);
+    # workspace 也不再注入(file_read 全局可读, 原 T-1 注入语义废止)
+    assert "data_dir" not in captured.get("file", {}), (
+        f"file_read 被注入 data_dir(全局读取语义应无限制): {captured.get('file')}"
+    )
+    assert "workspace" not in captured.get("file", {}), (
+        f"file_read 被注入 workspace: {captured.get('file')}"
+    )
 
 
 class TestImageInjection:
@@ -1458,3 +1476,125 @@ class TestToolResultTrim:
         messages = [{"role": "user", "content": "x" * 20000}]
         out = loop._trim_tool_results(messages)
         assert out[0]["content"] == "x" * 20000
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2026-08-16(阶段2 反馈): 迭代上限询问继续/停止
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_run_turn_limit_continue_via_method():
+    """超限询问后调用 continue_iterations() → 扩展上限继续执行。
+
+    模拟用户选择"继续": run_turn 挂起时并发调用 continue_iterations,
+    循环应扩展 10 步继续, 直至响应耗尽。
+    """
+    _setup_schema()
+
+    async def _run() -> int:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id, system_prompt="sys", tools=[ECHO_TOOL]
+            )
+            await cm.build_initial(conn)
+            adapter = _MockAdapter(
+                responses=[
+                    *[
+                        ChatResult(
+                            content="",
+                            tool_calls=[_echo_tool_call(f"call_{i}", "x")],
+                            used_provider="mock",
+                        )
+                        for i in range(14)
+                    ],
+                    # 最后: 正常 content, 让循环自然结束(避免 mock 耗尽异常)
+                    ChatResult(content="done", used_provider="mock"),
+                ]
+            )
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=adapter,
+                tools=[ECHO_TOOL],
+                conn=conn,
+                max_iterations=5,
+                # 挂起等待用户决定(不自动超时继续) —— 由下面并发调用决定
+                limit_confirm_timeout=30,
+                # 关闭 Doom Loop 检测(echo 同参工具会误触发, 干扰上限询问验证)
+                cfg={"context": {"loop": {"enabled": False}}},
+            )
+            task = asyncio.create_task(loop.run_turn("loop"))
+            # 等待 loop 挂起在询问点(轮询 _limit_pending)
+            for _ in range(200):
+                if loop._limit_pending:
+                    break
+                await asyncio.sleep(0.02)
+            assert loop._limit_pending, "loop 应挂起在迭代上限询问"
+            loop.continue_iterations()  # 模拟用户点"继续"
+            await task
+            return len(adapter.chat_calls)
+        finally:
+            await conn.close()
+
+    calls = asyncio.run(_run())
+    # max=5 到达后继续扩展 → 调用数应超过 5(上限已扩展继续执行)
+    assert calls > 5, f"continue 后应继续执行, 实际 {calls}"
+
+
+def test_run_turn_limit_stop_via_method():
+    """超限询问后调用 stop_iteration() → 正常收尾(不当作失败)。
+
+    模拟用户选择"停止": loop 应退出, 不产出 ERROR 事件。
+    """
+    _setup_schema()
+
+    async def _run() -> tuple[list[str], ReactLoopState]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id, system_prompt="sys", tools=[ECHO_TOOL]
+            )
+            await cm.build_initial(conn)
+            adapter = _MockAdapter(
+                responses=[
+                    ChatResult(
+                        content="",
+                        tool_calls=[_echo_tool_call(f"call_{i}", "x")],
+                        used_provider="mock",
+                    )
+                    for i in range(30)
+                ]
+            )
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=adapter,
+                tools=[ECHO_TOOL],
+                conn=conn,
+                max_iterations=3,
+                limit_confirm_timeout=30,
+                # 关闭 Doom Loop 检测(echo 同参工具会误触发, 干扰上限询问验证)
+                cfg={"context": {"loop": {"enabled": False}}},
+            )
+            task = asyncio.create_task(loop.run_turn("loop"))
+            for _ in range(200):
+                if loop._limit_pending:
+                    break
+                await asyncio.sleep(0.02)
+            assert loop._limit_pending, "loop 应挂起在迭代上限询问"
+            loop.stop_iteration()  # 模拟用户点"停止"
+            await task
+            events = []
+            while not loop.event_queue.empty():
+                events.append(loop.event_queue.get_nowait())
+            return [e["event_type"] for e in events], loop.state
+        finally:
+            await conn.close()
+
+    types, final_state = asyncio.run(_run())
+    assert "iteration_limit_reached" in types
+    # 停止 → 正常收尾(IDLE), 不进入 ERROR
+    assert final_state != ReactLoopState.ERROR

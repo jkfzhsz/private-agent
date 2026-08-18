@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { adminFetch } from "../utils/apiClient";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 const API_BASE = "http://localhost:8765/admin";
 
@@ -176,8 +177,10 @@ export default function MemoryView({
     }
   };
 
+  // P0-3(2026-08-17): 删除记忆 → 玻璃确认弹层(替代 window.confirm)
+  const [pendingDelete, setPendingDelete] = useState<MemoryItem | null>(null);
+
   const deleteMemory = async (m: MemoryItem): Promise<void> => {
-    if (!window.confirm(`删除这条记忆?(${m.content.slice(0, 40)}…)`)) return;
     try {
       const resp = await adminFetch(`${API_BASE}/memories/${m.id}`, {
         method: "DELETE",
@@ -237,7 +240,8 @@ export default function MemoryView({
   );
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", scrollbarGutter: "stable" }}>
+    <>
+    <div className="view-scroll">
       {/* 操作行: 提取 + 新增 */}
       <div className="stat-card animate-in delay-1" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
         <input
@@ -250,7 +254,7 @@ export default function MemoryView({
         <button className="btn-primary" onClick={() => void doExtract()} disabled={extracting}>
           {extracting ? "提取中…" : "手动提取"}
         </button>
-        {extractMsg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{extractMsg}</span>}
+        {extractMsg && <span className="fs-12 text-secondary">{extractMsg}</span>}
         <span style={{ width: 1, height: 26, background: "rgba(148,163,184,0.25)" }} />
         <input
           className="flow-input"
@@ -303,7 +307,7 @@ export default function MemoryView({
       {/* 注入配置 */}
       <div className="glass-panel animate-in delay-1" style={{ padding: "14px 20px" }}>
         <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 14 }}>
-          <span style={{ fontSize: 13, fontWeight: 600 }}>记忆注入配置</span>
+          <span className="fs-13 fw-600">记忆注入配置</span>
           {cfg && (
             <>
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
@@ -314,11 +318,11 @@ export default function MemoryView({
                 />
                 启用
               </label>
-              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <label className="fs-12 flex-center gap-6">
                 注入上限 {numInput(cfg.inject_limit, (n) => setCfg({ ...cfg, inject_limit: n }))}
               </label>
               {/* 0.5.0 M1: 全局常驻画像条数(其余配额给场景记忆) */}
-              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <label className="fs-12 flex-center gap-6">
                 全局画像(条) {numInput(cfg.inject_global_n, (n) => setCfg({ ...cfg, inject_global_n: n }))}
               </label>
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
@@ -329,13 +333,13 @@ export default function MemoryView({
                 />
                 驱逐前归档
               </label>
-              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <label className="fs-12 flex-center gap-6">
                 提取间隔(轮) {numInput(cfg.extract_interval_turns, (n) => setCfg({ ...cfg, extract_interval_turns: n }))}
               </label>
-              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <label className="fs-12 flex-center gap-6">
                 上限(条) {numInput(cfg.eviction.max_active_count, (n) => setCfg({ ...cfg, eviction: { ...cfg.eviction, max_active_count: n } }))}
               </label>
-              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <label className="fs-12 flex-center gap-6">
                 过期(天) {numInput(cfg.eviction.expire_days, (n) => setCfg({ ...cfg, eviction: { ...cfg.eviction, expire_days: n } }))}
               </label>
               <button className="btn-primary" style={{ padding: "4px 14px", fontSize: 12 }} onClick={() => void saveConfig()} disabled={cfgSaving}>
@@ -349,7 +353,7 @@ export default function MemoryView({
 
       <div className="glass-panel animate-in delay-2" style={{ padding: "20px 24px", flex: 1 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
-          <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.02em" }}>记忆列表</span>
+          <span className="title-block">记忆列表</span>
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
             <input
               className="flow-input"
@@ -396,9 +400,9 @@ export default function MemoryView({
             {searchQ ? "没有匹配的记忆。" : "暂无记忆。聊几轮后系统会自动提取,或使用上方手动提取/新增。"}
           </div>
         )}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div className="flex-col gap-8">
           {memories.map((m) => {
-            const meta = TYPE_META[m.type] ?? { label: m.type, color: "#64748b" };
+            const meta = TYPE_META[m.type] ?? { label: m.type, color: "var(--text-tertiary)" };
             return (
               <div
                 key={m.id}
@@ -417,7 +421,7 @@ export default function MemoryView({
                 >
                   {meta.label}
                 </span>
-                <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="flex-1-min0">
                   <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text-primary)", wordBreak: "break-word" }}>
                     {m.content}
                   </div>
@@ -448,15 +452,14 @@ export default function MemoryView({
                   )}
                 </div>
                 <button
-                  onClick={() => void deleteMemory(m)}
+                  onClick={() => setPendingDelete(m)}
                   title="删除此记忆(软删除)"
+                  // P1-2(2026-08-17): JS hover 改色 → CSS 伪类
+                  className="danger-hover-btn"
                   style={{
-                    flexShrink: 0, width: 26, height: 26, border: "none",
-                    background: "transparent", color: "var(--text-tertiary)",
-                    fontSize: 14, cursor: "pointer", borderRadius: 4,
+                    flexShrink: 0, width: 26, height: 26,
+                    fontSize: 14, borderRadius: 4,
                   }}
-                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--danger-text)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-tertiary)"; }}
                 >
                   ×
                 </button>
@@ -466,5 +469,21 @@ export default function MemoryView({
         </div>
       </div>
     </div>
+
+    {/* P0-3(2026-08-17): 删除记忆玻璃确认弹层 */}
+    <ConfirmDialog
+      open={pendingDelete !== null}
+      title="删除这条记忆?"
+      body={pendingDelete ? `内容: ${pendingDelete.content.slice(0, 40)}…` : ""}
+      confirmText="删除"
+      danger
+      onConfirm={() => {
+        const m = pendingDelete;
+        setPendingDelete(null);
+        if (m) void deleteMemory(m);
+      }}
+      onCancel={() => setPendingDelete(null)}
+    />
+    </>
   );
 }

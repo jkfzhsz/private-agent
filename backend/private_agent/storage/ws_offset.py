@@ -19,6 +19,11 @@ from typing import Any
 
 import asyncpg
 
+# 2026-08-16(历史任务切换空白修复): replay 重放过滤的流式增量事件类型。
+# thinking/delta 是实时流式中间态, 最终内容由 final 承载 —— 长会话
+# (数千条增量)重放时逐条推给前端会卡死渲染, 重放只重建最终状态。
+_REPLAY_STREAM_TYPES = frozenset({"thinking", "delta"})
+
 
 async def fetch_react_events_since(
     conn: asyncpg.Connection,
@@ -209,6 +214,10 @@ async def build_replay_messages(
     #   事件在 replay 重放时不应再次触发前端确认弹窗(历史工具调用已执行完毕,
     #   恢复会话只读回放, 不重新执行/确认); ② 所有重放消息带 replayed: True
     #   标记, 供前端区分实时事件与回放(前端据此跳过确认弹窗等实时副作用)。
+    # 2026-08-16(蒋先生反馈: 历史任务切换空白/无响应): ③ 过滤流式增量
+    #   thinking/delta —— 重放是重建最终状态, 99% 的增量事件(长会话数千条)
+    #   一次性推给前端逐条 setState 会卡死渲染(表现为"点进去什么都不显示"
+    #   + 后续消息积压"不回答")。最终内容由 final 事件承载, 增量无重放价值。
     event_msgs: list[dict[str, Any]] = [
         {
             "type": "react_event",
@@ -222,7 +231,10 @@ async def build_replay_messages(
             "replayed": True,
         }
         for e in events
-        if e["event_type"] != "tool_confirmation_required"
+        if (
+            e["event_type"] != "tool_confirmation_required"
+            and e["event_type"] not in _REPLAY_STREAM_TYPES
+        )
     ]
     # 补 user 事件(messages 表 user 消息, turn > offset) —— react_events 不存 user
     # C-5(架构修订 P2-6): zone 过滤 —— 仅 active 用户消息重放为气泡,
@@ -247,6 +259,44 @@ async def build_replay_messages(
         }
         for r in user_rows
     ]
+    # 2026-08-16(问题2, 蒋先生反馈): 中断轮次(final 事件缺失)补全 ——
+    # 未正常结束的轮次(tool_loop_detected/中断)在 react_events 无 final,
+    # 但 messages 表已累积 assistant 文本。前端渲染只认 final 事件 →
+    # 历史对话显示"思考中"。full 模式下对缺 final 的 turn 从 messages
+    # 补一条合成 final 事件(取该 turn 最后一条 assistant 消息)。
+    # 已正常结束的 turn 有 final 事件, 不重复补(全库 17 个中断会话受益)。
+    if full:
+        missing_turn_rows = await conn.fetch(
+            """
+            SELECT m.turn, m.content
+            FROM messages m
+            WHERE m.session_id = $1 AND m.role = 'assistant'
+              AND m.turn > $2
+              AND NOT EXISTS (
+                  SELECT 1 FROM react_events e
+                  WHERE e.session_id = m.session_id
+                    AND e.turn = m.turn AND e.event_type = 'final'
+              )
+            ORDER BY m.id DESC
+            """,
+            session_id,
+            user_offset,
+        )
+        # 每个 turn 只补一条(最后一条 assistant 消息)
+        seen_turns: set[int] = set()
+        for r in missing_turn_rows:
+            turn = int(r["turn"])
+            if turn in seen_turns:
+                continue
+            seen_turns.add(turn)
+            user_events.append({
+                "type": "react_event",
+                "session_id": session_id,
+                "turn": turn,
+                "event_type": "final",
+                "payload": {"content": r["content"] or "", "turn": turn},
+                "replayed": True,
+            })
     # 合并排序: user 事件位于该轮最前(渲染分组需要 user 在 turn 组内)
     merged: list[tuple[int, int, dict[str, Any]]] = [
         (e["turn"], 1, e) for e in event_msgs
@@ -257,7 +307,8 @@ async def build_replay_messages(
     messages.append({
         "type": "replay_end",
         "session_id": session_id,
-        "count": len(events) + len(user_events),
+        # 2026-08-16: count 改为实际补发条数(过滤流式增量后 ≠ 原始事件数)
+        "count": len(messages),
         "effective_offset": effective_offset,
     })
     return messages

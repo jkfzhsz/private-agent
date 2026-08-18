@@ -24,16 +24,24 @@ async def _search_lessons_handler(args: dict) -> ToolResult:
     """检索历史经验并返回格式化结果。
 
     Args:
-        args: keyword(必选), scope(可选限定检索域)。
+        args: keyword(可选), scope(可选限定检索域), limit(可选, 默认 5, 最大 50)。
 
     Returns:
         格式化后的经验检索结果文本。
+
+    2026-08-16(阶段5 增强): keyword 可空 —— 仅提供 scope 时列出该场景
+    经验(按重要度排序); keyword+scope 组合模糊匹配。
     """
     keyword = (args.get("keyword") or "").strip()
-    if not keyword:
-        return ToolResult(output="", error="No keyword provided")
-
     scope = args.get("scope") or None
+    try:
+        limit = int(args.get("limit") or 5)
+    except (TypeError, ValueError):
+        limit = 5
+    limit = max(1, min(50, limit))
+
+    if not keyword and not scope:
+        return ToolResult(output="", error="keyword 与 scope 至少提供一个")
 
     try:
         cfg = loader.load_config()
@@ -46,7 +54,10 @@ async def _search_lessons_handler(args: dict) -> ToolResult:
 
     try:
         repo = EvolutionRepo(conn)
-        lessons = await repo.search_by_keyword(keyword=keyword, scope=scope, limit=5)
+        if keyword:
+            lessons = await repo.search_by_keyword(keyword=keyword, scope=scope, limit=limit)
+        else:
+            lessons = await repo.search_by_scope(scope, limit=limit)
     except Exception as e:
         return ToolResult(
             output="",
@@ -73,24 +84,27 @@ async def _search_lessons_handler(args: dict) -> ToolResult:
 SEARCH_LESSONS_TOOL = ToolDef(
     name="search_lessons",
     description=(
-        "检索历史任务经验。当遇到类似任务时，先检索是否有可复用的成功模式"
-        "或失败教训。Args: keyword (str, required) - 检索关键词; "
-        "scope (str, optional) - 场景限定"
-        "(office/data_analysis/frontend_design/monitor/global)"
+        "检索历史任务经验(进化经验库)。当遇到类似任务时, 先检索是否有可复用的"
+        "成功模式或失败教训。keyword(可选) 模糊匹配经验内容; scope(可选) 场景"
+        "限定(office/data_analysis/frontend_design/monitor/global); 两者至少一个。"
+        "仅给 scope 时按重要度列出该场景经验。"
     ),
     parameters_schema={
         "type": "object",
         "properties": {
             "keyword": {
                 "type": "string",
-                "description": "检索关键词",
+                "description": "检索关键词(与 scope 至少一个)",
             },
             "scope": {
                 "type": "string",
                 "description": "场景限定(office/data_analysis/frontend_design/monitor/global)",
             },
+            "limit": {
+                "type": "integer",
+                "description": "返回条数, 默认 5, 最大 50",
+            },
         },
-        "required": ["keyword"],
     },
     handler=_search_lessons_handler,
     safety_level="readonly",

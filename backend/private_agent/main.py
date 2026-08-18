@@ -96,6 +96,9 @@ _session_locks: dict[int, "asyncio.Lock"] = {}
 # 打断/停止: per-session 运行 task 集合(T-3 架构修订 P0-4 修复——
 # 原单槽 dict 被并发 user_message 覆盖导致 cancel 打错目标)
 _session_tasks: dict[int, "set[asyncio.Task]"] = {}
+# 2026-08-16(阶段2 反馈): per-session 当前 ReactLoop 实例引用 ——
+# WS continue_iteration/stop_iteration 消息定位到挂起中的循环(迭代上限询问)
+_session_loops: dict[int, "ReactLoop"] = {}
 # V2 P1: per-session 权限确认管理器(蓝图 §5.12, tool_confirmation 消息 resolve)
 _permission_managers: dict[int, "PermissionManager"] = {}
 # V1.5 项-5: per-session 流程级暂停控制器(生成中挂起, 区别于 cancel 终止)
@@ -320,6 +323,49 @@ async def _get_supplementary_skill_names(conn, session_id: int) -> list[str]:
     return [r["skill_name"] for r in rows]
 
 
+async def _resolve_harness_tool_descriptions(
+    cfg: dict, session_id: int, conn
+) -> dict:
+    """A-1: 解析会话 harness 工具描述覆盖(供 ReactLoop schema 组装)。
+
+    通道:
+    - monitor 会话(无涯): agent-profile.json harness.tool_descriptions
+    - 场景 skill 会话: skill.yaml harness.tool_descriptions(锁定 skill)
+    - 无 harness 配置 → 返回空 dict(零回归, 描述与现状一致)
+
+    Returns:
+        {tool_name: description} 映射(未命中工具不受影响)。
+    """
+    try:
+        session_kind = await conn.fetchval(
+            "SELECT kind FROM sessions WHERE id = $1", session_id
+        )
+        if session_kind == "monitor":
+            profile = _load_agent_profile_harness(cfg)
+            if profile and profile.get("enabled", True):
+                descs = profile.get("tool_descriptions") or {}
+                if isinstance(descs, dict):
+                    return dict(descs)
+            return {}
+        locked_skill = await conn.fetchval(
+            "SELECT locked_skill_name FROM sessions WHERE id = $1",
+            session_id,
+        )
+        if not locked_skill:
+            return {}
+        from private_agent.skills.loader import SkillLoader
+
+        loader = SkillLoader.from_cfg(cfg)
+        skill = await loader.load(locked_skill, conn)
+        harness = skill.manifest.harness or {}
+        if not harness.get("enabled"):
+            return {}
+        descs = harness.get("tool_descriptions") or {}
+        return dict(descs) if isinstance(descs, dict) else {}
+    except Exception:  # noqa: BLE001 - harness 解析失败零回归
+        return {}
+
+
 # 跨场景基础记忆工具: 不受 skill 白名单过滤(始终可用)。
 # 2026-08-13 修复: memory_save 因不在各 skill.yaml 白名单被过滤, 用户反馈
 # "工具列表没有 memory_save"。记忆写入/检索是跨场景基础能力(与 file_read/
@@ -388,6 +434,9 @@ async def _get_tools(cfg, session_id: int, conn):
     (config tools.mcp.skill_binding), 未绑定的 server 不装配 —— 工具池
     从 231 收敛到 skill 相关子集; 每轮再由 ToolSelector 选 top-N 注入模型。
 
+    B-1(2026-08-15): compress_now 工具按 config context.compression.
+    compress_now_tool 条件注册(默认 false = 不注册, 零回归)。
+
     - frozen_tools 供 ContextManager hash 锁定(与 activate 一致)
     - 全部工具供 ReactLoop 调用(内置 + mcp__ 前缀工具)
     """
@@ -409,7 +458,15 @@ async def _get_tools(cfg, session_id: int, conn):
     except Exception:
         server_ids = None
     mcp_tools = await _get_mcp_manager().get_tools(cfg, server_ids)
-    return frozen_tools + mcp_tools
+    tools = frozen_tools + mcp_tools
+    # B-1: compress_now 工具条件注册(不进 frozen_tools → 不影响 frozen hash)
+    comp_cfg = cfg.get("context", {}).get("compression", {})
+    if comp_cfg.get("compress_now_tool"):
+        from private_agent.tools.builtins.compress_now import COMPRESS_NOW_TOOL
+
+        if not any(t.name == "compress_now" for t in tools):
+            tools = [*tools, COMPRESS_NOW_TOOL]
+    return tools
 
 
 # 项目优化(Hermes SOUL.md 借鉴): 稳定身份层, 永远在 system prompt 首位。
@@ -435,6 +492,10 @@ async def _monitor_system_prompt(cfg, session_id: int, conn):
 
     读取 skills/monitor/system_prompt.md, 末尾附加最近指标摘要
     (collector.latest_summary), 让主智能体会话启动即感知系统状态。
+
+    A-1(2026-08-15): 追加 [Scene Profile] 块 —— harness 经 agent-profile.json
+    (MONITOR_SCENE_PROFILE + harness.tool_descriptions 关联)。无 harness
+    配置 → 行为不变(零回归)。
     """
     from pathlib import Path
 
@@ -453,7 +514,50 @@ async def _monitor_system_prompt(cfg, session_id: int, conn):
                 base = f"{base}\n\n{summary}"
     except Exception:  # noqa: BLE001 - 指标摘要注入失败不影响提示词
         pass
+    # A-1: [Scene Profile] 块注入(monitor 通道 = agent-profile.json harness)
+    try:
+        from private_agent.skills.harness import (
+            MONITOR_SCENE_PROFILE,
+            build_scene_profile_block,
+        )
+
+        profile = _load_agent_profile_harness(cfg)
+        if profile and profile.get("enabled", True):
+            block = build_scene_profile_block(MONITOR_SCENE_PROFILE)
+            if block:
+                base = f"{base}\n\n{block}"
+    except Exception:  # noqa: BLE001 - harness 注入失败不影响提示词
+        pass
     return base
+
+
+def _load_agent_profile_harness(cfg: dict) -> dict | None:
+    """读取 agent-profile.json 的 harness 段(A-1, monitor 通道)。
+
+    agent-profile.json 位置: ${PA_USER_DATA}/agent-profile.json(与 admin
+    API _agent_profile_path 同源); PA_USER_DATA 未设置 → 回退 WORKSPACE。
+    文件不存在 / 无 harness 段 / JSON 损坏 → 返回 None(零回归)。
+    """
+    try:
+        import json as _json
+        import os as _os
+        from pathlib import Path as _Path
+
+        root = _os.path.expandvars(
+            _os.environ.get("PA_USER_DATA", "")
+        ).strip()
+        if not root:
+            root = _os.path.expandvars(_os.environ.get("WORKSPACE", "")).strip()
+        if not root:
+            return None
+        p = _Path(root) / "agent-profile.json"
+        if not p.exists():
+            return None
+        data = _json.loads(p.read_text(encoding="utf-8"))
+        harness = data.get("harness")
+        return harness if isinstance(harness, dict) else None
+    except Exception:  # noqa: BLE001 - 读取失败返回 None(零回归)
+        return None
 
 
 async def _get_system_prompt(cfg, session_id: int, conn):
@@ -889,6 +993,72 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     "session_id": session_id,
                     "message": "已暂停(当前迭代完成后生效), 点击继续恢复",
                 })
+            elif msg_type == "continue_iteration":
+                # 2026-08-16(阶段2 反馈): 迭代上限询问"继续" —— 用户确认后
+                # 扩展上限并唤醒挂起的 ReactLoop(长任务不因 20 步上限中断)。
+                try:
+                    session_id = int(msg["session_id"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "invalid continue_iteration: session_id (int) required",
+                    })
+                    continue
+                if session_id <= 0:
+                    await ws.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "invalid continue_iteration: session_id>0 required",
+                    })
+                    continue
+                loop_ref = _session_loops.get(session_id)
+                if loop_ref is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "continue_iteration_failed: 无进行中的迭代上限询问",
+                    })
+                    continue
+                loop_ref.continue_iterations()
+                await ws.send_json({
+                    "type": "iteration_continued",
+                    "session_id": session_id,
+                    "message": "已继续执行",
+                })
+            elif msg_type == "stop_iteration":
+                # 2026-08-16(阶段2 反馈): 迭代上限询问"停止" —— 用户确认后
+                # 结束挂起的循环(正常收尾, 不当作失败)。
+                try:
+                    session_id = int(msg["session_id"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "invalid stop_iteration: session_id (int) required",
+                    })
+                    continue
+                if session_id <= 0:
+                    await ws.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "invalid stop_iteration: session_id>0 required",
+                    })
+                    continue
+                loop_ref = _session_loops.get(session_id)
+                if loop_ref is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "stop_iteration_failed: 无进行中的迭代上限询问",
+                    })
+                    continue
+                loop_ref.stop_iteration()
+                await ws.send_json({
+                    "type": "iteration_stopped",
+                    "session_id": session_id,
+                    "message": "已停止执行",
+                })
             elif msg_type == "tool_confirmation":
                 # V2 P1: 权限确认响应(蓝图 §5.12, 用户点击同意/拒绝)
                 try:
@@ -1028,18 +1198,35 @@ async def _handle_user_message(
     """
     lock = _session_locks.setdefault(session_id, asyncio.Lock())
     conn = None
+    # 2026-08-16(历史任务继续提问无响应诊断): 步骤日志定位卡点 ——
+    # 重启后首次 user_message 无响应, 需确认卡在锁/配置/DB/工具装配/模型哪一步。
+    _step = 0
+
+    def _log_step(name: str) -> None:
+        nonlocal _step
+        _step += 1
+        _logger.info(
+            "user_message step=%d/%s session=%s", _step, name, session_id,
+        )
+
+    _log_step("enter")
     async with lock:
         try:
+            _log_step("lock_acquired")
             cfg = await _load_cfg_with_runtime()
+            _log_step("cfg_loaded")
             # B1 修复: 注入沙箱配置(code_execution handler 依赖模块级全局)
             from private_agent.tools.builtins.code_execution import set_sandbox_config
 
             set_sandbox_config(cfg.get("sandbox"))
+            _log_step("sandbox_set")
             # 阶段二批次 2: 注入安全配置(http_request SSRF 校验依赖模块级全局)
             from private_agent.tools.builtins.http_request import set_security_config
 
             set_security_config(cfg)
+            _log_step("security_set")
             conn = await db.connect()
+            _log_step("db_connected")
             # 会话懒创建(蓝图 §2.10):WS 收到首条 user_message 时,
             # sessions 无该行则插入,保证 ensure_initial 外键不失败
             # 懒创建: title 留空(NULL), list_sessions 用首条用户消息兜底生成可读标题
@@ -1051,6 +1238,7 @@ async def _handle_user_message(
                     "INSERT INTO sessions (id) VALUES ($1)",
                     session_id,
                 )
+            _log_step("session_ready")
             # 2026-08-12 Phase 2: /召唤的附加技能 → 挂载到会话(幂等, 不改变
             # locked_skill_name)。挂载后 system_prompt/工具白名单自动合并。
             if supplementary_skills:
@@ -1073,12 +1261,27 @@ async def _handle_user_message(
             # workspace_root(backend), 而 file_read 校验用会话 workspace,
             # 两处不一致 → 模型把产物写到 backend/outputs(清和验收复现:
             # .eval_review_queue.json 落 qinghe 但产物落 backend)。
+            # 2026-08-16(阶段1-a): session_kind 查询提前(workspace 兜底依赖)。
+            session_kind = await conn.fetchval(
+                "SELECT kind FROM sessions WHERE id = $1", session_id
+            )
             session_workspace = await conn.fetchval(
                 "SELECT workspace FROM sessions WHERE id = $1", session_id
             )
             if session_workspace:
                 cfg = {**cfg, "system": {**cfg.get("system", {}),
                                           "workspace_root": session_workspace}}
+            # 2026-08-16(阶段1-a, agent-upgrader 设计文档 §5.1): monitor 会话
+            # (无涯)无自有 workspace 时兜底为 PA 源码根 —— 触发 ws_* 工作区
+            # 文件工具族注册 + workspace_root 指向源码树(无涯要改 PA 代码)。
+            # 仅 monitor 兜底; 场景会话无 workspace = 通用场景(零回归)。
+            if not session_workspace and session_kind == "monitor":
+                from pathlib import Path as _Path
+
+                _pa_root = str(_Path(__file__).resolve().parents[2])
+                cfg = {**cfg, "system": {**cfg.get("system", {}),
+                                          "workspace_root": _pa_root}}
+                session_workspace = _pa_root
             # V1.5 项-4: 断点恢复前置处理(必须在 reload_from_db 之前清理
             # 中断轮残留, 否则内存上下文会加载半轮消息)
             # 流程: 读最新 checkpoint → 回滚中断轮(清 assistant/tool 残留 +
@@ -1139,13 +1342,81 @@ async def _handle_user_message(
             # frozen_tools: 内置白名单(与 activate 同源, hash 锁定)
             # tools: 全量(内置 + MCP, 供 ReactLoop 调用)
             frozen_tools = await _get_frozen_tools(cfg, session_id, conn)
-            tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
             # 0.5.0 P3: monitor 会话(主智能体) → 追加监控工具白名单
             # (system_metrics_query/system_status/optim_plan/apply_optim)。
             # 仅 monitor 会话装配, 场景会话(子瞻/白圭/清和)不暴露系统级工具。
-            session_kind = await conn.fetchval(
-                "SELECT kind FROM sessions WHERE id = $1", session_id
-            )
+            # session_kind 已在会话工作区处理处提前查询(2026-08-16 阶段1-a)。
+            # 2026-08-16(蒋先生反馈): MCP 装配按会话 kind 收敛 —— monitor
+            # (无涯)走 config skill_binding.monitor(仅 mempalace/Searchpin),
+            # 此前全量装配 ifind 金融系 32 工具导致对话启动 [TOOLS] 过大。
+            # 场景会话沿用 _get_tools 的 skill_binding 过滤语义。
+            if session_kind == "monitor":
+                binding0 = (
+                    cfg.get("tools", {}).get("mcp", {}).get("skill_binding", {}) or {}
+                )
+                server_ids = list(binding0.get("monitor") or []) or None
+                tools = frozen_tools + await _get_mcp_manager().get_tools(
+                    cfg, server_ids
+                )
+                # 2026-08-16(阶段1-a, agent-upgrader 设计文档 §2.1/§5.1):
+                # monitor 场景级锚点覆盖 —— 动手工具(文件/执行/进化/工作区)
+                # 无条件注入, 同时把全局 mcp__mempalace__* 36 锚点收敛为
+                # 核心记忆操作(缓解 schema 拥挤, "看不见手"注入层根治)。
+                # cfg 为本会话局部副本, 不影响其他会话(零回归)。
+                _sel = dict(
+                    (cfg.get("tools", {}).get("tool_selection", {}) or {})
+                )
+                _sel["always_include"] = [
+                    "code_execution", "file_read", "file_write",
+                    "optim_plan", "apply_optim",
+                    "ws_read", "ws_write", "ws_list", "ws_rm",
+                    "git_status", "git_diff", "git_commit", "pytest_run",
+                    "project_scan",
+                    "skill_list", "skill_create", "skill_update", "skill_delete",
+                    "mcp_server_list", "mcp_server_add",
+                    "eval_scenes", "eval_run", "eval_report",
+                    "lessons_add", "search_lessons",
+                    "mcp__mempalace__mempalace_search",
+                    "mcp__mempalace__mempalace_kg_query",
+                    "mcp__mempalace__mempalace_add_drawer",
+                    "mcp__mempalace__mempalace_list_drawers",
+                    "mcp__mempalace__mempalace_get_drawer",
+                    "mcp__Searchpin__*",
+                ]
+                cfg = {
+                    **cfg,
+                    "tools": {
+                        **cfg.get("tools", {}),
+                        "tool_selection": _sel,
+                    },
+                }
+            else:
+                tools = frozen_tools + await _get_mcp_manager().get_tools(cfg)
+            # B-1(2026-08-15): compress_now 工具条件注册(config
+            # context.compression.compress_now_tool, 默认 false = 不注册)。
+            # 不进 frozen_tools → 不影响 frozen hash(工具演进不触发重建)。
+            comp_cfg = cfg.get("context", {}).get("compression", {})
+            if comp_cfg.get("compress_now_tool"):
+                from private_agent.tools.builtins.compress_now import (
+                    COMPRESS_NOW_TOOL,
+                )
+
+                if not any(t.name == "compress_now" for t in tools):
+                    tools = [*tools, COMPRESS_NOW_TOOL]
+            # C-1(2026-08-15): 工作区文件工具族 —— 仅会话有 workspace 时注册
+            # (无 workspace = 通用场景, 不注册 = 零回归)。不进 frozen_tools
+            # → 不影响 frozen hash; safety_level 由 ToolDef 声明(elevated/
+            # high/safe), 权限确认走既有通道。
+            # 2026-08-16(阶段1-a): 复用前面已解析(含 monitor 兜底)的
+            # session_workspace, 避免重复查库且 monitor 兜底值生效。
+            session_ws = session_workspace
+            if session_ws:
+                from private_agent.tools.builtins.workspace_tools import WS_TOOLS
+
+                existing = {t.name for t in tools}
+                for _wt in WS_TOOLS:
+                    if _wt.name not in existing:
+                        tools = [*tools, _wt]
             if session_kind == "monitor":
                 from private_agent.tools.builtins import register_monitor_tools
                 from private_agent.tools.registry import ToolRegistry
@@ -1153,6 +1424,36 @@ async def _handle_user_message(
                 _mreg = ToolRegistry()
                 register_monitor_tools(_mreg)
                 tools = tools + _mreg.list_tools()
+                # 2026-08-16(阶段2, agent-upgrader 设计文档 §2.1): 无涯开发
+                # 闭环工具 —— git 工具族(status/diff/commit) + pytest_run
+                # (PA 自身测试运行器)。仅 monitor 会话装配(场景会话不可见);
+                # 不进 frozen_tools → 不影响 frozen hash。
+                from private_agent.tools.builtins.git_tools import GIT_TOOLS
+                from private_agent.tools.builtins.pytest_run import PYTEST_RUN_TOOL
+                # 2026-08-16(阶段3): 外部项目评估工具(能力域②核心)
+                from private_agent.tools.builtins.project_scan import (
+                    PROJECT_SCAN_TOOL,
+                )
+                # 2026-08-16(阶段4): 自我扩展工具(能力域⑥)
+                from private_agent.tools.builtins.skill_manager import (
+                    SKILL_MANAGER_TOOLS,
+                )
+                from private_agent.tools.builtins.mcp_config_manager import (
+                    MCP_MANAGER_TOOLS,
+                )
+                from private_agent.tools.builtins.eval_runner import (
+                    EVAL_MANAGER_TOOLS,
+                )
+
+                _existing_names = {t.name for t in tools}
+                for _gt in [
+                    *GIT_TOOLS, PYTEST_RUN_TOOL, PROJECT_SCAN_TOOL,
+                    *SKILL_MANAGER_TOOLS, *MCP_MANAGER_TOOLS,
+                    *EVAL_MANAGER_TOOLS,
+                ]:
+                    if _gt.name not in _existing_names:
+                        tools = [*tools, _gt]
+                        _existing_names.add(_gt.name)
             # V1.5 项-1(ADR-012 §3.5): 附加 delegate_subtask 工具。
             # - 闭包注入当轮上下文(conn/cfg/session_id/event_sink/tools),
             #   多会话并发无模块级全局串扰;
@@ -1345,11 +1646,21 @@ async def _handle_user_message(
                 reflection_engine=reflection_engine,
                 evolution_repo=evolution_repo,
                 failure_collector=failure_collector,
+                # A-1(2026-08-15 Agent Harness): 场景级工具描述覆盖
+                # (skill.yaml harness / agent-profile.json monitor 通道)
+                tool_descriptions=await _resolve_harness_tool_descriptions(
+                    cfg, session_id, conn
+                ),
             )
             # 阶段三批次1(T1.2/T3.1): 同步会话级权限模式 + Skill 权限规则
             await _sync_permission_manager(
                 _get_permission_manager(session_id), conn, session_id, cfg
             )
+            # 2026-08-16(阶段2 反馈): 注册会话级 loop 引用 —— WS
+            # continue_iteration/stop_iteration 消息定位挂起中的循环
+            # (迭代上限询问)。单轮任务完成即注销(见 finally)。
+            _session_loops[session_id] = loop
+            _log_step("loop_ready")
             # V1.3-7.2 工作流自动化: 自动连续执行。
             # 优先级: WS user_message 显式传参 > 会话级配置(auto_execute/max_rounds)。
             # 每轮独立 run_turn + turn_end(前端按 turn 分组), 后续轮用
@@ -1369,12 +1680,14 @@ async def _handle_user_message(
             max_rounds = int(max_rounds or 0)
             while True:
                 rounds += 1
+                _log_step(f"run_turn_start_r{rounds}")
                 if resume:
                     # V1.5 项-4: 断点恢复模式 —— 不追加 user 消息,
                     # 从 resume_from_turn 原地续跑中断轮; 仅跑一轮
                     await loop.run_turn(resume=True)
                 else:
                     await loop.run_turn(run_content)
+                _log_step(f"run_turn_done_r{rounds}")
                 # 事件已通过 event_sink 实时推送, 无需再排空 event_queue
                 await ws.send_json({
                     "type": "turn_end",
@@ -1435,6 +1748,9 @@ async def _handle_user_message(
         finally:
             if conn is not None:
                 await conn.close()
+            # 2026-08-16(阶段2 反馈): 注销会话级 loop 引用(任务完成/异常均清理)
+            if _session_loops.get(session_id) is loop:
+                _session_loops.pop(session_id, None)
 
 
 def _migrate_user_data_from_workspace() -> None:

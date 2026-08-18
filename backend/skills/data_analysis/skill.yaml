@@ -53,3 +53,16 @@ examples:
   inject_to: frozen_zone
 max_frozen_token: 4000
 workspace: D:\PA\baigui
+# 2026-08-15(A-1 Agent Harness 工程化, 设计文档 §3.1-A1)
+harness:
+  enabled: true
+  prompt_vars:
+    audience: "A 股个人投资者"
+    tone: "严谨、克制、数据先行"
+  tool_descriptions:
+    code_execution: "沙箱内执行 Python 代码。财务计算/估值模型/行情图表(matplotlib)用。"
+    web_search: "检索公开市场信息与公告。投资分析类任务优先，标注数据来源与日期。"
+  compression:
+    keep_turns: 8
+    keep_ratio: 0.15
+  middleware: []

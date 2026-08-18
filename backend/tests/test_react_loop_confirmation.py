@@ -109,7 +109,7 @@ def test_confirmed_tool_executes_and_emits_result():
         for cid in list(pm._pending):
             pm.resolve(cid, True)
 
-    async def _run() -> tuple[list[dict], ReactLoopState]:
+    async def _run() -> tuple[list[dict], ReactLoopState, int]:
         conn = await asyncpg.connect(TEST_DSN)
         try:
             session_id = await _create_session(conn)
@@ -133,13 +133,15 @@ def test_confirmed_tool_executes_and_emits_result():
             events: list[dict] = []
             while not loop.event_queue.empty():
                 events.append(loop.event_queue.get_nowait())
-            return events, loop.state
+            return events, loop.state, session_id
         finally:
             await conn.close()
 
-    events, state = asyncio.run(_run())
+    events, state, session_id = asyncio.run(_run())
     # handler 收到 args(含 react_loop 注入的 _on_output 流式回调)
-    assert calls == [{"code": "print(1)", "session_id": "s1", "_on_output": calls[0]["_on_output"]}]
+    # 2026-08-16: ReactLoop 对 code_execution 强制注入 session_id(会话真实
+    # id, 沙箱按会话隔离目录) —— 覆盖测试传入的 "s1", 断言以注入值为准。
+    assert calls == [{"code": "print(1)", "session_id": str(session_id), "_on_output": calls[0]["_on_output"]}]
     assert "_on_output" in calls[0]  # 流式回调已注入
     event_types = [e["event_type"] for e in events]
     assert "tool_call" in event_types
