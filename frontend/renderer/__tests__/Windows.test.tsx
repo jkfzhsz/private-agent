@@ -575,8 +575,10 @@ describe("App 四窗口并发集成", () => {
     const sessionRow = await screen.findByText(/系统监控/);
     await user.click(sessionRow);
     // 修复前: 跳主页; 修复后: 进 chat 对话界面(输入框出现)
+    // 2026-08-18: activeSlot 同步修复后 monitor 会话 placeholder 为
+    // "向主智能体提问…"(activeSlot===0 && !activeSkill 分支), 正则需兼容
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/输入消息|输入|发送/i)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/向主智能体提问|输入消息|输入|发送/i)).toBeInTheDocument();
     });
   });
 });
