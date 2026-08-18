@@ -1,0 +1,77 @@
+0000000000000000000000000000000000000000 c0c4e60de68ee638da2ee7d40e1d429db3677cc3 unknown <zongxin@TABLET-ICMS8US1.(none)> 1786370986 +0800	clone: from https://github.com/jkfzhsz/private-agent.git
+c0c4e60de68ee638da2ee7d40e1d429db3677cc3 c0c4e60de68ee638da2ee7d40e1d429db3677cc3 unknown <zongxin@TABLET-ICMS8US1.(none)> 1786371346 +0800	reset: moving to HEAD
+c0c4e60de68ee638da2ee7d40e1d429db3677cc3 bdea2672cda82db958af6a5a405b289d2e1f0566 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786371519 +0800	commit: docs: 规划文档与版本收尾(2026-08-02 至 08-10)
+bdea2672cda82db958af6a5a405b289d2e1f0566 e97110b14b4ea76cba2d9abb6448ea0cad36d68a jkfzhsz <jkfzhsz@users.noreply.github.com> 1786371527 +0800	commit: feat(backend): 核心功能累积(2026-08-02 至 08-10)
+e97110b14b4ea76cba2d9abb6448ea0cad36d68a 6da182632f4db61f59075e40ba541a699d71389a jkfzhsz <jkfzhsz@users.noreply.github.com> 1786371536 +0800	commit: feat(skills): 新增技能体系(2026-08-02 至 08-10)
+6da182632f4db61f59075e40ba541a699d71389a baf739ce57dff3336392643fc55d23e3d947aaab jkfzhsz <jkfzhsz@users.noreply.github.com> 1786371545 +0800	commit: test(backend)+chore: 测试扩充与脚本配置(2026-08-02 至 08-10)
+baf739ce57dff3336392643fc55d23e3d947aaab eea262f0f156e45d18e45ebd336f304b70b6b47e jkfzhsz <jkfzhsz@users.noreply.github.com> 1786371554 +0800	commit: feat(frontend): 前端累积(2026-08-02 至 08-10)
+eea262f0f156e45d18e45ebd336f304b70b6b47e 5452d026aef0a86b32e0191d8cdb16e3bc1618d2 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786371562 +0800	commit: chore: 打包脚本改 win-unpacked 便携版 + 忽略沙箱产物
+5452d026aef0a86b32e0191d8cdb16e3bc1618d2 f1cad183726935b7c677d0602bc0a4c6e2a859a3 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786412845 +0800	commit: feat(evolution): add skill_lessons table and EvolutionRepo for experience storage
+f1cad183726935b7c677d0602bc0a4c6e2a859a3 24f8cb2092eb8b973a93bc9c21648dfd87c66761 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786412927 +0800	commit: feat(reflection): add ReflectionEngine for post-task experience extraction
+24f8cb2092eb8b973a93bc9c21648dfd87c66761 24f8cb2092eb8b973a93bc9c21648dfd87c66761 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786413193 +0800	reset: moving to HEAD
+24f8cb2092eb8b973a93bc9c21648dfd87c66761 6962206c7537bf457e050a1f1414ac3b63a98da1 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786413260 +0800	commit: feat(react-loop): integrate reflection phase after task completion
+6962206c7537bf457e050a1f1414ac3b63a98da1 2e1d86e49969ba438368a0ae1885986d4e8253cd jkfzhsz <jkfzhsz@users.noreply.github.com> 1786416038 +0800	commit: feat(tools): add search_lessons tool for experience retrieval
+2e1d86e49969ba438368a0ae1885986d4e8253cd 141e262d773f5c50d9b9584691173bf010263b2c jkfzhsz <jkfzhsz@users.noreply.github.com> 1786416462 +0800	commit: fix(reflection): align payload keys with production react events
+141e262d773f5c50d9b9584691173bf010263b2c f47c5a0fd75a7d468b2d8b6d7a54e7c5449ce0cd jkfzhsz <jkfzhsz@users.noreply.github.com> 1786416946 +0800	commit: feat(context): inject scene lessons into Stable Zone
+f47c5a0fd75a7d468b2d8b6d7a54e7c5449ce0cd 9e0201a2c368a887c52e456e1f85ce1b225c22c1 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786417194 +0800	commit: feat(admin): add lessons management API (list/discard/merge)
+9e0201a2c368a887c52e456e1f85ce1b225c22c1 296f6a7d7d4989e0f6032df6dbf35eb984024620 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786417417 +0800	commit: style(context): drop redundant zone key in lessons injection
+296f6a7d7d4989e0f6032df6dbf35eb984024620 85751424189da35849586c71e8f55d477ddc95a1 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786417744 +0800	commit: feat(eval): add OnlineFailureCollector to bridge online failures to review queue
+85751424189da35849586c71e8f55d477ddc95a1 7e978613aa159b89b653b9929d119cca7d54f3c6 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786417978 +0800	commit: feat(core): integrate failure collection into ReactLoop
+7e978613aa159b89b653b9929d119cca7d54f3c6 044b3523276a08d496269cf80726dfdbe3f75e39 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786423504 +0800	commit: feat(monitor): upgrade main agent to project evolutionist with scheduling tools
+044b3523276a08d496269cf80726dfdbe3f75e39 e9bba7f3790a4e4761bfd42d9c8a018f5b8d4071 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786423960 +0800	commit: feat(core): wire evolution components in main.py with e2e validation
+e9bba7f3790a4e4761bfd42d9c8a018f5b8d4071 e906bf753288dbe62553b411849fb8dc401965b1 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786424220 +0800	commit: docs: mark Phase 4 tasks complete in plan
+e906bf753288dbe62553b411849fb8dc401965b1 e906bf753288dbe62553b411849fb8dc401965b1 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786424599 +0800	reset: moving to HEAD
+e906bf753288dbe62553b411849fb8dc401965b1 a5d76eb0f926cc96d27dbf15a7acbebd9c7737fa jkfzhsz <jkfzhsz@users.noreply.github.com> 1786424679 +0800	commit: test(react-loop): align same_tool assertion with 2026-08-10 batch-op fix
+a5d76eb0f926cc96d27dbf15a7acbebd9c7737fa f403f8e8ebdb9b5a4fb4ec627b636d7732cda6a2 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786425148 +0800	commit: chore: ignore broken git backup dir from 2026-08-10
+f403f8e8ebdb9b5a4fb4ec627b636d7732cda6a2 fd85b1086c978b1ef08c91efc355beb1d6f12334 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786425156 +0800	commit: docs: add dev-fix RCA artifact and self-evolution reference
+fd85b1086c978b1ef08c91efc355beb1d6f12334 c83d7f3d1180c3bc5e844bb5f9f233baf1aa9b36 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786425589 +0800	commit: style(build): unify step numbering to /7 in build-electron.bat
+c83d7f3d1180c3bc5e844bb5f9f233baf1aa9b36 fd85b1086c978b1ef08c91efc355beb1d6f12334 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786425659 +0800	reset: moving to HEAD~1
+fd85b1086c978b1ef08c91efc355beb1d6f12334 2f6ffe0e8e1a5a745c1a0565e8f6b46a4225f1ee jkfzhsz <jkfzhsz@users.noreply.github.com> 1786494136 +0800	commit: fix(subagent): isolate subagent events by session_id across windows
+2f6ffe0e8e1a5a745c1a0565e8f6b46a4225f1ee 0ce0072f8303a701811fcdbc8ecdfb30df89be4c jkfzhsz <jkfzhsz@users.noreply.github.com> 1786495593 +0800	commit: perf(renderer): O(1) delta accumulation + turnGroups precompute
+0ce0072f8303a701811fcdbc8ecdfb30df89be4c 0ce0072f8303a701811fcdbc8ecdfb30df89be4c jkfzhsz <jkfzhsz@users.noreply.github.com> 1786496636 +0800	reset: moving to HEAD
+0ce0072f8303a701811fcdbc8ecdfb30df89be4c 70479afc57362344ec0819d8356a2e3610f6832c jkfzhsz <jkfzhsz@users.noreply.github.com> 1786496676 +0800	commit: feat(rag): 方案1 - extra_python_path 注入恢复打包版 RAG 检索能力
+70479afc57362344ec0819d8356a2e3610f6832c d93264fecffc98fdf843813955bb68a546d0bce5 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786762267 +0800	commit: feat: 事件流审计(A-1) + 场景工作区 + 历史任务UI优化 + 设置页布局修复
+d93264fecffc98fdf843813955bb68a546d0bce5 a3ffc739fc892d50b86f83be01c589b24172afcd jkfzhsz <jkfzhsz@users.noreply.github.com> 1786789415 +0800	commit: test(fix): 全量测试基线修复 —— 隔离污染 + 双链适配 + 断言修正
+a3ffc739fc892d50b86f83be01c589b24172afcd 672ffcfd20f4c7d683b5f5ecb247cc2e32d910a8 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786789421 +0800	commit: docs: 项目全面审视报告 + 5 处计划文档状态同步
+672ffcfd20f4c7d683b5f5ecb247cc2e32d910a8 dc7b429425fbe9e24485e694d88152920e3e7430 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786790026 +0800	commit: feat(kb): KB 版本快照/对比/回滚(M2 P2-15 落地)
+dc7b429425fbe9e24485e694d88152920e3e7430 57dca60683bd1c92661402709315748cd24b2a4b jkfzhsz <jkfzhsz@users.noreply.github.com> 1786790395 +0800	commit: feat(kb): 查询重写 —— 启发式多查询扩展(M2 P2-14 落地)
+57dca60683bd1c92661402709315748cd24b2a4b e31b5b499d2cc0c8b7c52e9b879991b06e7f408f jkfzhsz <jkfzhsz@users.noreply.github.com> 1786795289 +0800	commit: feat(subagent): 任务级暂停/恢复(M2 P2-20 落地)
+e31b5b499d2cc0c8b7c52e9b879991b06e7f408f d55573381b483dc9e1ccce6eb7f85843b8d7da45 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786795504 +0800	commit: docs: 审视报告收尾 —— 下一阶段 4 项全部完成标记
+d55573381b483dc9e1ccce6eb7f85843b8d7da45 d55573381b483dc9e1ccce6eb7f85843b8d7da45 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786799397 +0800	reset: moving to HEAD
+d55573381b483dc9e1ccce6eb7f85843b8d7da45 0b12025f622e9d6d84e37ac3815a4077e83e79a8 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786799399 +0800	commit: feat(harness): A-1 HarnessProfile 结构 + ReactLoop 注入链路
+0b12025f622e9d6d84e37ac3815a4077e83e79a8 d4f58cd9c55a3d2e11382a8794efdde8f0c73784 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786799689 +0800	commit: feat(eval): A-2 场景评测集(38 任务) + 基线文档
+d4f58cd9c55a3d2e11382a8794efdde8f0c73784 c439da61a814775cb3a03a6cbf25aa7badb73191 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786800010 +0800	commit: feat(compression): B-1 压缩多信号触发 + keep_ratio + compress_now 工具
+c439da61a814775cb3a03a6cbf25aa7badb73191 89752e63954b5a3d1b629d62b5e69eb2b16e9995 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786800333 +0800	commit: feat(workspace): C-1 工作区文件工具族 ws_* + 路径沙箱 + 权限分级
+89752e63954b5a3d1b629d62b5e69eb2b16e9995 9a946ddfc1f41250cf4d0bf74d79b5cdc4d34f26 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786800685 +0800	commit: feat(compression): C-2 大产物文件化引导 + 压缩转存 archive 联动
+9a946ddfc1f41250cf4d0bf74d79b5cdc4d34f26 5e4645fe73ceaeee4b3e7307c07fd2a0d86cecc4 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786802333 +0800	commit: chore: 补充测试运行时产物忽略 + 提交 agent-harness 设计文档
+5e4645fe73ceaeee4b3e7307c07fd2a0d86cecc4 5317969ce1f0cf28c14e0a5831ca8fe7a91acc3b jkfzhsz <jkfzhsz@users.noreply.github.com> 1786841688 +0800	commit: fix(权限/截断/工具装配/归档): 4 项体验修复(2026-08-16 蒋先生反馈)
+5317969ce1f0cf28c14e0a5831ca8fe7a91acc3b 969fb4088dcd0239d0627c654abbf9a839b43c78 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786842758 +0800	commit: fix(chat): 切换 LLM 后输入框锁定加固(2026-08-16 蒋先生反馈)
+969fb4088dcd0239d0627c654abbf9a839b43c78 af8f1bcfcd43fc6f179648c8d04c94dc18096c09 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786863802 +0800	commit: fix(test): test_react_loop 工具注入测试修复(全量回归 2 failed 收敛)
+af8f1bcfcd43fc6f179648c8d04c94dc18096c09 6920353bce0da240bf85426d6da90a905a58c83f jkfzhsz <jkfzhsz@users.noreply.github.com> 1786863830 +0800	commit: docs: 无涯升级设计文档(agent-upgrader) —— 核心智能体能力设计定稿
+6920353bce0da240bf85426d6da90a905a58c83f 7be5331d11d5218e9995479ffddaf79add5204e0 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786864236 +0800	commit: docs: 无涯升级设计延伸 —— 主流 AI coding 智能体对标 + 七环节工作流 + 技能包
+7be5331d11d5218e9995479ffddaf79add5204e0 4e252ceb96df4d850122ad0d936873b80c57e950 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786864503 +0800	commit: docs: 无涯设计新增 §14 技能/MCP/工具场景归类(通道拥挤根治)
+4e252ceb96df4d850122ad0d936873b80c57e950 a0fa4ead4607991969746f0969513dec5d03ffd1 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786864684 +0800	commit: docs: §14 技能归类修订 —— engineering 类目边界 + 子瞻写作类确认
+a0fa4ead4607991969746f0969513dec5d03ffd1 88509278e4b978a3d26763d073ec01f8ce15b3a5 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786865023 +0800	commit: docs: §15 设计→后端→前端一致性审计 + 缺口清单排入实施顺序
+88509278e4b978a3d26763d073ec01f8ce15b3a5 caa99bbef177081846b0554dd3c3767c4a0f965f jkfzhsz <jkfzhsz@users.noreply.github.com> 1786865942 +0800	commit: feat(upgrader): 阶段1-a monitor 注入锚点 + workspace 兜底(打通手-注入层)
+caa99bbef177081846b0554dd3c3767c4a0f965f cbb8e1720b285d4ebbe03acfb22a000488392781 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786866122 +0800	commit: feat(upgrader): 阶段1-b apply_optim 真执行(打通手-执行层)
+cbb8e1720b285d4ebbe03acfb22a000488392781 200289f678439629975a650570f7609eb3f1ce79 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786866311 +0800	commit: feat(upgrader): 阶段1-c G1 优化审批列表(前后端闭环打通)
+200289f678439629975a650570f7609eb3f1ce79 1d1750ce4e4e28baf5c70e688d3686f20ff37706 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786866725 +0800	commit: feat(upgrader): 阶段1-d §14 场景归类 + G2 工具装配展示
+1d1750ce4e4e28baf5c70e688d3686f20ff37706 f3384599436aaf75ba8b2b45153bba2967070ff4 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786866777 +0800	commit: feat(upgrader): 无涯系统提示词权限分级(低风险直接做+核心改动审批)
+f3384599436aaf75ba8b2b45153bba2967070ff4 5eda3b6af5db693cc2c475fa0fd2260b7e59059d jkfzhsz <jkfzhsz@users.noreply.github.com> 1786871907 +0800	commit: fix(chat): 3 项体验修复(2026-08-16 蒋先生反馈 session-58 验证)
+5eda3b6af5db693cc2c475fa0fd2260b7e59059d c95172b39772f41b5c31af1c84f5187a8fd326f4 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786873768 +0800	commit: feat(upgrader): 阶段2 开发闭环 —— git 工具族 + pytest_run 开发沙箱
+c95172b39772f41b5c31af1c84f5187a8fd326f4 f60660ddaf8fd720d14859fdcabe9e4022f03ca9 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786878418 +0800	commit: fix(agent): 阶段2 实测三项修复(session-60 反馈 + 长任务支持)
+f60660ddaf8fd720d14859fdcabe9e4022f03ca9 4e9ce08f224a63d1ff228e2ccaeba42de06710e1 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786878687 +0800	commit: test(monitor): 新增状态感知 handler 层测试(system_status/system_metrics_query/optim_plan 边界)
+4e9ce08f224a63d1ff228e2ccaeba42de06710e1 d8340b54a7b225478db9bec6b819c544e99a92a4 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786878999 +0800	commit: fix(chat): 流式输出滚动跟随优化 —— 用户上翻时暂停自动滚动
+d8340b54a7b225478db9bec6b819c544e99a92a4 20dea85ad026cabf1eeff380ebcc6e437f9ce955 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786881271 +0800	commit: feat(upgrader): 阶段3 外部项目接入 —— project_scan 评估工具
+20dea85ad026cabf1eeff380ebcc6e437f9ce955 a175bf791c510309f39ba067cec51177c5f80b00 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786882255 +0800	commit: fix(files): 回答中 .png 损坏 —— files 端点沙箱产物回退
+a175bf791c510309f39ba067cec51177c5f80b00 90854e888562de6d0b7cedea6a9128af4c5be1cc jkfzhsz <jkfzhsz@users.noreply.github.com> 1786883342 +0800	commit: feat(upgrader): 阶段4 自我扩展 —— skill/mcp/eval 管理工具
+90854e888562de6d0b7cedea6a9128af4c5be1cc 101fa779876b25245f4f8ecec6e5a313f4659e7e jkfzhsz <jkfzhsz@users.noreply.github.com> 1786885332 +0800	commit: feat(upgrader): 阶段5 进化沉淀 —— 经验双写 + 低分驱动修复闭环
+101fa779876b25245f4f8ecec6e5a313f4659e7e 31bcec4fda9f9f6499ff92838f573d605f67a0a0 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786886359 +0800	commit: fix(tests): 阶段5 全量回归 2 失败修复(时间竞态 + env 污染)
+31bcec4fda9f9f6499ff92838f573d605f67a0a0 332c1f27c083cd51d5195077d606ad18554ec78a jkfzhsz <jkfzhsz@users.noreply.github.com> 1786887949 +0800	commit: fix(agent): 无涯实测三项修复 —— eval_run 构造 Bug + 审批面板不可见
+332c1f27c083cd51d5195077d606ad18554ec78a b8f59798c872b41f21ec52fb91b9c7f18b1b7e80 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786888870 +0800	commit: fix(replay): 历史任务切换空白/无响应 —— 重放过滤流式增量(99% 事件风暴)
+b8f59798c872b41f21ec52fb91b9c7f18b1b7e80 3d78107301ea48458c7ac685fc6bf9798f31f8de jkfzhsz <jkfzhsz@users.noreply.github.com> 1786890229 +0800	commit: fix(agent): 历史任务继续提问无响应 —— 中转延迟高 + 超时治理
+3d78107301ea48458c7ac685fc6bf9798f31f8de 4a8febe0e1cdbbf5485abdecc43ecbb6959d3e56 jkfzhsz <jkfzhsz@users.noreply.github.com> 1786932540 +0800	commit: feat(ui): 优化审批面板移到输入框上方 + 折叠式(蒋先生反馈)
+4a8febe0e1cdbbf5485abdecc43ecbb6959d3e56 30343dadeb6513e15ce8849df957bb44bbaab34c jkfzhsz <jkfzhsz@users.noreply.github.com> 1786933758 +0800	commit: test(apply_optim): 补充白名单路径与异常分支覆盖(阶段1 monitor 自测第二轮)
+30343dadeb6513e15ce8849df957bb44bbaab34c b972580e78f4e0b964ae0d6a4e64724d3d773208 jkfzhsz <jkfzhsz@users.noreply.github.com> 1787012208 +0800	commit: refactor(frontend): P3 前端重构——视图懒加载/事件样式token化/chatUi拆分/TurnCard/kbUpload双路径
+b972580e78f4e0b964ae0d6a4e64724d3d773208 59b89d3cb767f4921955fd6039f80f15e1da4a0e jkfzhsz <jkfzhsz@users.noreply.github.com> 1787014068 +0800	commit: feat(kb): P1-3 multipart 上传收口 —— admin.py 双格式路由(multipart 主+JSON 兼容)+python-multipart 声明+2 测试用例
+59b89d3cb767f4921955fd6039f80f15e1da4a0e c84693c790afa55070c5ff901a52af1fa910c4d6 jkfzhsz <jkfzhsz@users.noreply.github.com> 1787014079 +0800	commit: fix(ui): 优化审批面板滚动条 —— 展开区 maxHeight+overflowY auto + 外层防压缩
