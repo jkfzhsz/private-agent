@@ -169,7 +169,7 @@ def test_user_message_no_tool_calls_produces_thinking_and_final(monkeypatch):
         })
         messages = _recv_until_turn_end(ws)
 
-    event_types = [m["event_type"] for m in messages if m["type"] == "react_event"]
+    event_types = [m["event_type"] for m in messages if m["type"] == "react_event" and m["event_type"] != "status"]
     assert event_types == ["thinking", "final"], (
         f"expected [thinking, final], got {event_types}"
     )
@@ -232,7 +232,7 @@ def test_user_message_with_tool_calls_produces_four_events(monkeypatch):
         })
         messages = _recv_until_turn_end(ws)
 
-    event_types = [m["event_type"] for m in messages if m["type"] == "react_event"]
+    event_types = [m["event_type"] for m in messages if m["type"] == "react_event" and m["event_type"] != "status"]
     assert event_types == ["thinking", "tool_call", "tool_result", "final"], (
         f"expected 4 event types in order, got {event_types}"
     )
@@ -367,7 +367,7 @@ def test_user_message_confirmation_flow(monkeypatch):
                 break
 
     assert confirmed, "must receive tool_confirmation_required"
-    event_types = [m["event_type"] for m in messages if m["type"] == "react_event"]
+    event_types = [m["event_type"] for m in messages if m["type"] == "react_event" and m["event_type"] != "status"]
     assert "tool_confirmation_required" in event_types
     assert "tool_result" in event_types
     tr = next(m for m in messages if m.get("event_type") == "tool_result")

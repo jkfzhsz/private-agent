@@ -750,18 +750,24 @@ class ReactLoop:
                 # 大上下文 prefill / 慢中转导致首 token 延迟 20-60s, 期间
                 # 无任何事件被用户感知为"卡死"。前端据 status(stage=
                 # llm_calling) 显示"第 N 轮 · 模型调用中", 让等待可见。
-                try:
-                    await self._emit_event(
-                        "status",
-                        payload={
-                            "stage": "llm_calling",
-                            "iteration": self._iteration,
-                            "message": f"第 {self._iteration} 轮 · 模型调用中",
-                        },
-                        persist=False,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+                # 注意: 直接走 event_sink(仅 WS 推送), 不经过 _emit_event
+                # —— 不进 event_queue/不持久化, 避免污染测试的事件序列断言
+                # (tests/test_react_loop.py 断言 thinking/final 顺序)。
+                if self._event_sink is not None:
+                    try:
+                        await self._event_sink({
+                            "type": "react_event",
+                            "event_type": "status",
+                            "session_id": self._session_id,
+                            "turn": self._turn,
+                            "payload": {
+                                "stage": "llm_calling",
+                                "iteration": self._iteration,
+                                "message": f"第 {self._iteration} 轮 · 模型调用中",
+                            },
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
                 if hasattr(self._adapter, "chat_stream"):
                     result = await self._adapter.chat_stream(
                         messages,
@@ -1276,21 +1282,26 @@ class ReactLoop:
                                 # —— 分钟级长工具(全量回归/codegraph 索引等)
                                 # 期间用户看到"⏳ 工具执行中 · 已 Xs"(每 10s
                                 # 刷新), 而非 tool_call 一行字后无声死等。
-                                try:
-                                    await self._emit_event(
-                                        "status",
-                                        payload={
-                                            "stage": "tool_running",
-                                            "tool": plan["tool_name"],
-                                            "elapsed_sec": int(
-                                                time.monotonic()
-                                                - _tool_started
-                                            ),
-                                        },
-                                        persist=False,
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    pass
+                                # 同 status: 直接 event_sink(仅 WS), 不进
+                                # event_queue, 避免污染事件序列测试断言。
+                                if self._event_sink is not None:
+                                    try:
+                                        await self._event_sink({
+                                            "type": "react_event",
+                                            "event_type": "status",
+                                            "session_id": self._session_id,
+                                            "turn": self._turn,
+                                            "payload": {
+                                                "stage": "tool_running",
+                                                "tool": plan["tool_name"],
+                                                "elapsed_sec": int(
+                                                    time.monotonic()
+                                                    - _tool_started
+                                                ),
+                                            },
+                                        })
+                                    except Exception:  # noqa: BLE001
+                                        pass
                             result = _exec_task.result()
                         except asyncio.TimeoutError:
                             self._logger.warning(
