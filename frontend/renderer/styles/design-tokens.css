@@ -1,0 +1,928 @@
+/* FlowSpace 设计系统 v2.1 - Design Tokens（React 化落地）
+   来源: FlowSpace-Design-System.md §2/§3/§4/§12 */
+:root {
+  /* 语义色板 */
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-tertiary: #94a3b8;
+
+  /* P2-3(2026-08-17): 排版阶梯 —— 统一标题/正文/辅助字号层级(审计 V4)
+   * hero: 页面大标题 / title: 区块标题 / subtitle: 小节标题 /
+   * body: 正文 / caption: 辅助 / micro: 角标 / tiny: 最小 */
+  --fs-hero: 20px;
+  --fs-title: 16px;
+  --fs-subtitle: 14px;
+  --fs-body: 13px;
+  --fs-caption: 12px;
+  --fs-micro: 11px;
+  --fs-tiny: 10px;
+
+  /* 磨砂玻璃 */
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --glass-shadow: 0 8px 32px rgba(148, 163, 184, 0.15);
+
+  /* 面板/卡片/输入区 surface 变量(2026-08-08): 统一硬编码背景, 便于暗色覆盖 */
+  --panel-bg: rgba(255, 255, 255, 0.55);
+  --panel-bg-hover: rgba(255, 255, 255, 0.8);
+  --panel-bg-solid: #ffffff;
+  --input-bg: rgba(255, 255, 255, 0.6);
+  --input-bg-focus: rgba(255, 255, 255, 0.85);
+  --button-ghost-bg: rgba(255, 255, 255, 0.5);
+  --button-ghost-bg-hover: rgba(255, 255, 255, 0.8);
+  --chip-bg: #f3f4f6;
+  --chat-user-bg: #dbeafe;
+  --chat-ai-bg: rgba(255, 255, 255, 0.85);
+  --chat-ai-border: rgba(148, 163, 184, 0.25);
+  --tool-call-bg: rgba(238, 242, 255, 0.8);
+  --tool-result-bg: rgba(236, 253, 245, 0.8);
+  --confirmation-bg: #fffbeb;
+  --error-bg: #ffebee;
+  --success-bg: #e8f5e9;
+  --warning-bg: #fff8e1;
+  --warning-border: #ffcc80;
+  --warning-text: #7a4f01;
+  --border-color: rgba(148, 163, 184, 0.25);
+  --border-strong: #ddd;
+  --surface-1: #f9fafb;
+  --surface-2: #f3f4f6;
+  --accent-soft-bg: #f5f3ff;
+  --accent-soft-text: #5b21b6;
+  --code-bg: #f8fafc;
+  /* 彩色按钮/渐变上的文字色(两种主题均为白) */
+  --on-accent: #ffffff;
+
+  /* 圆角 */
+  --radius-lg: 24px;
+  --radius-md: 16px;
+  --radius-sm: 12px;
+
+  /* 品牌渐变(§2.5) */
+  --gradient-indigo: linear-gradient(135deg, #818cf8, #6366f1);
+  --gradient-violet: linear-gradient(135deg, #c084fc, #a855f7);
+  --gradient-pink: linear-gradient(135deg, #f472b6, #ec4899);
+  --gradient-logo: linear-gradient(135deg, #818cf8, #c084fc, #f472b6);
+
+  /* 功能色(§2.4) */
+  --success-bg: #d1fae5;
+  --success-text: #059669;
+  --warning-bg: #fef3c7;
+  --warning-text: #d97706;
+  --info-bg: #d1fae5;
+  --info-text: #059669;
+  --danger-text: #ef4444;
+  --neutral-bg: #f1f5f9;
+  --neutral-text: #64748b;
+
+  /* P0-2(2026-08-17): 事件标签底色 token(原 EVENT_STYLES 硬编码 hex, 暗色不随主题) */
+  --event-user-bg: #dbeafe;
+  --event-thinking-bg: #f5f5f5;
+  --event-tool_call-bg: #e3f2fd;
+  --event-tool_result-bg: #e8f5e9;
+  --event-delta-bg: #e8eaf6;
+  --event-final-bg: #e8eaf6;
+  --event-error-bg: #ffebee;
+  --event-sandbox_output-bg: #f1f5f9;
+  --event-tool_confirmation_required-bg: #fef3c7;
+  --event-tool_confirmation_result-bg: #f3e8ff;
+  --event-turn_paused-bg: #fff3e0;
+  --event-turn_resumed-bg: #e8f5e9;
+  --event-iteration_limit_reached-bg: #fef3c7;
+
+  /* P0-2(2026-08-17): 子代理状态卡底色/文字 token(SubagentPanel, 原硬编码同病) */
+  --subagent-pending-bg: #e2e8f0;
+  --subagent-pending-color: #475569;
+  --subagent-running-bg: #dbeafe;
+  --subagent-running-color: #1d4ed8;
+  --subagent-succeeded-bg: #d1fae5;
+  --subagent-succeeded-color: #047857;
+  --subagent-failed-bg: #fee2e2;
+  --subagent-failed-color: #b91c1c;
+  --subagent-cancelled-bg: #e2e8f0;
+  --subagent-cancelled-color: #64748b;
+
+  /* 液体 Blob 调色盘(§2.3) */
+  --blob-1: 168, 216, 255; /* Sky Blue */
+  --blob-2: 147, 197, 253; /* Blue */
+  --blob-3: 196, 181, 253; /* Purple */
+  --blob-4: 216, 180, 254; /* Violet */
+  --blob-5: 249, 168, 212; /* Pink */
+  --blob-6: 251, 191, 220; /* Light Pink */
+
+  /* 字体(§3.1) */
+  --font-sans: "Space Grotesk", system-ui, -apple-system, "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+
+  /* 间距(§4.1, 4px 基准) */
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  /* 动效(§8.1) */
+  --transition-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* P0-1(2026-08-17): 连接状态点脉冲(重连中黄点呼吸) */
+@keyframes status-pulse {
+  0% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* P0-3(2026-08-17): Toast 右上角滑入 */
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * P1-2(2026-08-17): 全局交互三态 —— active/focus-visible + 按钮 hover 收敛
+ * 审计 I4: JS onMouseEnter 改样式 → CSS 伪类统一; 补齐 :active 按下态与
+ * :focus-visible 键盘焦点态(此前键盘导航者看不到焦点位置)。
+ * ══════════════════════════════════════════════════════════════════════ */
+button:active {
+  transform: scale(0.98);
+}
+:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.6);
+  outline-offset: 2px;
+}
+
+/* 消息操作条按钮(原 MsgActionBtn JS hover + 硬编码色) */
+.msg-action-btn {
+  font-size: 11px;
+  border: 1px solid var(--border-color);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border-radius: 10px;
+  padding: 3px 10px;
+  cursor: pointer;
+  line-height: 1.5;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.msg-action-btn:hover {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+.msg-action-btn.danger {
+  color: var(--danger-text);
+}
+.msg-action-btn.danger:hover {
+  background: var(--error-bg);
+  color: var(--danger-text);
+}
+[data-theme="dark"] .msg-action-btn:hover {
+  background: rgba(49, 46, 129, 0.4);
+  color: #a5b4fc;
+}
+[data-theme="dark"] .msg-action-btn.danger:hover {
+  background: rgba(127, 29, 29, 0.4);
+}
+
+/* 侧边栏行内操作按钮(原 ActionBtn JS hover 改色) */
+.icon-action-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.icon-action-btn:hover {
+  color: var(--text-primary);
+}
+.icon-action-btn.danger:hover {
+  color: var(--danger-text);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * P2-4(2026-08-17): 窄窗适配 —— 最小窗口 960px 下的布局收窄
+ * 审计 A1: 设置页 sidebar 固定 224px, 窄窗下挤压内容区; 首页模式卡
+ * 3 列在窄窗下每卡过窄。媒体查询按视口收窄, 视觉零回归(≥1280px 不变)。
+ * ══════════════════════════════════════════════════════════════════════ */
+@media (max-width: 1180px) {
+  .settings-sidebar {
+    width: 184px;
+  }
+  .mode-card {
+    padding: 12px 14px;
+    gap: 8px;
+  }
+}
+@media (max-width: 1040px) {
+  .settings-sidebar {
+    width: 160px;
+  }
+}
+
+/* 危险 hover 图标按钮(记忆删除等: 常态 tertiary, hover 转红) */
+.danger-hover-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.danger-hover-btn:hover {
+  color: var(--danger-text);
+}
+
+/* 弹层菜单项(原 App plus 菜单 JS hover) */
+.pop-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.pop-menu-item:hover {
+  background: var(--surface-2);
+}
+
+/* P1-2: 侧边栏历史记录 hover 高亮(原 JS 改背景 rgba(139,92,246,0.08)) */
+.hover-highlight {
+  transition: background 0.15s ease;
+}
+.hover-highlight:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+
+/* P1-2: 首页三场景模式卡 hover 位移(原 JS onMouseEnter 改 transform) */
+.mode-card {
+  transition: transform 0.25s var(--transition-smooth), box-shadow 0.25s var(--transition-smooth);
+}
+.mode-card:hover {
+  transform: translateY(-2px);
+}
+.mode-card:active {
+  transform: translateY(0) scale(0.98);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * P2-1(2026-08-17 批次 A): 语义 utility class —— 收敛高频内联样式
+ * 审计 V1: 986 处内联 style 中, 文本色/字号/flex 布局为最高频重复片段。
+ * 抽原子 utility(纯样式迁移, 视觉零变化), 逐步替换 style={{...}}。
+ * ══════════════════════════════════════════════════════════════════════ */
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-tertiary { color: var(--text-tertiary); }
+.fs-10 { font-size: 10px; }
+.fs-11 { font-size: 11px; }
+.fs-12 { font-size: 12px; }
+.fs-13 { font-size: 13px; }
+.fw-600 { font-weight: 600; }
+.flex-center { display: flex; align-items: center; }
+.flex-col { display: flex; flex-direction: column; }
+.gap-4 { gap: 4px; }
+.gap-6 { gap: 6px; }
+.gap-8 { gap: 8px; }
+.gap-10 { gap: 10px; }
+/* P2-1 批次 D(2026-08-17): 小文件高频复合样式 */
+.pad-lg { padding: 20px 24px; }
+.flex-1 { flex: 1; }
+.flex-1-min0 { flex: 1; min-width: 0; }
+.view-scroll { flex: 1; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; scrollbar-gutter: stable; }
+.title-block { font-size: var(--fs-title); font-weight: 600; letter-spacing: -0.02em; }
+.page-title { font-size: 32px; font-weight: 700; letter-spacing: -0.03em; color: var(--text-primary); }
+.fw-500 { font-weight: 500; }
+.btn-outline-sm { flex-shrink: 0; padding: 6px 12px; font-size: 12px; border: 1px solid rgba(148,163,184,0.4); border-radius: 6px; }
+/* P2-1 批次 E(2026-08-17): App.tsx 长尾复合样式 */
+.subhead { font-size: var(--fs-body); font-weight: 600; margin-bottom: 8px; }
+.icon-cell { width: 18px; text-align: center; }
+.icon-btn-lg { border: none; background: transparent; font-size: 18px; cursor: pointer; color: var(--text-tertiary); }
+.mb-16 { margin-bottom: 16px; }
+
+/* P1-2: "思考中"三点跳动 */
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+/* 2026-08-17(实机修复 P0-1 衍生): 消除 Chromium <pre> UA 暗色背景
+ * 问题: Electron 暗色窗口下 <pre> 元素继承 chromium UA 样式显示深色矩形,
+ * 内联 style 默认不覆盖 → 用户消息气泡(蓝色 chat-user-bg)内出现"黑色条"。
+ * 修复: 全局 transparent 兜底; 设计本意有背景的 pre(代码块/沙箱等)
+ * 靠内联 style 优先级保留(本规则选择器 specificity 低于内联)。
+ * 同步避免 sandbox 终端/error 输出/tool result 等 <pre> 出现同类问题。 */
+pre {
+  background: transparent;
+}
+
+/* 磨砂玻璃面板(§5.1) + 厚度感(顶部受光高光 + 分层投影) */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: var(--space-6);
+}
+
+/* 侧边栏玻璃(§5.2): 更强模糊 + 厚度感 */
+.glass-sidebar {
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+}
+
+/* 统计卡片(§5.3) + 厚度感 */
+.stat-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: 20px 24px;
+  transition: transform 0.35s var(--transition-smooth),
+    box-shadow 0.35s var(--transition-smooth);
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 2px 6px rgba(148, 163, 184, 0.1),
+    0 12px 40px rgba(148, 163, 184, 0.22);
+}
+
+/* 导航项(§7.1) */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  width: 100%;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.25s var(--transition-smooth);
+  font-family: var(--font-sans);
+}
+.nav-item:hover {
+  background: var(--panel-bg-hover);
+  color: var(--text-primary);
+}
+.nav-item.active {
+  background: var(--panel-bg-hover);
+  color: #7c3aed;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.1);
+}
+[data-theme="dark"] .nav-item.active {
+  color: #a78bfa;
+}
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 3px;
+  height: 20px;
+  background: linear-gradient(180deg, #818cf8, #c084fc);
+  border-radius: 0 3px 3px 0;
+}
+
+/* 输入框(§7.3) */
+.flow-input {
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--input-bg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--text-primary);
+  transition: all 0.25s var(--transition-smooth);
+  outline: none;
+}
+.flow-input:focus {
+  border-color: #a78bfa;
+  background: var(--input-bg-focus);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.1);
+}
+
+/* 按钮变体(§7.2) */
+.btn-ghost {
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--button-ghost-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.25s var(--transition-smooth);
+}
+.btn-ghost:hover {
+  background: var(--button-ghost-bg-hover);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+.btn-primary {
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--gradient-indigo);
+  border: none;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: opacity 0.25s var(--transition-smooth);
+}
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+/* 入场动画(§8.2) */
+@keyframes flow-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-in {
+  animation: flow-slide-up 0.6s var(--transition-smooth) both;
+}
+.delay-1 { animation-delay: 0.05s; }
+.delay-2 { animation-delay: 0.10s; }
+.delay-3 { animation-delay: 0.15s; }
+.delay-4 { animation-delay: 0.20s; }
+
+/* 动效降级(§9.3) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 细滚动条(原始 Demo §content-scroll) */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * V1.1 布局优化: 外层铺满视口 + 无边缘空白
+ * html/body/#root 全链 100% 高度; 根容器 overflow hidden 防滚动溢出
+ * ══════════════════════════════════════════════════════════════════════ */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * V1.4-8.4 主题切换: 暗色模式(html[data-theme="dark"])
+ * 覆盖核心语义变量; 组件硬编码 rgba(255,255,255,*) 的少量处保持亮色可接受
+ * ══════════════════════════════════════════════════════════════════════ */
+[data-theme="dark"] {
+  /* 2026-08-07: 提亮文本/表面/边框对比度(用户反馈"暗色没法看") */
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-tertiary: #94a3b8;
+  --glass-bg: rgba(30, 41, 59, 0.72);
+  --glass-border: rgba(148, 163, 184, 0.18);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --neutral-bg: rgba(51, 65, 85, 0.7);
+  --neutral-text: #cbd5e1;
+  --success-bg: rgba(5, 150, 105, 0.28);
+  --success-text: #6ee7b7;
+  --warning-bg: rgba(217, 119, 6, 0.28);
+  --warning-border: rgba(217, 119, 6, 0.6);
+  --warning-text: #fcd34d;
+  --danger-text: #fca5a5;
+
+  /* 2026-08-08: 暗色 surface 变量 */
+  --panel-bg: rgba(30, 41, 59, 0.65);
+  --panel-bg-hover: rgba(51, 65, 85, 0.85);
+  --panel-bg-solid: rgba(30, 41, 59, 0.95);
+  --input-bg: rgba(15, 23, 42, 0.6);
+  --input-bg-focus: rgba(15, 23, 42, 0.9);
+  --button-ghost-bg: rgba(30, 41, 59, 0.6);
+  --button-ghost-bg-hover: rgba(51, 65, 85, 0.9);
+  --chip-bg: rgba(51, 65, 85, 0.7);
+  --chat-user-bg: rgba(30, 64, 175, 0.45);
+  --chat-ai-bg: rgba(15, 23, 42, 0.55);
+  --chat-ai-border: rgba(148, 163, 184, 0.18);
+  --tool-call-bg: rgba(49, 46, 129, 0.45);
+  --tool-result-bg: rgba(6, 78, 59, 0.35);
+  --confirmation-bg: rgba(120, 53, 15, 0.45);
+  --error-bg: rgba(127, 29, 29, 0.35);
+  --border-color: rgba(148, 163, 184, 0.2);
+  --border-strong: rgba(148, 163, 184, 0.3);
+  --surface-1: rgba(30, 41, 59, 0.7);
+  --surface-2: rgba(51, 65, 85, 0.7);
+  --accent-soft-bg: rgba(91, 33, 182, 0.35);
+  --accent-soft-text: #c4b5fd;
+  --code-bg: rgba(15, 23, 42, 0.7);
+  --on-accent: #ffffff;
+  --info-bg: rgba(5, 150, 105, 0.28);
+  --info-text: #6ee7b7;
+
+  /* P0-2(2026-08-17): 事件标签底色暗色覆盖(深底浅字, 与玻璃/chat 气泡同风格) */
+  --event-user-bg: rgba(30, 64, 175, 0.35);
+  --event-thinking-bg: rgba(51, 65, 85, 0.55);
+  --event-tool_call-bg: rgba(30, 64, 175, 0.3);
+  --event-tool_result-bg: rgba(6, 78, 59, 0.35);
+  --event-delta-bg: rgba(49, 46, 129, 0.35);
+  --event-final-bg: rgba(49, 46, 129, 0.35);
+  --event-error-bg: rgba(127, 29, 29, 0.45);
+  --event-sandbox_output-bg: rgba(51, 65, 85, 0.6);
+  --event-tool_confirmation_required-bg: rgba(120, 53, 15, 0.45);
+  --event-tool_confirmation_result-bg: rgba(91, 33, 182, 0.4);
+  --event-turn_paused-bg: rgba(124, 45, 18, 0.4);
+  --event-turn_resumed-bg: rgba(6, 78, 59, 0.35);
+  --event-iteration_limit_reached-bg: rgba(120, 53, 15, 0.45);
+
+  /* P0-2(2026-08-17): 子代理状态卡暗色覆盖 */
+  --subagent-pending-bg: rgba(51, 65, 85, 0.6);
+  --subagent-pending-color: #cbd5e1;
+  --subagent-running-bg: rgba(30, 64, 175, 0.35);
+  --subagent-running-color: #93c5fd;
+  --subagent-succeeded-bg: rgba(6, 78, 59, 0.35);
+  --subagent-succeeded-color: #6ee7b7;
+  --subagent-failed-bg: rgba(127, 29, 29, 0.45);
+  --subagent-failed-color: #fca5a5;
+  --subagent-cancelled-bg: rgba(51, 65, 85, 0.6);
+  --subagent-cancelled-color: #94a3b8;
+}
+
+[data-theme="dark"] .glass-panel,
+[data-theme="dark"] .glass-sidebar,
+[data-theme="dark"] .stat-card {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme="dark"] .nav-item:hover {
+  background: rgba(51, 65, 85, 0.6);
+}
+[data-theme="dark"] .nav-item.active {
+  background: rgba(51, 65, 85, 0.85);
+}
+[data-theme="dark"] .flow-input {
+  background: rgba(30, 41, 59, 0.6);
+  border-color: rgba(148, 163, 184, 0.2);
+  color: var(--text-primary);
+}
+[data-theme="dark"] .flow-input:focus {
+  background: rgba(30, 41, 59, 0.85);
+}
+[data-theme="dark"] .btn-ghost {
+  background: rgba(51, 65, 85, 0.5);
+  border-color: rgba(148, 163, 184, 0.2);
+  color: var(--text-primary);
+}
+[data-theme="dark"] .btn-ghost:hover {
+  background: rgba(51, 65, 85, 0.8);
+}
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-08 暗色兜底(仅元素级选择器)
+ *
+ * 重要: 不要用 [style*="#fff"] 之类的属性选择器覆盖 React 内联样式。
+ * React 通过 JS 赋值 element.style.*, 浏览器把 style 属性序列化为
+ * "background-color: rgb(255, 255, 255);", 与 JSX 源码里的 "#ffffff"
+ * 字面量完全不匹配 —— 这类选择器永远不会命中(曾误以为已修复)。
+ * 正确做法: 组件内联样式一律改用 var(--*) 语义变量。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* 输入框/textarea 统一 */
+[data-theme="dark"] input,
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+  background: var(--input-bg) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-color) !important;
+}
+[data-theme="dark"] input:focus,
+[data-theme="dark"] textarea:focus,
+[data-theme="dark"] select:focus {
+  background: var(--input-bg-focus) !important;
+}
+
+/* 设置页、记忆页、知识库页等玻璃面板内输入控件兜底 */
+[data-theme="dark"] .glass-panel input,
+[data-theme="dark"] .glass-panel textarea,
+[data-theme="dark"] .glass-panel select,
+[data-theme="dark"] .glass-sidebar input,
+[data-theme="dark"] .glass-sidebar textarea,
+[data-theme="dark"] .glass-sidebar select {
+  background: var(--input-bg) !important;
+}
+
+/* 图片/视频背景保持不受影响(首页壁纸、预览图) */
+[data-theme="dark"] img,
+[data-theme="dark"] video {
+  background: transparent !important;
+}
+
+/* 行内代码: 暗色下深底浅字(2026-08-17 修正: 原规则含 pre, 会把所有
+   <pre> 元素(含用户消息气泡内的 pre)染成深色矩形 → 用户气泡显示"黑色条"。
+   本意深底的 pre(代码块/沙箱/tool result)均已有内联 background(var(--code-bg)
+   等, 内联优先级高于本规则), 全局 pre 规则冗余且有害 → 仅保留行内 code。 */
+[data-theme="dark"] code {
+  background: rgba(15, 23, 42, 0.7);
+  color: var(--text-primary);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-08 壁纸主题切换交叉淡化 keyframes
+ *
+ * 不用 transition 而用 animation 的原因: 本地图片加载极快时, opacity:0
+ * 的初始帧可能从未被浏览器绘制, transition 无起点 → 淡入不生效(曾现"切换
+ * 闪一下")。animation 在元素挂载时即播放, 不依赖绘制历史, 效果确定。
+ * 用法: 新背景 img/video 加 key={src} + animation: wp-fade-in;
+ *       旧背景层挂载时自动播 wp-fade-out, onAnimationEnd 后卸载。
+ * ══════════════════════════════════════════════════════════════════════ */
+@keyframes wp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes wp-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-10 设置中心重构: 左侧分组导航 + 顶部栏 + 内容区按页切换
+ * 旧版全部设置单页堆叠(3757 行), 新版按「偏好/AI 能力/安全与数据/系统」
+ * 分组导航。全部走 var(--*) 语义变量, 暗色主题自动生效。
+ * ══════════════════════════════════════════════════════════════════════ */
+.settings-layout {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  /* 2026-08-10: 水平空隙统一由 App 渲染容器中间区 margin:"0 12px" 提供
+     (与首页/对话/知识库等所有视图一致), 此处仅保留垂直 padding ——
+     避免 12(App margin)+12(本 padding) 叠加成 24px, 导致设置页左右
+     空隙与主界面不一致 */
+  padding: 12px 0;
+  overflow: hidden;
+}
+
+/* 侧边栏(毛玻璃, 同 glass-sidebar 质感) */
+.settings-sidebar {
+  width: 224px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: 16px 10px 10px;
+}
+
+/* 品牌区 */
+.settings-brand {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px 8px;
+}
+.settings-brand-logo {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--gradient-logo);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  box-shadow: 0 4px 14px rgba(139, 92, 246, 0.25);
+}
+.settings-version-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: rgba(129, 140, 248, 0.12);
+  color: #7c3aed;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 8px;
+}
+[data-theme="dark"] .settings-version-badge {
+  color: #a78bfa;
+  background: rgba(129, 140, 248, 0.18);
+}
+
+/* 导航分组标签 */
+.settings-nav-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  padding: 10px 12px 4px;
+}
+
+/* 导航滚动区 */
+.settings-nav-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 侧边栏底部状态卡 */
+.settings-sidebar-foot {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  border: 1px solid var(--glass-border);
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* 右侧内容列 */
+.settings-content-col {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 顶部栏(毛玻璃) */
+.settings-topbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(148, 163, 184, 0.06),
+    0 1px 2px rgba(148, 163, 184, 0.06),
+    0 8px 32px rgba(148, 163, 184, 0.15);
+  padding: 16px 24px;
+}
+.settings-breadcrumb {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.settings-page-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  line-height: 26px;
+}
+.settings-search {
+  width: 200px;
+  flex-shrink: 0;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--input-bg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+  transition: all 0.25s var(--transition-smooth);
+}
+.settings-search:focus {
+  border-color: #a78bfa;
+  background: var(--input-bg-focus);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.1);
+}
+.settings-search::placeholder {
+  color: var(--text-tertiary);
+}
+
+/* 内容页滚动区(页面保留挂载, display 切换, 状态不丢) */
+.settings-pages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 2026-08-15(蒋先生反馈): 数据管理/通用设置/工具与MCP 等板块内部
+     有固定宽度元素, 窄窗口下横向溢出被 .settings-layout overflow:hidden
+     裁切(看不全)。加 overflow-x 兜底: 超宽时出现横向滚动条而非裁切。 */
+  overflow-x: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 暗色: 侧边栏/顶部栏阴影与玻璃统一 */
+[data-theme="dark"] .settings-sidebar,
+[data-theme="dark"] .settings-topbar {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 8px 32px rgba(0, 0, 0, 0.35);
+}
+[data-theme="dark"] .settings-sidebar-foot {
+  background: var(--panel-bg-hover);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 2026-08-08 主题切换淡入淡出(整页 cross-fade)
+ *
+ * 用 View Transitions API(document.startViewTransition + flushSync)在
+ * data-theme 切换时对整个 root 做交叉淡化。默认 250ms, 这里调到 380ms
+ * 让亮↔暗过渡更柔和。缓动用 --transition-smooth 与其他动画一致。
+ *
+ * 不用为每个 var(--*) 加 transition 的原因: 内联样式无法被 CSS 选择器
+ * 覆盖(React JS 序列化为 rgb()); 改 transition 也无法覆盖内联色。
+ * View Transition 走浏览器截图层, 一次解决所有元素平滑过渡。
+ * ══════════════════════════════════════════════════════════════════════ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.38s;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}

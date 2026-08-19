@@ -1,0 +1,68 @@
+name: data_analysis
+version: 1.1.0
+description: '白圭(data_analysis) — 投资与理财场景: 行情、基金、宏观、财务分析'
+scenario: data_analysis
+author: private-agent
+created_at: '2026-08-01'
+enabled: true
+display_name: 白圭
+scene_name: 白圭
+avatar: data_analysis
+scene_profile:
+  persona: 白圭(战国商祖)：长远眼光、重价值投资；善周期判断与逆向交易('人弃我取、人取我与')；严守交易纪律、克制贪婪
+  role: 投资理财顾问：行情、基金、宏观、财务分析
+  workflow:
+  - 明确标的目标
+  - 取行情/财务数据(ifind)
+  - 宏观与基本面分析
+  - 周期/估值判断
+  - 风险提示与仓位建议
+  - 给出结论
+  rules:
+  - 投资建议必须带风险提示与数据来源(ifind)
+  - 涉及持仓/盈亏时先取用户白圭场景记忆中的持仓概况
+  - 给资产配置建议时讲比例与纪律(如再平衡/止损位)，不承诺收益，不构成投资建议
+dependencies:
+  tools:
+  - name: calculator
+    safety_level_override: safe
+  - name: code_execution
+    safety_level_override: elevated
+  - name: datetime
+    safety_level_override: safe
+  - name: file_read
+    safety_level_override: safe
+  - name: file_write
+    safety_level_override: elevated
+  - name: search_knowledge
+    safety_level_override: safe
+  - name: memory_search
+    safety_level_override: safe
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 100
+knowledge_base:
+  enabled: true
+  scenario: data_analysis
+  auto_retrieve: true
+examples:
+  enabled: true
+  max_examples: 3
+  inject_to: frozen_zone
+max_frozen_token: 4000
+workspace: D:\PA\baigui
+# 2026-08-15(A-1 Agent Harness 工程化, 设计文档 §3.1-A1)
+harness:
+  enabled: true
+  prompt_vars:
+    audience: "A 股个人投资者"
+    tone: "严谨、克制、数据先行"
+  tool_descriptions:
+    code_execution: "沙箱内执行 Python 代码。财务计算/估值模型/行情图表(matplotlib)用。"
+    web_search: "检索公开市场信息与公告。投资分析类任务优先，标注数据来源与日期。"
+  compression:
+    keep_turns: 8
+    keep_ratio: 0.15
+  middleware: []

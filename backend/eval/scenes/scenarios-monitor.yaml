@@ -1,0 +1,99 @@
+# 无涯(monitor)场景评测任务清单 —— Agent Harness 评测集(设计文档 §3.1-A3)
+#
+# 用途: harness 提示词/工具描述迭代的回归护栏(主智能体 monitor 通道,
+#       harness 经 agent-profile.json 注入, 设计文档 §3.1-A4)。
+# 结构: meta(场景元信息) + tasks(任务数组)
+# 判据: success_criteria 部分可自动核验(pytest 可跑通即成功判据),
+#       human 0-5 分为辅。
+meta:
+  scenario: monitor
+  skill_name: monitor
+  skill_version: "builtin"
+  scene_name: 无涯
+  description: 项目进化者 —— 监控、诊断、进化调度、评估闭环驱动
+  harness_checks:
+    - "[Scene Profile] 块注入存在(agent-profile.json harness 通道激活)"
+    - "工具描述覆盖生效(optim_plan/lessons_stats 命中 agent-profile harness)"
+
+tasks:
+  - id: monitor-01
+    title: "代码诊断: 阅读指定模块识别重复模式 → 提议重构"
+    description: 用 file_read 阅读指定模块, 识别重复模式/死代码, 提议重构方案。
+    inputs:
+      - "用户指定模块路径"
+    success_criteria:
+      - "调用 file_read ≥ 2 次"
+      - "识别 ≥1 处重复模式/瓶颈(文件:行号)"
+      - "提议重构(方案 + 预期收益 + 风险)"
+    human_notes: 人工 0-5 分：诊断准确/证据充分/方案可行
+
+  - id: monitor-02
+    title: 运行 pytest 分析失败用例根因
+    description: 用 code_execution 运行 pytest, 分析失败用例根因。
+    inputs:
+      - "用户指定测试范围(可选, 默认相关模块)"
+    success_criteria:
+      - "调用 code_execution 运行 pytest"
+      - "输出失败用例列表 + 根因分析"
+      - "给出修复建议"
+    human_notes: 人工 0-5 分：根因准确/修复建议可行
+
+  - id: monitor-03
+    title: 在线失败模式 → 评估集覆盖空白建议
+    description: 分析在线失败案例(评估队列), 识别评估集覆盖空白, 建议补充用例。
+    inputs: []
+    success_criteria:
+      - "调用 review_queue_summary/相关工具"
+      - "识别失败模式(同类频率/影响场景)"
+      - "建议评估集补充用例"
+    human_notes: 人工 0-5 分：模式识别/建议具体
+
+  - id: monitor-04
+    title: 经验库健康度分析(lessons_stats) + 合并/淘汰建议
+    description: 用 lessons_stats 查看经验统计, 识别可合并/应淘汰经验。
+    inputs: []
+    success_criteria:
+      - "调用 lessons_stats"
+      - "输出各场景经验统计"
+      - "合并/淘汰建议(依据数据)"
+    human_notes: 人工 0-5 分：分析全面/建议合理
+
+  - id: monitor-05
+    title: 评估队列低分案例模式分析(review_queue_summary)
+    description: 用 review_queue_summary 检查评估队列, 分析低分案例模式。
+    inputs: []
+    success_criteria:
+      - "调用 review_queue_summary"
+      - "识别低分模式(系统性弱点)"
+      - "输出改进建议"
+    human_notes: 人工 0-5 分：模式准确/建议可落地
+
+  - id: monitor-06
+    title: 系统指标异常诊断(CPU/内存/WS/token 用量)
+    description: 用系统指标工具查询 CPU/内存/WS/token 用量, 诊断异常。
+    inputs: []
+    success_criteria:
+      - "调用 system_metrics_query/system_status"
+      - "输出指标数据 + 异常定位"
+      - "给出处理建议"
+    human_notes: 人工 0-5 分：诊断准确/数据支撑
+
+  - id: monitor-07
+    title: 针对子瞻/白圭/清和失败模式提议 system_prompt 改进
+    description: 分析各场景失败模式, 提议对应场景 system_prompt 改进。
+    inputs: []
+    success_criteria:
+      - "识别 ≥1 场景失败模式"
+      - "提议具体 prompt 改进(改动点/预期收益)"
+      - "经 optim_plan 提交审批"
+    human_notes: 人工 0-5 分：分析深度/改进有效
+
+  - id: monitor-08
+    title: 工具调用失败模式 → 提议工具实现改进
+    description: 识别工具调用失败模式, 提议工具实现改进(超时/错误处理/参数校验)。
+    inputs: []
+    success_criteria:
+      - "识别 ≥1 工具失败模式(频率/类型)"
+      - "提议工具实现改进(具体改动)"
+      - "经 optim_plan 提交审批"
+    human_notes: 人工 0-5 分：模式识别/改进具体

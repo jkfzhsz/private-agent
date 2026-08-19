@@ -1,0 +1,19 @@
+{
+  "sample_id": "frontend_design_003_boundary",
+  "scenario": "frontend_design",
+  "skill_name": "frontend_design",
+  "skill_version": "1.0.0",
+  "case_type": "boundary",
+  "difficulty": "hard",
+  "split": "test",
+  "input": "请生成响应式仪表盘 outputs/dashboard.html,要求同时适配 1920px 桌面、768px 平板与 375px 手机三档断点,包含侧边栏、顶栏、4 个 KPI 卡片网格与折线图区域,所有间距来自设计系统 token。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "search_knowledge", "args": {"query": "响应式断点 网格 token 间距", "scenario": "frontend_design"}, "expected_result_type": "chunks"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "from datetime import datetime\nnow = datetime.now().strftime('%Y-%m-%d %H:%M')\nhtml = f'<!DOCTYPE html>...<style>:root{{--primary:#3B82F6;--spacing-unit:8px;--sidebar-w:240px;}} .dashboard{{display:grid;grid-template-columns:var(--sidebar-w) 1fr;}} .kpi-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:calc(var(--spacing-unit)*3);}} @media (max-width:1024px){{.dashboard{{grid-template-columns:1fr;}}.kpi-grid{{grid-template-columns:repeat(2,1fr);}}}} @media (max-width:480px){{.kpi-grid{{grid-template-columns:1fr;}}}}</style>'\nwith open('outputs/dashboard.html','w',encoding='utf-8') as f:\n    f.write(html)"}, "expected_result_type": "stdout"},
+      {"tool": "file_write", "args": {"path": "outputs/dashboard.html"}, "expected_result_type": "artifact"}
+    ],
+    "expected_output_contains": ["outputs/dashboard.html", "1920", "768", "375", "kpi-grid", "sidebar", "@media"]
+  },
+  "expected_output": "已生成三档断点响应式仪表盘 outputs/dashboard.html:1920px 显示侧边栏 + 4 列 KPI 网格;1024px 隐藏侧边栏 + 2 列 KPI;480px 单列堆叠。所有间距引用 --spacing-unit token。"
+}

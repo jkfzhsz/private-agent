@@ -1,0 +1,5 @@
+{
+  "output": "<html><body><h1>2025 AI 编程助手市场分析</h1><p>主流产品包括 GitHub Copilot(GitHub,$10/月)、Cursor(Anysphere,$20/月)、Codeium(免费)、Tabnine($12/月)。</p><p>来源: https://example.com/article-ai-coding-2025</p></body></html>",
+  "error": null,
+  "metadata": {"url": "https://example.com/article-ai-coding-2025", "status_code": 200, "expected_result_type": "html"}
+}

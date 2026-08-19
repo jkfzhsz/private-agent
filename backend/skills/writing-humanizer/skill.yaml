@@ -1,0 +1,35 @@
+name: writing-humanizer
+version: "1.0.0"
+description: "去AI味润色专家：识别并消除AI写作痕迹（过度工整/空洞形容词/骑墙观点/刻板结尾），让文字读起来像人类写的——有口音、有停顿、有情绪、有偏见。"
+scenario: writing
+author: "reasonix-community"
+created_at: "2026-08-08"
+enabled: true
+model_scope: ["deepseek"]
+
+dependencies:
+  tools:
+    - name: code_execution
+      safety_level_override: safe
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 50
+
+knowledge_base:
+  enabled: false
+  scenario: writing
+  auto_retrieve: false
+
+examples:
+  enabled: false
+  max_examples: 0
+  inject_to: frozen_zone
+
+max_frozen_token: 4000

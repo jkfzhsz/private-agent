@@ -1,0 +1,20 @@
+{
+  "sample_id": "frontend_design_002_normal",
+  "scenario": "frontend_design",
+  "skill_name": "frontend_design",
+  "skill_version": "1.0.0",
+  "case_type": "normal",
+  "difficulty": "medium",
+  "split": "test",
+  "input": "请帮我生成 React 函数组件 outputs/FeatureCard.tsx,展示特性卡片(图标 + 标题 + 描述),使用 Hooks 管理悬停状态,遵循设计系统间距与圆角规范,并提供使用示例。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "search_knowledge", "args": {"query": "卡片组件规范 间距 token 圆角", "scenario": "frontend_design"}, "expected_result_type": "chunks"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "from datetime import datetime\nnow = datetime.now().strftime('%Y-%m-%d %H:%M')\ncomponent = f'''import {{ useState, ReactNode }} from 'react';\ninterface FeatureCardProps {{ icon: ReactNode; title: string; description: string; onClick?: () => void; }}\nexport function FeatureCard({{icon, title, description, onClick}}: FeatureCardProps) {{\n  const [isHovered, setIsHovered] = useState(false);\n  const cardStyle: React.CSSProperties = {{ padding: '16px', borderRadius: '12px', boxShadow: isHovered ? '0 4px 12px rgba(0,0,0,0.08)' : '0 1px 3px rgba(0,0,0,0.04)', transition: 'box-shadow 150ms ease' }};\n  return (<div style={{cardStyle}} onMouseEnter={{() => setIsHovered(true)}} onMouseLeave={{() => setIsHovered(false)}} onClick={{onClick}}><div aria-hidden='true'>{{icon}}</div><h3>{{title}}</h3><p>{{description}}</p></div>);\n}}'''\nwith open('outputs/FeatureCard.tsx','w',encoding='utf-8') as f:\n    f.write(component)"}, "expected_result_type": "stdout"},
+      {"tool": "file_write", "args": {"path": "outputs/FeatureCard.tsx"}, "expected_result_type": "artifact"},
+      {"tool": "file_read", "args": {"path": "outputs/FeatureCard.tsx"}, "expected_result_type": "tsx"}
+    ],
+    "expected_output_contains": ["outputs/FeatureCard.tsx", "useState", "FeatureCardProps", "isHovered", "16px", "12px"]
+  },
+  "expected_output": "已生成 React 函数组件 outputs/FeatureCard.tsx,使用 useState 管理悬停状态,内联 style 引用设计 token(间距 16px、圆角 12px、过渡 150ms),含使用示例与无障碍 aria-hidden 标记。"
+}

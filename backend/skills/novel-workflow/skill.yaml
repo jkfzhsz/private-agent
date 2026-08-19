@@ -1,0 +1,35 @@
+name: novel-workflow
+version: "1.0.0"
+description: "长篇小说创作工作流：从零搭建工程化写作系统（内容排版分离+5模块管理+一致性检查+批量生成），含28章实战验证的完整方法论"
+scenario: writing
+author: "reasonix-community"
+created_at: "2026-08-08"
+enabled: true
+model_scope: ["deepseek"]
+
+dependencies:
+  tools:
+    - name: code_execution
+      safety_level_override: safe
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 50
+
+knowledge_base:
+  enabled: false
+  scenario: writing
+  auto_retrieve: false
+
+examples:
+  enabled: false
+  max_examples: 0
+  inject_to: frozen_zone
+
+max_frozen_token: 4000

@@ -1,0 +1,122 @@
+# 子瞻(office)场景评测任务清单 —— Agent Harness 评测集(设计文档 §3.1-A3)
+#
+# 用途: harness 提示词/工具描述迭代的回归护栏; 首批基线先跑本场景 10 任务
+#      验证评测闭环(2026-08-15 蒋先生确认), 再补白圭/清和/无涯。
+# 结构: meta(场景元信息) + tasks(任务数组)
+# 判据: success_criteria 可自动核验为主(文件/数值/关键词), human 0-5 分为辅。
+meta:
+  scenario: office
+  skill_name: office
+  skill_version: "1.1.0"
+  scene_name: 子瞻
+  description: 工作与学习场景 —— 文档处理、数据分析、网页研究、学习辅导
+  harness_checks:
+    - "[Scene Profile] 块注入存在(persona 苏轼/职责/工作流/规则)"
+    - "工具描述覆盖生效(web_search/code_execution 命中 harness.tool_descriptions)"
+
+tasks:
+  - id: office-01
+    title: PDF 提取表格 → Excel 汇总(含数值计算)
+    description: 从给定 PDF 中提取表格数据, 汇总为 Excel 文件, 包含数值计算(如合计/均值)。
+    inputs:
+      - "用户提供 PDF 文件(放入 uploads/)"
+    success_criteria:
+      - "产出 .xlsx 文件(ws/file_write 或沙箱落盘)"
+      - "提取的表格行数 > 0"
+      - "数值计算列存在且结果正确"
+    human_notes: 人工 0-5 分：数据完整性/计算正确性/格式可用性
+
+  - id: office-02
+    title: 多篇网页资料 → 带来源标注的行业调研纪要
+    description: 检索多个网页(web_search), 汇总为行业调研纪要, 每条结论标注来源。
+    inputs: []
+    success_criteria:
+      - "调用 web_search ≥ 2 次"
+      - "输出含来源 URL/出处标注"
+      - "结构化(小标题/要点/结论)"
+    human_notes: 人工 0-5 分：信息相关性/来源可溯/结构清晰
+
+  - id: office-03
+    title: CSV 数据清洗 + 分组统计 + 可视化图表
+    description: 读取 CSV(code_execution + pandas), 完成清洗(缺失值/类型), 分组统计, 用 matplotlib 生成图表。
+    inputs:
+      - "用户提供 CSV 文件(放入 uploads/ 或工作区)"
+    success_criteria:
+      - "调用 code_execution ≥ 2 次"
+      - "产出清洗后数据(文件或输出)"
+      - "生成图表文件(.png, 沙箱落盘)"
+    human_notes: 人工 0-5 分：清洗正确性/统计合理性/图表可读性
+
+  - id: office-04
+    title: 长文档压缩为要点摘要(关键数字零丢失)
+    description: 将长文档压缩为要点摘要, 关键数字/日期/路径必须逐字保留。
+    inputs:
+      - "用户提供长文档(放入 uploads/)"
+    success_criteria:
+      - "输出要点式摘要"
+      - "文档中关键数字/日期出现在摘要中"
+      - "摘要长度显著短于原文"
+    human_notes: 人工 0-5 分：关键事实保留率/摘要可读性
+
+  - id: office-05
+    title: "学习辅导: 拆解\"央行公开市场操作\"为知识点讲解"
+    description: 将复杂概念拆解为知识点分层讲解, 用例子/对比帮助理解。
+    inputs: []
+    success_criteria:
+      - "输出含 ≥3 个知识点分层"
+      - "包含定义 + 机制 + 例子"
+      - "涉政策表述以权威来源为准(search_knowledge)"
+    human_notes: 人工 0-5 分：准确性/通俗性/结构完整
+
+  - id: office-06
+    title: 沙箱内批量整理目录文件(重命名/归档)
+    description: "在沙箱内(code_execution)批量整理指定目录文件: 按规则重命名/归档到子目录。"
+    inputs:
+      - "用户提供待整理目录(工作区)"
+    success_criteria:
+      - "调用 code_execution 执行整理"
+      - "文件被重命名/归档(可验证目录结构)"
+      - "整理规则清晰说明"
+    human_notes: 人工 0-5 分：规则正确性/目录整洁度/可逆性说明
+
+  - id: office-07
+    title: 生成 docx 报告(标题层级/表格/图片占位)
+    description: "用 python-docx 生成结构化报告: 标题层级、表格、图片占位。"
+    inputs:
+      - "用户提供报告主题/数据(可选)"
+    success_criteria:
+      - "产出 .docx 文件"
+      - "含 ≥2 级标题层级"
+      - "含表格(≥1 个)"
+    human_notes: 人工 0-5 分：结构规范性/内容质量/格式美观
+
+  - id: office-08
+    title: 竞品定价对比(3 家网页调研 → 对比表)
+    description: 调研 3 家竞品定价(web_search), 汇总为对比表。
+    inputs: []
+    success_criteria:
+      - "web_search 覆盖 ≥3 个来源"
+      - "输出对比表(产品/价格/特点列)"
+      - "标注数据来源与时间"
+    human_notes: 人工 0-5 分：覆盖面/准确性/表格可读性
+
+  - id: office-09
+    title: python-docx 修改现有文档指定段落
+    description: 读取现有 .docx, 修改指定段落内容并保存(file_read + python-docx)。
+    inputs:
+      - "用户提供 .docx 文件(放入 uploads/)"
+    success_criteria:
+      - "产出修改后的 .docx"
+      - "目标段落内容已更新"
+      - "非目标内容保持"
+    human_notes: 人工 0-5 分：修改准确性/无损性
+
+  - id: office-10
+    title: 金融术语解释 + 关联政策背景(结合 iFind)
+    description: 解释金融术语, 结合 iFind 数据与政策背景给出关联解读。
+    inputs: []
+    success_criteria:
+      - "调用 mcp ifind 工具(行情/宏观)"
+      - "术语定义准确"
+      - "关联政策背景(权威表述)"
+    human_notes: 人工 0-5 分：术语准确性/数据时效/政策关联

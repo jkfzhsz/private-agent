@@ -1,0 +1,5 @@
+{
+  "output": "outputs/sales_q4_summary.xlsx",
+  "error": null,
+  "metadata": {"path": "outputs/sales_q4_summary.xlsx", "expected_result_type": "artifact", "bytes_written": 2048}
+}

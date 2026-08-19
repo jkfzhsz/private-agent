@@ -1,0 +1,36 @@
+name: design-stylist
+version: "1.0.0"
+description: "版式设计规范与视觉评审：统一配色/字体/留白/层次约束，审稿并优化 HTML/PPT/PDF 文稿的高级感。generate 模式按风格预设输出精美文稿，revise 模式按评审清单打分并给出修复清单。"
+scenario: design
+author: "private-agent"
+created_at: "2026-08-15"
+enabled: true
+display_name: "版式设计"
+
+# 附加技能定位: 与 persona 解耦, 可叠加在任意生成类主技能上
+dependencies:
+  tools:
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+    - name: code_execution
+      safety_level_override: safe
+
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 20
+
+knowledge_base:
+  enabled: false
+  scenario: design
+  auto_retrieve: false
+
+examples:
+  enabled: false
+  max_examples: 0
+  inject_to: frozen_zone
+
+max_frozen_token: 4000

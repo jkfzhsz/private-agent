@@ -1,0 +1,18 @@
+{
+  "sample_id": "data_analysis_003_boundary",
+  "scenario": "data_analysis",
+  "skill_name": "data_analysis",
+  "skill_version": "1.0.0",
+  "case_type": "boundary",
+  "difficulty": "medium",
+  "split": "test",
+  "input": "请读取 metrics.csv 文件,该文件包含 100 万行时间序列数据,需要按小时聚合 CPU 利用率均值,告诉我能否安全加载。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "file_read", "args": {"path": "metrics.csv"}, "expected_result_type": "csv"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "import pandas as pd\ndf = pd.read_csv('metrics.csv')\nprint(f'rows={len(df)}')\nif len(df) > 500000:\n    print('WARN: large dataset, using chunked aggregation')\n    agg = pd.concat([chunk.groupby('hour')['cpu'].mean() for chunk in pd.read_csv('metrics.csv', chunksize=100000)]).groupby(level=0).mean()\nelse:\n    agg = df.groupby('hour')['cpu'].mean()\nprint(agg.head())"}, "expected_result_type": "stdout"}
+    ],
+    "expected_output_contains": ["rows=", "hour", "cpu"]
+  },
+  "expected_output": "metrics.csv 含 100 万行,采用分块聚合避免内存溢出,已按小时聚合 CPU 利用率均值,结果已输出。"
+}

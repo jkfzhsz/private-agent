@@ -1,0 +1,125 @@
+# 白圭(data_analysis)场景评测任务清单 —— Agent Harness 评测集(设计文档 §3.1-A3)
+#
+# 用途: harness 提示词/工具描述迭代的回归护栏。
+# 结构: meta(场景元信息) + tasks(任务数组)
+# 判据: success_criteria 可自动核验为主(文件/数值/关键词), human 0-5 分为辅。
+meta:
+  scenario: data_analysis
+  skill_name: data_analysis
+  skill_version: "1.1.0"
+  scene_name: 白圭
+  description: 投资与理财场景 —— 行情、基金、宏观、财务分析
+  harness_checks:
+    - "[Scene Profile] 块注入存在(persona 白圭/职责/工作流/规则)"
+    - "工具描述覆盖生效(code_execution/web_search 命中 harness.tool_descriptions)"
+
+tasks:
+  - id: data_analysis-01
+    title: 给定公司价值投资分析(基本面 + 估值框架)
+    description: 对公司做基本面分析(财务/行业/管理层) + 估值框架(对照 investment_framework 知识库)。
+    inputs:
+      - "用户指定公司(股票代码或名称)"
+    success_criteria:
+      - "调用 ifind 取财务/行情数据"
+      - "调用 search_knowledge 检索投资框架(如适用)"
+      - "输出基本面分析 + 估值结论 + 风险提示"
+    human_notes: 人工 0-5 分：分析深度/数据支撑/风险提示
+
+  - id: data_analysis-02
+    title: iFind 查询个股/指数行情 → 技术解读
+    description: 用 iFind 查询个股或指数行情, 做技术面解读(趋势/支撑压力/量能)。
+    inputs:
+      - "用户指定标的(股票/指数代码)"
+    success_criteria:
+      - "调用 ifind 行情工具(实时/历史)"
+      - "输出技术解读(趋势/关键位)"
+      - "标注数据来源与时间"
+    human_notes: 人工 0-5 分：数据准确性/解读合理性
+
+  - id: data_analysis-03
+    title: "行业研究: 竞争格局(波特五力框架)"
+    description: 针对指定行业做竞争格局研究, 应用波特五力框架。
+    inputs:
+      - "用户指定行业"
+    success_criteria:
+      - "调用 ifind/网页检索获取行业数据"
+      - "输出波特五力分析(5 维度)"
+      - "结论 + 关键玩家/集中度"
+    human_notes: 人工 0-5 分：框架完整/数据支撑/结论清晰
+
+  - id: data_analysis-04
+    title: 财务指标计算(ROE/毛利率/负债率) + 趋势判断
+    description: 计算指定公司 ROE/毛利率/负债率, 并做趋势判断。
+    inputs:
+      - "用户指定公司(股票代码)"
+    success_criteria:
+      - "调用 ifind 取财务数据"
+      - "ROE/毛利率/负债率计算正确"
+      - "输出趋势判断(近 N 期)"
+    human_notes: 人工 0-5 分：计算正确/趋势分析/风险提示
+
+  - id: data_analysis-05
+    title: 构建 DCF/PE 估值 → 结论 + 风险提示
+    description: 构建 DCF 或 PE 估值模型, 给出估值结论与风险提示。
+    inputs:
+      - "用户指定公司(股票代码)"
+    success_criteria:
+      - "调用 code_execution 构建模型(或表格)"
+      - "关键假设明确列出"
+      - "估值结论 + 风险提示(不承诺收益)"
+    human_notes: 人工 0-5 分：模型严谨/假设透明/风险完整
+
+  - id: data_analysis-06
+    title: 股价走势 + 均线叠加图(matplotlib, 红涨绿跌)
+    description: 绘制股价走势 + 均线叠加图(matplotlib, A 股红涨绿跌配色)。
+    inputs:
+      - "用户指定标的(股票代码)"
+    success_criteria:
+      - "调用 ifind 取历史行情"
+      - "调用 code_execution 绘 matplotlib 图"
+      - "红涨绿跌配色正确(涨=红, 跌=绿)"
+    human_notes: 人工 0-5 分：图表正确/配色规范/可读性
+
+  - id: data_analysis-07
+    title: 财报关键数据提取 + 异常项识别
+    description: 从财报中提取关键数据, 识别异常项(同比/环比/占比较动)。
+    inputs:
+      - "用户提供财报文件或指定公司"
+    success_criteria:
+      - "关键财务项提取完整(营收/利润/现金流)"
+      - "异常项识别(变动 > 阈值)"
+      - "输出异常原因假设"
+    human_notes: 人工 0-5 分：提取完整/异常识别/假设合理
+
+  - id: data_analysis-08
+    title: 投资决策检查清单应用(对照证券投资知识库)
+    description: 应用投资决策检查清单(对照 securities 知识库)评估给定投资标的。
+    inputs:
+      - "用户指定投资标的"
+    success_criteria:
+      - "调用 search_knowledge 检索检查清单(如适用)"
+      - "逐项过清单(安全边际/能力圈等)"
+      - "输出结论(投/不投/观察)"
+    human_notes: 人工 0-5 分：清单完整/逻辑严谨/结论明确
+
+  - id: data_analysis-09
+    title: 宏观指标(CPI/PMI)解读与投资含义
+    description: 查询 CPI/PMI 等宏观指标, 解读其投资含义。
+    inputs:
+      - "用户指定宏观指标或时间段"
+    success_criteria:
+      - "调用 ifind 宏观数据工具(CPI/PMI)"
+      - "指标趋势解读"
+      - "输出投资含义(关联资产/行业)"
+    human_notes: 人工 0-5 分：数据准确/解读专业/含义合理
+
+  - id: data_analysis-10
+    title: 资产配置建议(家庭财富管理框架)
+    description: 基于家庭财富管理框架给出资产配置建议(多样化/风险匹配)。
+    inputs:
+      - "用户提供家庭资产概况(可选, 无则用示例)"
+    success_criteria:
+      - "调用 search_knowledge 检索配置框架(如适用)"
+      - "配置建议含资产类别/比例/再平衡纪律"
+      - "风险提示 + 不承诺收益声明"
+    human_notes: 人工 0-5 分：框架完整/比例合理/纪律明确
