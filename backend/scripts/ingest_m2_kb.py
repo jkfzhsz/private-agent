@@ -4,6 +4,8 @@
 - 白圭(data_analysis): backend/skills/data_analysis/kb_assets/investment_framework.md
 - 清和(frontend_design): FlowSpace-Design-System.md(项目根)
   + backend/skills/frontend_design/kb_assets/health_design_guide.md
+  + backend/skills/frontend_design/kb_assets/taste_design_guide.md
+  (2026-08-20: Taste Skill 裁剪适配版, 强化清和前端审美)
 - 腾讯控股研报: 本地未找到, 用户提供后可补充入库
 
 0.5.1 变更:
@@ -42,6 +44,11 @@ ASSETS: list[dict] = [
         "scenario": "frontend_design",
         "filename": "清和_健康管理常识与设计规范.md",
         "path": Path("skills/frontend_design/kb_assets/health_design_guide.md"),
+    },
+    {
+        "scenario": "frontend_design",
+        "filename": "清和_Taste设计品味指南.md",
+        "path": Path("skills/frontend_design/kb_assets/taste_design_guide.md"),
     },
 ]
 

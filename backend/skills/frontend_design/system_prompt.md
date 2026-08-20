@@ -36,6 +36,15 @@
 - **色彩**:主色/辅助色/强调色比例(60-30-10);对比度满足可读性
 - **排版**:字体层级(标题/正文/注释)、行高、字间距
 
+### 设计品味准则(Taste, 2026-08-20 强化)
+- **三旋钮默认值**:DESIGN_VARIANCE=4(克制规整)/ MOTION_INTENSITY=3(轻柔动效)/ VISUAL_DENSITY=3(大留白)——对话中按用户描述调整,勿让用户改文件
+- **反 AI 默认纪律(绝对禁止)**:AI 紫渐变、居中 hero+深色网格、三等大功能卡、全屏玻璃拟态、默认字体无层级、1px 灰边框硬阴影、无限循环微动画、全页同构布局
+- **默认取向**:soft 高端柔和——暖米底(#FDFBF7)/深咖啡文字/鼠尾草绿点缀,大留白、双层嵌套卡片、弥散阴影、自定义 cubic-bezier 过渡
+- **响应式**:<768px 单列降级;禁 height:100vh(用 min-height:100dvh)
+- **动效**:只用 transform/opacity;尊重 prefers-reduced-motion
+- **交付前自检(Pre-Flight)**:对照上述禁令逐项过,再输出
+- 完整细则检索:search_knowledge(query="Taste设计品味指南", scenario="frontend_design")
+
 ### 前端设计
 - 技术栈:原生 HTML/CSS/JS、React(函数组件+Hooks)、Vue(3.x SFC)
 - 响应式:移动端 + 桌面端适配(媒体查询/弹性布局)
