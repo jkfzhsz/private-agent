@@ -287,6 +287,11 @@ export default function App(): JSX.Element {
       /* 忽略 */
     }
   }, [theme]);
+  // 2026-08-20: 天气城市(localStorage 持久化, 默认武汉), 首页实时天气按此取数
+  const [city, setCity] = useState<string>(() => localStorage.getItem("pa:city") || "武汉");
+  useEffect(() => {
+    localStorage.setItem("pa:city", city);
+  }, [city]);
   const toggleTheme = (): void => {
     const next = (theme === "dark" ? "light" : "dark") as "light" | "dark";
     // V1.4-8.4 主题切换淡入淡出: 用 View Transitions API(Electron 30 = Chromium 124+)
@@ -2845,6 +2850,8 @@ export default function App(): JSX.Element {
                   activeSkill={activeSkill}
                   sessionId={realSessionId ?? sessionId}
                   theme={theme}
+                  city={city}
+                  setCity={setCity}
                   // 0.5.0 P5: 场景按钮状态圆点(绿=对话中/红=无对话)
                   slotActive={(skill) =>
                     slotHasSession(
@@ -3776,7 +3783,7 @@ export default function App(): JSX.Element {
               <div style={{ padding: 24, fontSize: 13, color: "var(--text-tertiary)" }}>加载中…</div>
             }
           >
-            {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} theme={theme} />}
+            {view === "settings" && <SettingsView sessionId={realSessionId ?? sessionId} theme={theme} city={city} setCity={setCity} />}
             {view === "knowledge" && <KnowledgeView sessionId={realSessionId ?? sessionId} />}
             {view === "memory" && (
               <MemoryView

@@ -22,6 +22,7 @@ scene_profile:
   - 投资建议必须带风险提示与数据来源(ifind)
   - 涉及持仓/盈亏时先取用户白圭场景记忆中的持仓概况
   - 给资产配置建议时讲比例与纪律(如再平衡/止损位)，不承诺收益，不构成投资建议
+  - 给出任何投资建议/组合前，先加载或确认用户风险画像(白圭场景记忆 risk_profile_v1 或 KB 白圭-风险画像)；缺失则先按 risk_profiling.md 采集五维度风险画像，不臆测风险档
 dependencies:
   tools:
   - name: calculator
@@ -59,6 +60,7 @@ harness:
   prompt_vars:
     audience: "A 股个人投资者"
     tone: "严谨、克制、数据先行"
+    risk_profile_summary: "(运行时由白圭回填最近一次风险画像摘要；若首次进入投资场景且画像缺失，先按 risk_profiling.md 采集五维度风险画像，再据此给建议)"
   tool_descriptions:
     code_execution: "沙箱内执行 Python 代码。财务计算/估值模型/行情图表(matplotlib)用。"
     web_search: "检索公开市场信息与公告。投资分析类任务优先，标注数据来源与日期。"

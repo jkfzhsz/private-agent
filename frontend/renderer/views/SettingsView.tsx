@@ -397,7 +397,7 @@ const SETTINGS_NAV_GROUPS: SettingsNavGroup[] = [
   },
 ];
 
-export default function SettingsView({ sessionId = 1, theme }: { sessionId?: number; theme?: "light" | "dark" }): JSX.Element {
+export default function SettingsView({ sessionId = 1, theme, city = "武汉", setCity }: { sessionId?: number; theme?: "light" | "dark"; city?: string; setCity?: (v: string) => void }): JSX.Element {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [fallbackChain, setFallbackChain] = useState<string[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
@@ -456,7 +456,7 @@ export default function SettingsView({ sessionId = 1, theme }: { sessionId?: num
     general: {
       title: "通用设置",
       subtitle: "外观、主题与壁纸",
-      node: <WallpaperSection theme={theme} />,
+      node: <WallpaperSection theme={theme} city={city} setCity={setCity} />,
     },
     models: {
       title: "模型服务",
@@ -3960,7 +3960,7 @@ function SystemSection(): JSX.Element {
   );
 }
 
-function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element {  const [wallpaper, setWallpaper] = useState<string | null>(null);
+function WallpaperSection({ theme, city, setCity }: { theme?: "light" | "dark"; city?: string; setCity?: (v: string) => void }): JSX.Element {  const [wallpaper, setWallpaper] = useState<string | null>(null);
   const [wpType, setWpType] = useState<"image" | "video">("image");
   // 2026-08-08: 暗色/亮色各自独立保存背景; 这里直接编辑"当前全局主题"对应
   // 的那一套, 在侧边栏切换主题后本区自动联动加载另一套(无需独立 tab)。
@@ -4099,6 +4099,26 @@ function WallpaperSection({ theme }: { theme?: "light" | "dark" }): JSX.Element 
     <div className="glass-panel animate-in delay-3" style={PAD_LG}>
       <div style={SEC_TITLE}>
         主题与壁纸
+      </div>
+      {/* 2026-08-20: 天气城市设置(首页天气按此城市取 Open-Meteo 实时数据) */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "4px 0 16px" }}>
+        <span style={{ fontSize: 13, color: "var(--text-secondary)", minWidth: 64 }}>天气城市</span>
+        <input
+          value={city ?? "武汉"}
+          onChange={(e) => setCity?.(e.target.value.trim())}
+          placeholder="如 武汉"
+          style={{
+            flex: 1,
+            maxWidth: 240,
+            padding: "8px 10px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid rgba(148,163,184,0.25)",
+            background: "var(--input-bg, rgba(255,255,255,0.6))",
+            color: "var(--text-primary)",
+            fontSize: 13,
+          }}
+        />
+        <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>首页天气按此城市取实时数据</span>
       </div>
       <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
         暗色/亮色主题各自独立保存背景, 当前编辑的是
