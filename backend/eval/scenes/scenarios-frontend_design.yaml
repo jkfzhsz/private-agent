@@ -1,0 +1,125 @@
+# 清和(frontend_design)场景评测任务清单 —— Agent Harness 评测集(设计文档 §3.1-A3)
+#
+# 用途: harness 提示词/工具描述迭代的回归护栏。
+# 结构: meta(场景元信息) + tasks(任务数组)
+# 判据: success_criteria 可自动核验为主(文件/数值/关键词), human 0-5 分为辅。
+meta:
+  scenario: frontend_design
+  skill_name: frontend_design
+  skill_version: "1.1.0"
+  scene_name: 清和
+  description: 生活健康与美学设计场景 —— 健康管理、美学设计、前端设计
+  harness_checks:
+    - "[Scene Profile] 块注入存在(persona 谢安/职责/工作流/规则)"
+    - "工具描述覆盖生效(code_execution/web_search 命中 harness.tool_descriptions)"
+
+tasks:
+  - id: frontend_design-01
+    title: "健康管理: 作息/饮食记录 → 改善计划(含免责声明)"
+    description: 根据用户作息/饮食记录, 生成健康改善计划, 必须含专业医师免责声明。
+    inputs:
+      - "用户提供作息/饮食记录(文本或文件)"
+    success_criteria:
+      - "输出结构化改善计划(作息/饮食/运动)"
+      - "含免责声明(咨询专业医师, 不做诊疗结论)"
+      - "建议可执行(具体时间/量)"
+    human_notes: 人工 0-5 分：专业性/可执行性/免责完整
+
+  - id: frontend_design-02
+    title: 生成响应式健康打卡 HTML(含设计说明)
+    description: 生成响应式健康打卡页面 HTML, 附设计说明与可复用代码。
+    inputs:
+      - "用户指定打卡维度(可选, 默认作息/饮食/运动)"
+    success_criteria:
+      - "产出 .html 文件"
+      - "响应式(媒体查询/弹性布局)"
+      - "含设计说明(配色/排版/交互)"
+    human_notes: 人工 0-5 分：视觉质量/响应式/代码规范
+
+  - id: frontend_design-03
+    title: 报告美化排版为演示 HTML
+    description: 将报告内容美化排版为演示用 HTML(适合大屏/分享)。
+    inputs:
+      - "用户提供报告文本/数据"
+    success_criteria:
+      - "产出演示 HTML(章节/卡片/图表)"
+      - "视觉统一(设计规范)"
+      - "可滚动阅读/演示"
+    human_notes: 人工 0-5 分：视觉表现/信息层级/完成度
+
+  - id: frontend_design-04
+    title: "前端 bug 修复: 定位并修复样式问题(给定代码片段)"
+    description: 给定前端代码片段, 定位样式问题并修复。
+    inputs:
+      - "用户提供代码片段(HTML/CSS/JS)"
+    success_criteria:
+      - "定位问题根因(代码层面)"
+      - "给出修复方案(修改后代码)"
+      - "说明修复原理"
+    human_notes: 人工 0-5 分：根因准确/修复有效/解释清晰
+
+  - id: frontend_design-05
+    title: "设计系统: 为品牌生成色板 + 字体规范"
+    description: "为给定品牌生成设计系统: 色板(主/辅/中性) + 字体规范。"
+    inputs:
+      - "用户指定品牌/行业(可选)"
+    success_criteria:
+      - "输出色板(主色/辅色/中性色 + 色值)"
+      - "字体规范(标题/正文/字号/字重)"
+      - "设计说明(使用场景)"
+    human_notes: 人工 0-5 分：色彩和谐/规范完整/可用性
+
+  - id: frontend_design-06
+    title: "子瞻产物美化: 数据报告 → 一页可视化看板"
+    description: 将子瞻生成的数据报告美化为单页可视化看板。
+    inputs:
+      - "用户提供数据报告/数据(可选)"
+    success_criteria:
+      - "产出单页看板 HTML"
+      - "数据可视化(图表/指标卡)"
+      - "视觉统一(设计规范)"
+    human_notes: 人工 0-5 分：可视化/视觉/信息密度
+
+  - id: frontend_design-07
+    title: "饮食建议: 一周食谱(营养学 + 证据等级标注)"
+    description: 生成一周食谱, 基于营养学知识, 关键建议标注证据等级。
+    inputs:
+      - "用户提供饮食偏好/禁忌(可选)"
+    success_criteria:
+      - "输出 7 天食谱(早/中/晚)"
+      - "营养均衡(宏量营养素覆盖)"
+      - "关键建议含证据等级(A/B/C) + 免责声明"
+    human_notes: 人工 0-5 分：营养科学性/可执行/证据标注
+
+  - id: frontend_design-08
+    title: 过敏防治知识问答(引用 health-wiki)
+    description: 回答过敏防治相关问题, 引用 health-wiki 知识库内容。
+    inputs:
+      - "用户提出过敏相关问题"
+    success_criteria:
+      - "调用 search_knowledge(health 场景)检索"
+      - "回答基于知识库内容(可溯源)"
+      - "含免责声明(专业医师建议)"
+    human_notes: 人工 0-5 分：准确性/知识库引用/免责
+
+  - id: frontend_design-09
+    title: 前端组件生成(卡片/表单/图表)附代码
+    description: 生成前端组件(卡片/表单/图表), 附可复用代码。
+    inputs:
+      - "用户指定组件类型与风格(可选)"
+    success_criteria:
+      - "产出 ≥2 个组件代码(HTML/CSS)"
+      - "组件样式统一(设计规范)"
+      - "附使用说明"
+    human_notes: 人工 0-5 分：代码质量/视觉/复用性
+
+  - id: frontend_design-10
+    title: "生活美学: 家居配色方案 + 实施清单"
+    description: 为家居空间生成配色方案, 附实施清单。
+    inputs:
+      - "用户指定空间类型/风格(可选)"
+    success_criteria:
+      - "输出配色方案(墙/家具/软装色值)"
+      - "实施清单(采购/施工步骤)"
+      - "设计说明(氛围/采光考虑)"
+    human_notes: 人工 0-5 分：美学/可实施/说明完整

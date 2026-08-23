@@ -1,0 +1,254 @@
+"""蓝图 §2.12/§2.15 config/loader.py - 配置分层加载。
+
+B5.1:加载 config.yaml 静态配置。
+B5.4:对 MVP 不支持的 mcp.protocol_version 抛 ConfigNotSupportedInMVP。
+B5.2:合并 config_runtime 表运行时覆盖(蓝图 §2.12 优先级:runtime > yaml)。
+AC-11:校验 mcp.servers[] 配置合法性。
+AC-13:校验 sandbox 配置段合法性。
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import asyncpg
+import yaml
+
+from private_agent.errors import ConfigNotSupportedInMVP
+
+# 蓝图 §9.13 config.yaml 位置:backend/config/config.yaml
+CONFIG_FILE = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
+
+# 蓝图 §9.13:支持的 protocol_version
+# 2026-07-28: 无状态协议(Phase 2 协议升级, 默认)
+# 2025-11-25: 旧有状态协议(向后兼容, 12 个月宽限期内仍可用)
+MVP_SUPPORTED_PROTOCOL_VERSIONS = {"2025-11-25", "2026-07-28"}
+
+# MVP 支持的 MCP 通信类型
+MCP_SUPPORTED_TYPES = {"stdio", "http"}
+
+
+def load_config(config_path: Path | None = None) -> dict[str, Any]:
+    """加载 config.yaml 并校验 MVP 不支持的配置项(蓝图 §2.12 静态层)。
+
+    Args:
+        config_path: 指定配置文件路径(测试用);默认用 CONFIG_FILE。
+
+    Returns:
+        解析后的配置 dict。
+
+    Raises:
+        ConfigNotSupportedInMVP: 当 tools.mcp.protocol_version 不在 MVP 支持列表时。
+        ValueError: 当 mcp.servers[] 或 sandbox 配置不合法时。
+    """
+    path = config_path if config_path is not None else CONFIG_FILE
+    with path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    # 2026-08-08: 用户数据根(程序文件与用户数据彻底分离) —— 打包版由 Electron
+    # 注入 PA_USER_DATA=%APPDATA%/Private Agent(与 backend.env 同目录), 技能/
+    # 壁纸(outputs)/日志/上传/沙箱全部落 userData, 升级/重装不丢;
+    # dev 未设置时默认回退 WORKSPACE(历史行为, 零回归)。
+    if not os.environ.get("PA_USER_DATA"):
+        os.environ["PA_USER_DATA"] = os.environ.get("WORKSPACE", "")
+
+    _validate_mvp_constraints(cfg)
+    return cfg
+
+
+async def load_config_with_overrides(
+    conn: asyncpg.Connection,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """加载 config.yaml 并合并 config_runtime 运行时覆盖(蓝图 §2.12)。
+
+    优先级:config_runtime > config.yaml。
+    config_runtime 表结构:key TEXT(点分路径,如 system.sidecar.log_level),value JSONB。
+
+    Args:
+        conn: Postgres 连接(用于查询 config_runtime 表)。
+        config_path: 指定配置文件路径(测试用);默认用 CONFIG_FILE。
+
+    Returns:
+        合并后的配置 dict。
+
+    Raises:
+        ConfigNotSupportedInMVP: 合并后的 protocol_version 不在 MVP 支持列表时。
+        ValueError: 当 mcp.servers[] 或 sandbox 配置不合法时。
+    """
+    cfg = load_config(config_path)
+    overrides = await _get_runtime_overrides(conn)
+    _deep_merge(cfg, overrides)
+    _validate_mvp_constraints(cfg)
+    return cfg
+
+
+async def _get_runtime_overrides(conn: asyncpg.Connection) -> dict[str, Any]:
+    """查询 config_runtime 表,将点分 key 展开为嵌套 dict。
+
+    例:{"system.sidecar.log_level": "DEBUG"} → {"system": {"sidecar": {"log_level": "DEBUG"}}}
+
+    特殊处理 models.providers.{name}.{field}: provider name 可含小数点
+    (如 "qwen-2.5"),用最后一个 "." 分割 name 与 field。
+    """
+    rows = await conn.fetch("SELECT key, value FROM config_runtime")
+    result: dict[str, Any] = {}
+    for row in rows:
+        key = row["key"]
+        # asyncpg 对 JSONB 返回 JSON 字符串,需 json.loads 解析为 Python 原生类型
+        value = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+        if key.startswith("models.providers."):
+            # provider name 可含小数点(如 qwen-2.5),取最后一个 "." 分割 name/field
+            rest = key[len("models.providers."):]
+            idx = rest.rfind(".")
+            if idx > 0:
+                prov_name = rest[:idx]
+                field = rest[idx + 1:]
+                provs = result.setdefault("models", {}).setdefault("providers", {})
+                provs.setdefault(prov_name, {})[field] = value
+            else:
+                # 无 field 后缀(整个 key = models.providers.{name})
+                provs = result.setdefault("models", {}).setdefault("providers", {})
+                provs[rest] = value
+        else:
+            keys = key.split(".")
+            d = result
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value
+    return result
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
+    """深度合并:override 的值覆盖 base 的同名 key(原地修改 base)。"""
+    for k, v in override.items():
+        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+
+
+def _validate_mvp_constraints(cfg: dict[str, Any]) -> None:
+    """校验 MVP 阶段不支持的配置项(蓝图 §9.13)。
+
+    蓝图 §9.13:loader 对 mcp.protocol_version='2026-07-28' 抛 ConfigNotSupportedInMVP,
+    防止 UI 误改导致静默失败。
+    AC-11:校验 mcp.servers[] 配置合法性。
+    AC-13:校验 sandbox 配置段(蓝图 §6.14)合法性。
+    """
+    _validate_mcp_protocol_version(cfg)
+    _validate_mcp_servers_config(cfg)
+    _validate_sandbox_config(cfg)
+
+
+def _validate_mcp_protocol_version(cfg: dict[str, Any]) -> None:
+    """校验 mcp.protocol_version 是否在 MVP 支持列表中。"""
+    protocol_version = (
+        cfg.get("tools", {}).get("mcp", {}).get("protocol_version")
+    )
+    if (
+        protocol_version is not None
+        and protocol_version not in MVP_SUPPORTED_PROTOCOL_VERSIONS
+    ):
+        raise ConfigNotSupportedInMVP(
+            f"mcp.protocol_version='{protocol_version}' is not supported in MVP. "
+            f"Supported: {sorted(MVP_SUPPORTED_PROTOCOL_VERSIONS)}. "
+            f"See blueprint §9.13."
+        )
+
+
+def _validate_mcp_servers_config(cfg: dict[str, Any]) -> None:
+    """校验 mcp.servers[] 配置合法性(AC-11)。
+
+    Raises:
+        ValueError: 当配置不合法时。
+    """
+    servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
+    for i, entry in enumerate(servers):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"mcp.servers[{i}] must be a dict, got {type(entry).__name__}"
+            )
+        if "id" not in entry or not entry["id"]:
+            raise ValueError(
+                f"mcp.servers[{i}] missing required field 'id'"
+            )
+        if "type" not in entry or not entry["type"]:
+            raise ValueError(
+                f"mcp.servers[{i}] missing required field 'type'"
+            )
+        if entry["type"] not in MCP_SUPPORTED_TYPES:
+            raise ValueError(
+                f"mcp.servers[{i}].type='{entry['type']}' is not supported. "
+                f"Supported: {sorted(MCP_SUPPORTED_TYPES)}"
+            )
+        if entry["type"] == "stdio" and not entry.get("command"):
+            raise ValueError(
+                f"mcp.servers[{i}] type='stdio' requires 'command' field"
+            )
+
+
+def _validate_sandbox_config(cfg: dict[str, Any]) -> None:
+    """校验 sandbox 配置段合法性(AC-13, 蓝图 §6.14)。
+
+    Raises:
+        ValueError: 当配置不合法时。
+    """
+    sandbox = cfg.get("sandbox")
+    if sandbox is None:
+        return  # sandbox 段可选,缺失时跳过校验
+
+    if not isinstance(sandbox, dict):
+        raise ValueError("sandbox config must be a dict")
+
+    # enabled 可选,默认为 bool
+    if "enabled" in sandbox and not isinstance(sandbox["enabled"], bool):
+        raise ValueError("sandbox.enabled must be a boolean")
+
+    # languages.python.command 校验
+    python_cfg = sandbox.get("languages", {}).get("python", {})
+    if python_cfg and "command" in python_cfg:
+        if not isinstance(python_cfg["command"], str) or not python_cfg["command"]:
+            raise ValueError("sandbox.languages.python.command must be a non-empty string")
+
+    # limits 校验
+    limits = sandbox.get("limits", {})
+    if limits:
+        for key in ("cpu_timeout_sec", "memory_limit_mb", "disk_limit_mb"):
+            if key in limits and (not isinstance(limits[key], (int, float)) or limits[key] <= 0):
+                raise ValueError(f"sandbox.limits.{key} must be a positive number")
+
+    # security.code_scan_enabled 和 env_sanitization_enabled 校验
+    security = sandbox.get("security", {})
+    if security:
+        for key in ("code_scan_enabled", "env_sanitization_enabled"):
+            if key in security and not isinstance(security[key], bool):
+                raise ValueError(f"sandbox.security.{key} must be a boolean")
+
+    # output.*_threshold 校验
+    output = sandbox.get("output", {})
+    if output:
+        for key in ("stdout_artifact_threshold", "code_artifact_threshold"):
+            if key in output and (not isinstance(output[key], int) or output[key] < 0):
+                raise ValueError(f"sandbox.output.{key} must be a non-negative integer")
+
+def resolve_provider_limits(cfg: dict, provider_name: str | None = None) -> dict:
+    """解析 provider 的对话参数上限(provider 级覆盖 > 全局 models.limits 默认)。
+
+    Args:
+        cfg: 合并后的配置 dict(含 config_runtime 覆盖)。
+        provider_name: provider 名(models.providers 的 key)。None 时仅返回全局默认。
+
+    Returns:
+        {"max_input_tokens": int, "max_output_tokens": int, "max_turns": int,
+         "context_window": int}  # 方向二新增: 压缩触发线 min(模型,配置)×0.8
+    """
+    defaults = dict(cfg.get("models", {}).get("limits", {}))
+    if provider_name:
+        prov = cfg.get("models", {}).get("providers", {}).get(provider_name, {})
+        for key in ("max_input_tokens", "max_output_tokens", "max_turns", "context_window"):
+            if prov.get(key) is not None:
+                defaults[key] = prov[key]
+    return defaults

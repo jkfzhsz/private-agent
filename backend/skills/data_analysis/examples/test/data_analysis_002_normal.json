@@ -1,0 +1,18 @@
+{
+  "sample_id": "data_analysis_002_normal",
+  "scenario": "data_analysis",
+  "skill_name": "data_analysis",
+  "skill_version": "1.0.0",
+  "case_type": "normal",
+  "difficulty": "medium",
+  "split": "test",
+  "input": "请对 ab_test.csv 中的实验组与对照组转化率做双样本 t 检验,输出 t 统计量、p 值,并判断 p<0.05 是否成立。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "file_read", "args": {"path": "ab_test.csv"}, "expected_result_type": "csv"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "import pandas as pd\nfrom scipy import stats\ndf = pd.read_csv('ab_test.csv')\ntreat = df[df['group']=='treatment']['conversion']\nctrl = df[df['group']=='control']['conversion']\nt_stat, p_val = stats.ttest_ind(treat, ctrl)\nprint(f't={t_stat:.4f}, p={p_val:.4f}')\nprint('显著' if p_val < 0.05 else '不显著')"}, "expected_result_type": "stdout"}
+    ],
+    "expected_output_contains": ["t=", "p=", "0.05", "显著"]
+  },
+  "expected_output": "双样本 t 检验完成:t 统计量与 p 值已输出,p<0.05 判断结果为显著(或 不显著)。"
+}

@@ -1,0 +1,35 @@
+name: novelist
+version: "1.0.0"
+description: "小说创作专家：结构化人物设计、情节架构（起承转合）、场景描写、对话写作。支持玄幻/都市/悬疑/言情/科幻等多种类型，覆盖从大纲到逐章撰写的全流程。"
+scenario: writing
+author: "reasonix-community"
+created_at: "2026-08-08"
+enabled: true
+model_scope: ["deepseek"]
+
+dependencies:
+  tools:
+    - name: code_execution
+      safety_level_override: safe
+    - name: file_read
+      safety_level_override: safe
+    - name: file_write
+      safety_level_override: elevated
+
+permissions:
+  allow_file_write: true
+  allow_network: false
+  sandbox_enabled: true
+  max_file_size_mb: 50
+
+knowledge_base:
+  enabled: false
+  scenario: writing
+  auto_retrieve: false
+
+examples:
+  enabled: false
+  max_examples: 0
+  inject_to: frozen_zone
+
+max_frozen_token: 4000

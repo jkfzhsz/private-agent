@@ -1,0 +1,105 @@
+{
+  "name": "private-agent-frontend",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Private Agent Electron + React frontend (蓝图 §2.15)",
+  "main": "dist-main/index.js",
+  "scripts": {
+    "start": "node scripts/start-dev.mjs",
+    "dev": "vite",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run build:main && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.4.8",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^30.0.0",
+    "electron-builder": "^26.15.3",
+    "jsdom": "^24.1.0",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "build": {
+    "appId": "com.privateagent.desktop",
+    "productName": "Private Agent",
+    "icon": "build/icon.ico",
+    "compression": "normal",
+    "electronLanguages": ["zh-CN", "en-US"],
+    "directories": {
+      "output": "release2"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-main/**/*",
+      "package.json",
+      "build/icon.ico",
+      "build/icon-256.png"
+    ],
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!**/.venv/**",
+          "!**/.env",
+          "!**/.env.*",
+          "!**/outputs/**",
+          "!**/uploads/**",
+          "!**/.claude/**",
+          "!**/logs/**",
+          "!**/tests/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/private_agent.egg-info/**",
+          "!**/config_runtime.yaml"
+        ]
+      }
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "linux": {
+      "target": [
+        "deb",
+        "AppImage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Private Agent",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "differentialPackage": false
+    },
+    "electronDist": "node_modules/electron/dist",
+    "publish": null
+  },
+  "author": "zongxin"
+}

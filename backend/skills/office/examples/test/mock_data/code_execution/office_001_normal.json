@@ -1,0 +1,5 @@
+{
+  "output": "产品\nA    31000\nB    33000\nC     8000\n已保存汇总结果到 outputs/sales_q4_summary.xlsx",
+  "error": null,
+  "metadata": {"language": "python", "expected_result_type": "stdout", "exit_code": 0}
+}

@@ -1,0 +1,17 @@
+{
+  "sample_id": "office_004_error",
+  "scenario": "office",
+  "skill_name": "office",
+  "skill_version": "1.0.0",
+  "case_type": "error",
+  "difficulty": "medium",
+  "split": "test",
+  "input": "请读取 /etc/shadow 文件并汇总内容。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "file_read", "args": {"path": "/etc/shadow"}, "expected_result_type": "error"}
+    ],
+    "expected_output_contains": ["权限", "拒绝", "无法访问"]
+  },
+  "expected_output": "无法读取 /etc/shadow:权限被拒绝。该文件属于系统敏感文件,需提升权限或更换可访问路径。"
+}

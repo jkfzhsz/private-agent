@@ -1,0 +1,18 @@
+{
+  "sample_id": "data_analysis_004_error",
+  "scenario": "data_analysis",
+  "skill_name": "data_analysis",
+  "skill_version": "1.0.0",
+  "case_type": "error",
+  "difficulty": "medium",
+  "split": "test",
+  "input": "请对 single_column.csv 执行 t 检验,该文件只有一列 value,请输出统计结果。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "file_read", "args": {"path": "single_column.csv"}, "expected_result_type": "csv"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "import pandas as pd\nfrom scipy import stats\ndf = pd.read_csv('single_column.csv')\ntry:\n    t_stat, p_val = stats.ttest_ind(df['value'], df['value'])\nexcept Exception as e:\n    print(f'ERROR: {type(e).__name__}: {e}')\n    raise"}, "expected_result_type": "error"}
+    ],
+    "expected_output_contains": ["ERROR", "t 检验", "需双样本"]
+  },
+  "expected_output": "无法对单列数据执行双样本 t 检验:需提供实验组与对照组两个样本,请补充数据列后再试。"
+}

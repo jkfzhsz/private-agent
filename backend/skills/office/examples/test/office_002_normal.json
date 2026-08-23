@@ -1,0 +1,19 @@
+{
+  "sample_id": "office_002_normal",
+  "scenario": "office",
+  "skill_name": "office",
+  "skill_version": "1.0.0",
+  "case_type": "normal",
+  "difficulty": "medium",
+  "split": "test",
+  "input": "请帮我调研 2025 年 AI 编程助手市场主流产品,列出名称、厂商、核心特性、定价,并标注来源链接。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "web_search", "args": {"query": "2025 AI 编程助手 主流产品 对比"}, "expected_result_type": "search_results"},
+      {"tool": "http_request", "args": {"url": "https://example.com/article-ai-coding-2025"}, "expected_result_type": "html"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "# 解析 HTML 提取产品信息并生成 markdown 表格"}, "expected_result_type": "stdout"}
+    ],
+    "expected_output_contains": ["GitHub Copilot", "Cursor", "来源", "定价"]
+  },
+  "expected_output": "已调研 2025 年 AI 编程助手市场,主流产品包括 GitHub Copilot、Cursor 等,详见附表(含来源链接)。"
+}

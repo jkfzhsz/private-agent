@@ -1,0 +1,92 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Virtual env
+backend/.venv/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Tool caches / traces
+.workbuddy/
+backend/.claude/
+
+# Sandbox runtime artifacts
+backend/outputs/
+backend/.sandbox/
+# 根目录沙箱产物(对话生成文件, 不纳入版本库)
+/outputs/
+
+# 上传数据(Reasonix 源 zip 等, 不纳入版本库)
+backend/uploads/
+
+# 一次性验证脚本(不入库)
+backend/verify_mig_tmp.py
+backend/verify_p3.py
+backend/skills/reasonix-skills-main.zip
+
+# 运行时用户配置(不入库)
+backend/agent-profile.json
+
+# HuggingFace 模型缓存(不入库)
+models--*/
+
+# Electron 编译产物
+frontend/dist-main/
+
+# 个人壁纸原图(不纳入版本库)
+pictures/
+backend/.env
+
+# 沙箱工作目录(字面量 WORKSPACE 展开残留 + 正常路径)
+backend/${WORKSPACE}/
+frontend/dist/
+frontend/release/
+frontend/release2/
+frontend/release3/
+
+# 测试产物
+backend/.pytest_results.xml
+backend/tests/.pytest_results.xml
+
+# 发布凭据(本地 token, 绝不上传)
+scripts/.gh-token
+
+# 0.5.1: 本地模型权重缓存 + pip 缓存(不纳入版本库)
+kb-model-cache/
+.pip-cache/
+
+# 损坏的 git 仓库备份(2026-08-10 git 故障遗留, 绝不入库)
+.git-broken*/
+
+# 运行时产物(2026-08-15 补充, 不入库)
+.eval_review_queue.json
+backend/${PA_USER_DATA}/
+.claude/artifacts/
+
+# 测试运行时产物(pytest 以 WORKSPACE=backend 启动时的沙箱/日志)
+backend/backend/
+
+# git 修复临时备份(2026-08-19 objects 丢失事故, 不入库)
+.git-repair-backup/
+
+# 运行时工具(codegraph 等, 本地安装产物不入库)
+tools/codegraph/
+# 根目录沙箱产物
+/.sandbox/

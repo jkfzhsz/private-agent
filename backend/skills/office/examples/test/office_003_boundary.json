@@ -1,0 +1,18 @@
+{
+  "sample_id": "office_003_boundary",
+  "scenario": "office",
+  "skill_name": "office",
+  "skill_version": "1.0.0",
+  "case_type": "boundary",
+  "difficulty": "hard",
+  "split": "test",
+  "input": "请读取 empty.xlsx 并汇总各产品销售额。该文件可能为空或仅含表头无数据行。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "file_read", "args": {"path": "empty.xlsx"}, "expected_result_type": "spreadsheet"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "import pandas as pd\ndf = pd.read_excel('empty.xlsx')\nif df.empty:\n    print('文件无数据行')\nelse:\n    print(df.groupby('产品')['销售额'].sum())"}, "expected_result_type": "stdout"}
+    ],
+    "expected_output_contains": ["无数据", "空"]
+  },
+  "expected_output": "检测到 empty.xlsx 无数据行,已返回空汇总结果并提示用户文件为空。"
+}

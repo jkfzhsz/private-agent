@@ -1,0 +1,19 @@
+{
+  "sample_id": "data_analysis_001_normal",
+  "scenario": "data_analysis",
+  "skill_name": "data_analysis",
+  "skill_version": "1.0.0",
+  "case_type": "normal",
+  "difficulty": "easy",
+  "split": "test",
+  "input": "我有 iris.csv 数据集,请帮我绘制各品种花萼长度与花瓣长度的散点图,保存为 PNG。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "file_read", "args": {"path": "iris.csv"}, "expected_result_type": "csv"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "import pandas as pd\nimport matplotlib.pyplot as plt\ndf = pd.read_csv('iris.csv')\nfig, ax = plt.subplots()\nfor species, group in df.groupby('species'):\n    ax.scatter(group['sepal_length'], group['petal_length'], label=species)\nax.set_xlabel('sepal_length')\nax.set_ylabel('petal_length')\nax.legend()\nplt.savefig('outputs/iris_scatter.png')"}, "expected_result_type": "stdout"},
+      {"tool": "file_write", "args": {"path": "outputs/iris_scatter.png"}, "expected_result_type": "artifact"}
+    ],
+    "expected_output_contains": ["散点图", "outputs/iris_scatter.png", "species"]
+  },
+  "expected_output": "已绘制各品种花萼长度与花瓣长度散点图,保存至 outputs/iris_scatter.png。"
+}

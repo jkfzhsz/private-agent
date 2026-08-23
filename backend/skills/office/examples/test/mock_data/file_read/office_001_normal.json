@@ -1,0 +1,5 @@
+{
+  "output": "日期,产品,销售额\n2025-10-01,产品A,10000\n2025-10-15,产品B,15000\n2025-11-01,产品A,12000\n2025-11-20,产品C,8000\n2025-12-05,产品B,18000\n2025-12-25,产品A,9000",
+  "error": null,
+  "metadata": {"source": "sales_q4.xlsx", "rows": 6, "expected_result_type": "spreadsheet"}
+}

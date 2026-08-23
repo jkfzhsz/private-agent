@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>私人智能体</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
+  <style>
+    /* 字体加载前的兜底,避免 FOIT 空白 */
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .fonts-loaded body,
+    body.fonts-loaded {
+      font-family: "Space Grotesk", system-ui, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/renderer/main.tsx"></script>
+</body>
+</html>

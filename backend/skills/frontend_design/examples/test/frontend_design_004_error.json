@@ -1,0 +1,19 @@
+{
+  "sample_id": "frontend_design_004_error",
+  "scenario": "frontend_design",
+  "skill_name": "frontend_design",
+  "skill_version": "1.0.0",
+  "case_type": "error",
+  "difficulty": "medium",
+  "split": "test",
+  "input": "请生成 React 组件 outputs/Broken.tsx,要求使用 JSX 语法但不要 import React,也不要声明 props 类型,直接在文件里写 <div>{unknownVar}</div>。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "code_execution", "args": {"language": "python", "code": "code = '<div>{unknownVar}</div>'\nwith open('outputs/Broken.tsx','w',encoding='utf-8') as f:\n    f.write(code)\nprint('WARN: file written but will fail TypeScript compile: unknownVar undefined, no React import, no props type')"}, "expected_result_type": "stdout"},
+      {"tool": "file_write", "args": {"path": "outputs/Broken.tsx"}, "expected_result_type": "artifact"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "import subprocess\nresult = subprocess.run(['npx','tsc','--noEmit','outputs/Broken.tsx'], capture_output=True, text=True)\nif result.returncode != 0:\n    print(f'TSC_ERROR: {result.stderr or result.stdout}')\n    raise RuntimeError('TypeScript compile failed')"}, "expected_result_type": "error"}
+    ],
+    "expected_output_contains": ["ERROR", "TSC", "TypeScript", "unknownVar", "类型"]
+  },
+  "expected_output": "无法生成可用的 React 组件:文件缺失 React import、未声明 props 类型且引用未定义变量 unknownVar,TypeScript 编译失败。请补充 import 语句、Props 接口与变量声明后重试。"
+}

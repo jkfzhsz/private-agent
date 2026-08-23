@@ -1,0 +1,6 @@
+- name: web_search
+  safety_level_override: safe
+  enabled: true
+- name: http_request
+  safety_level_override: elevated
+  enabled: true

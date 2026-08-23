@@ -1,0 +1,20 @@
+{
+  "sample_id": "frontend_design_001_normal",
+  "scenario": "frontend_design",
+  "skill_name": "frontend_design",
+  "skill_version": "1.0.0",
+  "case_type": "normal",
+  "difficulty": "easy",
+  "split": "test",
+  "input": "请帮我生成产品落地页 outputs/landing.html,包含 header(导航)、hero(主标题 + CTA)、features(三列特性)、footer 四部分,响应式适配移动端与桌面端,遵循设计系统主色规范。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "search_knowledge", "args": {"query": "按钮组件规范 颜色 token", "scenario": "frontend_design"}, "expected_result_type": "chunks"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "from datetime import datetime\nnow = datetime.now().strftime('%Y-%m-%d %H:%M')\nhtml = f'<!DOCTYPE html>...<style>:root{{--primary:#3B82F6;--spacing-unit:8px;--radius-md:8px;--font-stack:system-ui;}}</style>...@media (max-width:768px){{.features{{grid-template-columns:1fr;}}}}</style>'\nwith open('outputs/landing.html','w',encoding='utf-8') as f:\n    f.write(html)"}, "expected_result_type": "stdout"},
+      {"tool": "file_write", "args": {"path": "outputs/landing.html"}, "expected_result_type": "artifact"},
+      {"tool": "file_read", "args": {"path": "outputs/landing.html"}, "expected_result_type": "html"}
+    ],
+    "expected_output_contains": ["outputs/landing.html", "header", "hero", "features", "footer", "#3B82F6"]
+  },
+  "expected_output": "已生成响应式产品落地页 outputs/landing.html,采用设计系统主色 #3B82F6,包含 header / hero / features / footer 四部分,移动端(≤768px)features 自动堆叠为单列。"
+}

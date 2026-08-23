@@ -1,0 +1,9 @@
+- name: code_execution
+  safety_level_override: safe
+  enabled: true
+- name: file_read
+  safety_level_override: safe
+  enabled: true
+- name: file_write
+  safety_level_override: elevated
+  enabled: true

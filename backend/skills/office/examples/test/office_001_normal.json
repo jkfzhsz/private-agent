@@ -1,0 +1,19 @@
+{
+  "sample_id": "office_001_normal",
+  "scenario": "office",
+  "skill_name": "office",
+  "skill_version": "1.0.0",
+  "case_type": "normal",
+  "difficulty": "easy",
+  "split": "test",
+  "input": "我有一个销售数据 Excel 文件 sales_q4.xlsx,包含日期、产品、销售额三列,请帮我汇总各产品 Q4 总销售额并生成新表。",
+  "expected_react_trace": {
+    "tool_calls": [
+      {"tool": "file_read", "args": {"path": "sales_q4.xlsx"}, "expected_result_type": "spreadsheet"},
+      {"tool": "code_execution", "args": {"language": "python", "code": "import pandas as pd\ndf = pd.read_excel('sales_q4.xlsx')\nsummary = df.groupby('产品')['销售额'].sum().reset_index()\nsummary.to_excel('outputs/sales_q4_summary.xlsx', index=False)"}, "expected_result_type": "stdout"},
+      {"tool": "file_write", "args": {"path": "outputs/sales_q4_summary.xlsx"}, "expected_result_type": "artifact"}
+    ],
+    "expected_output_contains": ["销售额", "产品", "outputs/sales_q4_summary.xlsx"]
+  },
+  "expected_output": "已汇总各产品 Q4 总销售额,结果保存至 outputs/sales_q4_summary.xlsx。"
+}
