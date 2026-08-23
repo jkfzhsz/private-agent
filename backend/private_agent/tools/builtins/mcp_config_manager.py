@@ -209,8 +209,21 @@ _ASSEMBLY_MARKER = "__mcp_assembly"
 
 def _wrap_mcp_cfg() -> dict:
     """把 tools.mcp 配置包装为完整 cfg 形状(get_all_server_summary 等需
-    cfg.tools.mcp.servers 路径)。"""
+    cfg.tools.mcp.servers 路径)。仅 config.yaml —— 已废弃, 见 _wrap_merged_mcp_cfg。"""
     return {"tools": {"mcp": _load_mcp_cfg()}}
+
+
+async def _wrap_merged_mcp_cfg() -> dict:
+    """config.yaml + config_runtime 合并后的 tools.mcp(与 admin._load_cfg 一致)。
+
+    MCP server 配置实际存 config_runtime(设置页动态管理), config.yaml 的
+    servers 为空 —— mcp_browse 必须读合并后配置才能看到真实 server。
+    延迟 import admin 避免模块级循环依赖(admin import MCP_MANAGER_TOOLS)。
+    """
+    from private_agent.api import admin as _admin
+
+    cfg = await _admin._load_cfg()
+    return cfg.get("tools", {}).get("mcp", {}) or {}
 
 
 def _split_ids(raw) -> list[str]:
@@ -225,7 +238,10 @@ async def _mcp_browse_list_handler() -> ToolResult:
     """list: 返回全部 enabled server 的工具索引(渐进披露第一级, 不全 schema)。"""
     from private_agent.tools.mcp_tools import get_mcp_manager
 
-    summary = await get_mcp_manager().get_all_server_summary(_wrap_mcp_cfg())
+    mcp_cfg = await _wrap_merged_mcp_cfg()
+    summary = await get_mcp_manager().get_all_server_summary(
+        {"tools": {"mcp": mcp_cfg}}
+    )
     if not summary:
         return ToolResult(output="(无已启用且可装配的 MCP server)")
     lines: list[str] = []
@@ -258,8 +274,9 @@ async def _mcp_browse_exec_handler(args: dict) -> ToolResult:
     tool = str(args.get("tool") or "").strip()
     if not sid or not tool:
         return ToolResult(output="", error="exec 需 server_id + tool")
+    mcp_cfg = await _wrap_merged_mcp_cfg()
     return await get_mcp_manager().exec_tool(
-        _wrap_mcp_cfg(), sid, tool, args.get("args") or {}
+        {"tools": {"mcp": mcp_cfg}}, sid, tool, args.get("args") or {}
     )
 
 
