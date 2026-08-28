@@ -91,8 +91,9 @@ const WMO_WEATHER: Record<number, { label: string; emoji: string }> = {
   85: { label: "阵雪", emoji: "🌨️" },
   86: { label: "强阵雪", emoji: "❄️" },
   95: { label: "雷阵雨", emoji: "⛈️" },
-  96: { label: "雷阵雨伴冰雹", emoji: "⛈️" },
-  99: { label: "强雷阵雨伴冰雹", emoji: "⛈️" },
+  // 2026-08-28: Open-Meteo 对中国区雷暴细分误报率高(盛夏连续多天报 96), 冰雹为极低频事件, 统一显示"雷阵雨"避免误导(与实况口径一致)。
+  96: { label: "雷阵雨", emoji: "⛈️" },
+  99: { label: "强雷阵雨", emoji: "⛈️" },
 };
 
 // 2026-08-20: 省份 → 地级市静态数据集(离线, 无需联网)。
