@@ -151,7 +151,8 @@ function wildcardToRegex(p: string): RegExp {
   );
 }
 
-function SkillBindingSection({ mcpServers }: { mcpServers: McpServer[] }): JSX.Element {
+// 2026-08-27: export 供独立单测(SkillBindingSection.test.tsx)
+export function SkillBindingSection({ mcpServers }: { mcpServers: McpServer[] }): JSX.Element {
   const [binding, setBinding] = useState<Record<string, string[]>>({});
   const [source, setSource] = useState<"yaml" | "runtime">("yaml");
   const [saving, setSaving] = useState(false);

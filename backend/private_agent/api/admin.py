@@ -5300,7 +5300,7 @@ async def download_files_zip(paths: str, name: str = "workspace-export"):
 async def list_session_tasks(session_id: int, limit: int = 20):
     """会话任务执行状态(V1.1-3.8)。
 
-    复用 react_events 数据面聚合(不引入 async_tasks 空表):
+    复用 react_events 数据面聚合(不引入 missions 长任务表):
     每轮(turn)的 thinking/tool_call/tool_result/error 次数 + 最后时间 + 会话状态。
     Returns:
         200: {status, turns: [{turn, events: {...}, error?}], total_turns}
