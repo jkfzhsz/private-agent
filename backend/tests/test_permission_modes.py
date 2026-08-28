@@ -54,20 +54,35 @@ class TestModeBasics:
             PermissionManager(mode="hacker")
 
     def test_set_mode_clears_cache(self):
-        pm = PermissionManager(timeout=0.1)
+        pm = PermissionManager(timeout=1.0)
         collector = _Collector()
         tool = _tool("code_execution")
 
         async def run():
-            # 首次确认: 走确认流程 → 超时拒绝
+            # 2026-08-28 修复: 超时(无人响应)≠用户意愿 → 不缓存, 第二次仍走确认
             outcome = await pm.check_and_confirm(1, tool, {}, collector.emit)
             assert outcome == "timeout"
-            # 缓存了拒绝 → 直接 denied
             outcome2 = await pm.check_and_confirm(1, tool, {}, collector.emit)
-            assert outcome2 == "denied"
+            assert outcome2 == "timeout"
+            # 显式拒绝(等待期间 resolve)→ 缓存 denied → 下一次直接 denied
+            task = asyncio.create_task(
+                pm.check_and_confirm(1, tool, {}, collector.emit)
+            )
+            await asyncio.sleep(0.2)  # 等确认事件发出并进入等待
+            cid = collector.events[-1]["confirmation_id"]
+            assert pm.resolve(cid, False), "等待中的确认应可 resolve"
+            outcome3 = await task
+            assert outcome3 == "denied"
+            outcome4 = await pm.check_and_confirm(1, tool, {}, collector.emit)
+            assert outcome4 == "denied"  # 缓存命中, 不弹确认
             # 切模式清缓存 → 再次走确认流程
             pm.set_mode("plan")
             assert pm.mode == "plan"
+            pm.set_mode("default")
+            assert pm.mode == "default"
+            outcome5 = await pm.check_and_confirm(1, tool, {}, collector.emit)
+            assert outcome5 == "timeout"
+            assert len(collector.events) == 4  # 1超时+2超时+3显式拒绝+5超时
 
         asyncio.run(run())
 

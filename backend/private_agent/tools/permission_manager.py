@@ -277,8 +277,10 @@ class PermissionManager:
             self._pending.pop(confirmation_id, None)
             self._deferred.discard(confirmation_id)
 
-        # 缓存结果(同会话同参数,通过/拒绝都缓存;超时按拒绝缓存)
-        if not force:
+        # 缓存结果(同会话同参数,通过/拒绝都缓存)。
+        # 2026-08-28 修复: 超时(无人响应)不写缓存 —— 超时≠用户意愿, 缓存会导致
+        # 后续同参数调用不再弹确认、直接 denied(确认弹窗"消失"故障根因)。
+        if not force and outcome != "timeout":
             self._cache[key] = approved
         return outcome
 
