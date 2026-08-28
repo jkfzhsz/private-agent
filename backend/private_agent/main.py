@@ -1545,6 +1545,51 @@ async def _handle_user_message(
                     compress_adapter=_build_compress_adapter(cfg),
                 ),
             ]
+            # 0.6.0 D-1(W1/W2/W3): Mission 层工具装配 —— mission_create/status/control
+            # + install_preflight 环境守卫。
+            # - runner_factory 闭包: mission_create 后启动 MissionRunner 后台编排;
+            # - 装配顺序在 delegate 之后: delegate 闭包捕获的 tools 为装配前列表
+            #   → 子代理天然不含 mission 工具(白名单 MISSION_EXCLUDED_ALL 双保险);
+            # - 不进 frozen hash(同 delegate)。
+            from private_agent.tools.builtins.install_preflight import (
+                build_install_preflight_tool,
+            )
+            from private_agent.tools.builtins.mission_tools import (
+                build_mission_tools,
+            )
+
+            async def _mission_spawn(mission_id: int) -> None:
+                from private_agent.core.mission_runner import MissionRunner
+
+                spawned = await MissionRunner.spawn(
+                    cfg=cfg,
+                    mission_id=mission_id,
+                    session_id=session_id,
+                    event_sink=_ws_event_sink,
+                    system_prompt_factory=(
+                        lambda c, sid: _get_system_prompt(cfg, sid, c)
+                    ),
+                    adapter_factory=lambda m: _build_session_adapter(cfg, m),
+                    compress_adapter=_build_compress_adapter(cfg),
+                    tools=tools,
+                )
+                if not spawned:
+                    # 并发满/状态不可运行: 事件已由 spawn 日志记录, mission 停留
+                    # 原状态(mission_create 返回值已含提示语义, 不阻塞工具返回)
+                    _logger.warning(
+                        "mission #%s spawn rejected (registry full / state)", mission_id
+                    )
+
+            tools = [
+                *tools,
+                *build_mission_tools(
+                    conn=conn,
+                    cfg=cfg,
+                    session_id=session_id,
+                    runner_factory=_mission_spawn,
+                ),
+                build_install_preflight_tool(cfg),
+            ]
             # V1.1-3.5: 会话级记忆开关(关闭 → 不注入/不提取记忆, 传 None)
             memory_enabled = await conn.fetchval(
                 "SELECT memory_enabled FROM sessions WHERE id = $1", session_id
@@ -1981,6 +2026,21 @@ async def _on_startup() -> None:
                     )
             except Exception:
                 _logger.exception("subagent zombie cleanup failed at startup")
+            # 0.6.0 D-1(T3/§5.2): mission 重启恢复 —— 运行中 mission 统一置
+            # escalated(等用户裁决; 已完成里程碑按 plan.status 续跑跳过)。
+            try:
+                from private_agent.core.mission_runner import (
+                    cleanup_missions_on_startup,
+                )
+
+                _n_missions = await cleanup_missions_on_startup(conn, cfg)
+                if _n_missions > 0:
+                    _logger.info(
+                        "startup: %d interrupted mission(s) -> escalated",
+                        _n_missions,
+                    )
+            except Exception:  # noqa: BLE001
+                _logger.exception("mission cleanup failed at startup")
         except Exception as e:
             _logger.warning(f"DB schema migration failed at startup: {e}")
     from apscheduler.schedulers.asyncio import AsyncIOScheduler

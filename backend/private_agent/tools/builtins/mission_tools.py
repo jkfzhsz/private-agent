@@ -307,11 +307,21 @@ def build_mission_tools(
                     error=(
                         f"mission_control: #{mid} 状态非 escalated,"
                         "无需批准改道(仅 escalated 状态可追加预算)"
-                    ),
+                    )
                 )
+            # W1 闭环(D-1): 若无运行中 runner(进程重启后 escalated), 重新
+            # spawn 续跑(已完成里程碑按 plan.status 跳过); runner_factory 未
+            # 注入(F1 兼容)时仅更新状态。
+            resumed = ""
+            if runner_factory is not None:
+                try:
+                    await runner_factory(mid)
+                    resumed = ", 后台编排已重新启动(续跑未完成里程碑)"
+                except Exception as e:  # noqa: BLE001
+                    resumed = f", 但重启编排失败: {e}"
             return ToolResult(
                 output=f"Mission #{mid} 改道预算已增至 {budget['max_fallbacks']},"
-                       "状态 escalated→executing, 继续执行。"
+                       f"状态 escalated→executing{resumed}。"
             )
         if action == "abort":
             journal_entry = _journal_entry("aborted", "用户裁决中止")
@@ -359,6 +369,11 @@ def build_mission_tools(
                   "(支持 approve_fallback/abort/pause)",
         )
 
+    # W2(0.6.0 D-1): 规划层环境感知 —— 精简环境片段随工具 schema 注入
+    # (~100 token, mission_create 轮可见; 完整片段见 environment_profile)
+    from private_agent.core.environment_profile import build_environment_fragment
+
+    env_hint = build_environment_fragment(cfg)
     return [
         ToolDef(
             name="mission_create",
@@ -367,7 +382,9 @@ def build_mission_tools(
                 "与里程碑计划(plan), 后台编排执行, 立即返回不阻塞对话。"
                 "适合分钟~小时级的多阶段任务; 短任务请直接使用普通工具。"
                 "创建前必须明确: 目标一句话可验证、每个里程碑有 executor_type"
-                "(subagent=多步推理/script=纯计算脚本/wait=定时等待)。"
+                "(subagent=多步推理/script=纯计算脚本/wait=定时等待; script 需"
+                "在里程碑里给出 script_code)。\n"
+                + env_hint
             ),
             parameters_schema={
                 "type": "object",
