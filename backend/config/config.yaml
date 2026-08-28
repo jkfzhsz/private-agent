@@ -436,4 +436,29 @@ evolution:
   reflection:
     enabled: true  # 反思引擎开关(false → ReactLoop 反思+经验沉淀零回归)
 
-
+# ------------------------------------------------------------------------------
+# 13. environment - 运行环境档案 (0.6.0 F1-4, 长任务规划注入)
+#     无涯构建 mission 计划时注入(mission_create 轮); 规划层感知网络/硬件约束,
+#     避免"境内网络盲目装依赖/内存超预算"—— 守卫见 install_preflight(F1-5)
+# ------------------------------------------------------------------------------
+environment:
+  network:
+    pip_index: "https://mirrors.aliyun.com/pypi/simple/"
+    npm_registry: "https://registry.npmmirror.com"
+    hf_endpoint: "https://hf-mirror.com"       # HuggingFace 镜像(模型权重)
+    blocked_domains:                            # 境内不可达, 规划时直接绕开
+      - "google.com"
+      - "github.com"
+      - "raw.githubusercontent.com"
+      - "huggingface.co"
+    reachable_domains:                          # 已验证可达
+      - "mirrors.aliyun.com"
+      - "registry.npmmirror.com"
+      - "hf-mirror.com"
+      - "open.bigmodel.cn"
+      - "pypi.tuna.tsinghua.edu.cn"
+    proxy_trap: "本机 HTTPS 代理指向失效端口 127.0.0.1:31181, 出网命令需 NO_PROXY=* 或清空代理变量"
+  hardware:
+    mem_budget_mb: 500        # 新增常驻进程内存上限(超过需用户批准, 0.5.1 裁决线)
+    cold_start_note: "Python 冷启动约 16s(杀软实时扫描), 勿误判为卡死重试"
+  guard: true                 # mission 计划含装依赖步骤时强制 install_preflight 预检
