@@ -255,6 +255,9 @@ class MissionRunner:
                     "state": "done",
                     "result": f"全部 {len(plan)} 个里程碑完成",
                 })
+                # D-4(W-V7): 跨任务经验沉淀(§4.4.1 第三级, 终态一次性)
+                await self._record_lessons(conn, state="done", charter=charter,
+                                           journal=None, plan=plan)
         except asyncio.CancelledError:
             # 进程关闭/显式取消: 状态交由 startup 清理(escalated)处置
             raise
@@ -527,6 +530,9 @@ class MissionRunner:
                 self._mission_id, error[:500],
             )
             if _rowcount(st) > 0:
+                # D-4: failed 也统计时长样本(部分执行数据仍有价值)
+                await self._record_lessons(conn, state="failed", charter={},
+                                           journal=None, plan=[])
                 await self._safe_push(self._event_sink, {
                     "type": "mission_done",
                     "mission_id": self._mission_id,
@@ -562,6 +568,35 @@ class MissionRunner:
             "state": state,
             "detail": detail,
         })
+
+    async def _record_lessons(
+        self, conn, *, state: str, charter: dict, journal: list | None, plan: list
+    ) -> None:
+        """D-4: 终态经验沉淀(结构化 mission_lessons + 文本 skill_lessons);
+        异常静默 —— 经验沉淀失败不阻塞终态落库。"""
+        try:
+            from private_agent.core.mission_lessons import (
+                extract_and_save_lesson,
+                record_mission_outcome,
+            )
+
+            await record_mission_outcome(conn, self._mission_id)
+            if journal is None:
+                raw = await conn.fetchval(
+                    "SELECT journal FROM missions WHERE id=$1", self._mission_id
+                )
+                journal = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            if charter:
+                try:
+                    adapter = self._adapter_factory(None)
+                except Exception:  # noqa: BLE001
+                    adapter = None
+                if adapter is not None:
+                    await extract_and_save_lesson(
+                        conn, adapter, self._mission_id, charter, journal, state
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("mission lessons recording failed: %s", e)
 
     async def _push_report(self, conn, content: str) -> None:
         """W8: mission_report 状态汇报落 messages(msg_kind 隔离, 不进上下文)。"""

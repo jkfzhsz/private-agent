@@ -218,6 +218,31 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
         "ALTER TABLE messages_archive ADD COLUMN IF NOT EXISTS "
         "msg_kind VARCHAR(20) NOT NULL DEFAULT 'chat'"
     )
+    # 0.6.0 D-4(2026-08-28): mission_lessons 跨任务经验表(§4.4.1 第三级)
+    await _migrate_mission_lessons_table(conn)
+
+
+async def _migrate_mission_lessons_table(conn: asyncpg.Connection) -> None:
+    """0.6.0 D-4: mission_lessons 表(§4.4.1 第三级跨任务经验, 幂等)。
+
+    (executor_type, task_type) 聚合: 子任务时长 p50/p75 增量加权合并 +
+    sample_count; 初始监督间隔查询源(样本 <3 回退默认档, 30 天时间窗)。
+    """
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mission_lessons (
+            id              BIGSERIAL PRIMARY KEY,
+            executor_type   VARCHAR(20) NOT NULL,
+            task_type       VARCHAR(20) NOT NULL DEFAULT 'other',
+            sample_count    INT NOT NULL DEFAULT 0,
+            p50_duration_sec FLOAT,
+            p75_duration_sec FLOAT,
+            last_interval_sec FLOAT,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(executor_type, task_type)
+        )
+        """
+    )
 
 
 async def _migrate_missions_table(conn: asyncpg.Connection) -> None:
