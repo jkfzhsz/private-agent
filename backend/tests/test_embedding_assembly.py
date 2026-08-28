@@ -25,6 +25,7 @@ from private_agent.knowledge.embedding_service import (
     _resolve_model_path,
 )
 from private_agent.knowledge.kb_repo import _embedding_bytes_to_text
+from private_agent.knowledge.models import Chunk
 
 # ── factory 装配 ──────────────────────────────────────────────────────────
 
@@ -243,3 +244,62 @@ def test_embedding_bytes_to_text():
     assert abs(parts[0] - 0.5) < 1e-5
     assert abs(parts[1] - (-0.25)) < 1e-5
     assert abs(parts[2] - 1.0) < 1e-5
+
+
+# ── 0.5.1 D4(2026-08-27): embedding 指标回调 ─────────────────────────────
+
+
+def test_embedding_service_emits_mock_metrics():
+    """worker_pool=None(mock) 路径 emit 指标: worker_ok=0 + 模型维度。"""
+    collected: list[dict] = []
+
+    async def _sink(stats: dict) -> None:
+        collected.append(stats)
+
+    svc = EmbeddingService(worker_pool=None, config={}, metrics_sink=_sink)
+
+    async def _run() -> None:
+        await svc.embed_chunks([Chunk(text="测试文本", doc_id=1)])
+
+    asyncio.run(_run())
+    assert len(collected) == 1
+    stats = collected[0]
+    assert stats["embed_worker_ok"] == 0.0
+    assert stats["embed_dim"] == float(MODEL_DIM)
+    assert stats["embed_storage_dim"] == float(STORAGE_DIM)
+    assert stats["embed_n_texts"] == 1.0
+
+
+def test_embedding_service_set_metrics_sink_injects():
+    """set_metrics_sink 构造后注入路径生效。"""
+    collected: list[dict] = []
+
+    async def _sink(stats: dict) -> None:
+        collected.append(stats)
+
+    svc = EmbeddingService(worker_pool=None, config={})
+    assert svc._metrics_sink is None
+    svc.set_metrics_sink(_sink)
+
+    async def _run() -> None:
+        await svc.embed_chunks([Chunk(text="x", doc_id=1)])
+
+    asyncio.run(_run())
+    assert len(collected) == 1
+    assert collected[0]["embed_worker_ok"] == 0.0
+
+
+def test_embedding_service_metrics_sink_failure_ignored():
+    """sink 抛异常不阻断 embedding 主流程(静默降级)。"""
+
+    async def _sink(stats: dict) -> None:
+        raise RuntimeError("sink down")
+
+    svc = EmbeddingService(worker_pool=None, config={}, metrics_sink=_sink)
+
+    async def _run():
+        return await svc.embed_chunks([Chunk(text="x", doc_id=1)])
+
+    vectors = asyncio.run(_run())
+    assert len(vectors) == 1
+    assert len(vectors[0]) == STORAGE_DIM

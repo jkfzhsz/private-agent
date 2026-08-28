@@ -61,11 +61,16 @@ class EmbeddingService:
         worker_pool: Any | None = None,
         config: dict[str, Any] | None = None,
         model_registry: Any | None = None,
+        metrics_sink: Any | None = None,
     ) -> None:
         self._worker_pool = worker_pool
         self._config = config or {}
         self._model_registry = model_registry
         self._lru_cache_size = self._config.get("lru_cache_size", 512)
+        # 0.5.1 D4(2026-08-27): 可选指标回调(异步, 收 dict[str, float] 纯数值
+        # stats)。由 factory 装配点注入写 system_metrics 的 sink ——
+        # EmbeddingService 本身保持无 DB 依赖, 监控链路失败不影响主流程。
+        self._metrics_sink = metrics_sink
 
         # 0.5.1 C3: 固定单一模型(默认 bge-small-zh-v1.5, 与 DB 512 padding 对齐);
         # 不再运行时按内存自动切换(切换模型 = 全量重灌, 由启动自检强制)。
@@ -79,6 +84,19 @@ class EmbeddingService:
         self._storage_dim = int(self._config.get("storage_dim", STORAGE_DIM))
         # 模型路径(空则走 _resolve_model_path 自动探测)
         self._model_path = self._config.get("model_path", "")
+
+    def set_metrics_sink(self, sink: Any | None) -> None:
+        """注入/更换指标回调(factory 装配点调用)。"""
+        self._metrics_sink = sink
+
+    async def _emit_metrics(self, stats: dict[str, Any]) -> None:
+        """指标回调(静默失败, 不阻断 embedding 主流程)。"""
+        if self._metrics_sink is None:
+            return
+        try:
+            await self._metrics_sink(stats)
+        except Exception:  # noqa: BLE001 - 监控链路失败不阻断
+            logger.warning("embedding metrics sink failed (ignored)")
 
     async def embed_chunks(self, chunks: list[Chunk]) -> list[list[float]]:
         """批量 embedding(蓝图 §4.10 Worker 集成)。
@@ -149,6 +167,12 @@ class EmbeddingService:
                 "Worker pool not configured, returning mock %d-dim vectors",
                 self._storage_dim,
             )
+            await self._emit_metrics({
+                "embed_worker_ok": 0.0,
+                "embed_n_texts": float(len(texts)),
+                "embed_dim": float(self.get_model_dim()),
+                "embed_storage_dim": float(self._storage_dim),
+            })
             return [[0.0] * self._storage_dim for _ in texts]
 
         loop = asyncio.get_event_loop()
@@ -168,6 +192,15 @@ class EmbeddingService:
                 len(texts), self._model_name,
                 self.get_model_dim(), self._storage_dim, elapsed,
             )
+            # 0.5.1 D4: embedding 指标落库(装配点注入的 sink 写 system_metrics)
+            await self._emit_metrics({
+                "embed_worker_ok": 1.0,
+                "embed_elapsed_sec": elapsed,
+                "embed_n_texts": float(len(texts)),
+                "embed_dim": float(self.get_model_dim()),
+                "embed_storage_dim": float(self._storage_dim),
+                "embed_avail_mem_mb": _available_memory_mb(),
+            })
             return validated
         except EmbeddingError:
             raise
@@ -176,6 +209,13 @@ class EmbeddingService:
                 "Worker embedding failed (%s), degrading to mock %d-dim "
                 "vectors (keyword-only retrieval)", e, self._storage_dim,
             )
+            await self._emit_metrics({
+                "embed_worker_ok": 0.0,
+                "embed_error_flag": 1.0,
+                "embed_n_texts": float(len(texts)),
+                "embed_dim": float(self.get_model_dim()),
+                "embed_storage_dim": float(self._storage_dim),
+            })
             return [[0.0] * self._storage_dim for _ in texts]
 
     def _validate_and_pad(self, vectors: list[list[float]]) -> list[list[float]]:
@@ -392,6 +432,18 @@ def _check_memory_watermark(min_available_gb: float = 0.5) -> None:
             )
     except ImportError:
         pass
+
+
+def _available_memory_mb() -> float:
+    """当前可用内存 MB(0.5.1 D4 监控; psutil 缺失返回 0)。"""
+    try:
+        import psutil
+
+        return round(psutil.virtual_memory().available / (1024**2), 1)
+    except ImportError:
+        return 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _embed_worker_fn(

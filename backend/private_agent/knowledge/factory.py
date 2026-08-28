@@ -70,6 +70,11 @@ def build_kb_service(
 
     启动自检失败(fail-fast 置位)时抛 KBUnavailableError, 所有 KB 使用路径
     (admin 上传/检索、search_knowledge 工具、auto_retrieve)得到明确错误。
+
+    0.5.1 D4(2026-08-27): 注入 embedding 指标 sink —— EmbeddingService 每次
+    embed 产生的 stats(model_dim/storage_dim/耗时/worker_ok/可用内存)经此
+    落库 system_metrics(kind='kb'), 供主智能体 system_metrics_query 分析;
+    落库失败静默(监控链路不影响主流程)。
     """
     reason = kb_failfast_reason()
     if reason:
@@ -77,6 +82,27 @@ def build_kb_service(
     cfg = cfg or loader.load_config()
     repo = KnowledgeBaseRepo(conn)
     embedding_service = build_embedding_service(cfg)
+
+    async def _embedding_metrics_sink(stats: dict[str, Any]) -> None:
+        try:
+            rows = [
+                (k, float(v))
+                for k, v in stats.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            ]
+            if not rows:
+                return
+            import json as _json
+
+            await conn.executemany(
+                "INSERT INTO system_metrics (ts, kind, session_id, name, value, meta) "
+                "VALUES (now(), 'kb', NULL, $1, $2, '{}')",
+                rows,
+            )
+        except Exception as e:  # noqa: BLE001 - 监控链路失败不阻断
+            logger.warning("embedding metrics sink failed: %s", e)
+
+    embedding_service.set_metrics_sink(_embedding_metrics_sink)
     return KnowledgeBaseService(
         kb_repo=repo,
         processor=processor,
