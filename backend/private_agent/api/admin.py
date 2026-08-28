@@ -3603,6 +3603,57 @@ async def list_sessions(
         )
 
 
+@router.get("/missions", response_model=None)
+async def list_missions(session_id: int):
+    """0.6.0 D-2(W9): mission 列表 DB 轮询兜底(设计文档 §6.1 D 批, 同 R7 模式)。
+
+    WS mission_* 事件断线会丢, 前端 MissionPanel 以此端点全量重建。
+
+    Args:
+        session_id: 会话 id(必选)。
+
+    Returns:
+        200: [{id, charter, plan, budget, journal, state, error, created_at,
+               completed_at}] 按 id 升序
+        400: session_id 非法
+        503: {"error": "missions_list_failed"}
+    """
+    if session_id <= 0:
+        return JSONResponse(status_code=400, content={"error": "invalid session_id"})
+    try:
+        conn = await db.connect()
+        try:
+            rows = await conn.fetch(
+                "SELECT * FROM missions WHERE session_id=$1 ORDER BY id",
+                session_id,
+            )
+            result = []
+            for r in rows:
+                result.append({
+                    "id": r["id"],
+                    "charter": r["charter"],
+                    "plan": r["plan"],
+                    "budget": r["budget"],
+                    "journal": r["journal"],
+                    "state": r["state"],
+                    "error": r["error"],
+                    "created_at": (
+                        r["created_at"].isoformat() if r["created_at"] else None
+                    ),
+                    "completed_at": (
+                        r["completed_at"].isoformat() if r["completed_at"] else None
+                    ),
+                })
+            return result
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "missions_list_failed"},
+        )
+
+
 @router.get("/subagents", response_model=None)
 async def list_subagents(session_id: int, parent_turn: int | None = None):
     """V1.5 项-1(ADR-012 §3.4 R7): 子代理列表 DB 轮询兜底。
@@ -6544,6 +6595,11 @@ def _is_valid_binding_pattern(pat: str, server_ids: set[str]) -> bool:
 async def get_skill_binding():
     """读取 skill_binding(yaml 默认 + config_runtime 覆盖)。
 
+    2026-08-27 修复(_deep_merge 空 dict 语义缺陷): runtime 键存在时
+    直接返回其值(整体覆盖语义, 含空 {})—— 不合并 yaml 默认。否则
+    PUT {} 清空绑定后, loader._deep_merge 对"dict 覆盖空 dict"递归
+    合并不变, GET 仍读到 yaml 默认(清空不生效)。
+
     Returns:
         200: {skill_binding: {scene: [server_ids]}, source: "runtime"|"yaml"}
     """
@@ -6553,12 +6609,18 @@ async def get_skill_binding():
     conn = await db.connect()
     try:
         row = await conn.fetchrow(
-            "SELECT 1 FROM config_runtime WHERE key = $1",
+            "SELECT value FROM config_runtime WHERE key = $1",
             "tools.mcp.skill_binding",
         )
     finally:
         await conn.close()
-    return {"skill_binding": binding, "source": "runtime" if row else "yaml"}
+    if row is not None:
+        value = row["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        binding = value if isinstance(value, dict) else {}
+        return {"skill_binding": binding, "source": "runtime"}
+    return {"skill_binding": binding, "source": "yaml"}
 
 
 class SkillBindingRequest(BaseModel):

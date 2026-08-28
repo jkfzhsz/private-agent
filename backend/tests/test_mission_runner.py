@@ -443,7 +443,14 @@ def test_abort_during_wait_milestone():
             await conn.close()
     state = asyncio.run(_flow())
     assert state == "cancelled"
-    assert ma_mod.mission_registry.running() == 0
+    # runner 侧轮询间隔(2s)后才退出并释放名额 —— 等待而非立即断言
+    async def _wait_release() -> int:
+        for _ in range(50):
+            if ma_mod.mission_registry.running() == 0:
+                break
+            await asyncio.sleep(0.2)
+        return ma_mod.mission_registry.running()
+    assert asyncio.run(_wait_release()) == 0
 
 
 # ── 重启恢复 ────────────────────────────────────────────────────────────

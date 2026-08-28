@@ -208,22 +208,29 @@ class MissionRunner:
                 await self._wait_if_paused(conn)
                 if self._aborted:
                     return
-                ok, detail = await self._run_milestone(conn, charter, ms)
-                # 里程碑状态回写 plan(JSONB 整列更新)
-                ms["status"] = "done" if ok else "failed"
-                await conn.execute(
-                    "UPDATE missions SET plan=$2, updated_at=now() WHERE id=$1",
-                    self._mission_id,
-                    json.dumps(plan, ensure_ascii=False),
-                )
-                await self._append_journal(
-                    conn,
-                    "milestone_done" if ok else "milestone_failed",
-                    f"[{ms.get('id')}] {ms.get('milestone', '')}: {detail}",
-                )
-                if not ok:
-                    await self._escalate_on_failure(conn, charter, ms, detail)
-                    return
+                # 失败重试循环(D-2 监督轮): 预算内每次失败 → 监督判定 →
+                # redelegate(方向正确, 换法重派) / wait_user(escalate 等用户)
+                while True:
+                    ok, detail = await self._run_milestone(conn, charter, ms)
+                    ms["status"] = "done" if ok else "failed"
+                    await conn.execute(
+                        "UPDATE missions SET plan=$2, updated_at=now() WHERE id=$1",
+                        self._mission_id,
+                        json.dumps(plan, ensure_ascii=False),
+                    )
+                    await self._append_journal(
+                        conn,
+                        "milestone_done" if ok else "milestone_failed",
+                        f"[{ms.get('id')}] {ms.get('milestone', '')}: {detail}",
+                    )
+                    if ok:
+                        break
+                    outcome = await self._handle_milestone_failure(
+                        conn, charter, plan, ms, detail
+                    )
+                    if outcome == "retry":
+                        continue  # 监督轮 redelegate: 预算已消耗, 重派
+                    return  # escalated(等用户)
             # 全部完成
             st = await conn.execute(
                 "UPDATE missions SET state='done', completed_at=now(), updated_at=now() "
@@ -397,10 +404,18 @@ class MissionRunner:
 
     # ── 失败处置(F1-7 BudgetLedger 接入点; 保守 escalate) ────────────────
 
-    async def _escalate_on_failure(self, conn, charter: dict, ms: dict, detail: str) -> None:
-        """里程碑失败 → 预算判定 → 未超限记 fallback(供 D-2 监督轮纠偏) /
-        超限置 escalated 等用户裁决(§4.3 改道预算语义)。"""
-        row = await conn.fetchrow("SELECT budget, journal FROM missions WHERE id=$1", self._mission_id)
+    async def _handle_milestone_failure(
+        self, conn, charter: dict, plan: list, ms: dict, detail: str
+    ) -> str:
+        """里程碑失败处置(D-2 监督轮): 预算判定 → 监督裁决 → retry/escalate。
+
+        Returns:
+            "retry"    — 监督轮判定方向正确(redelegate), 预算已消耗, 调用方重派;
+            "escalate" — 预算耗尽 / 监督判定 wait_user / 监督调用异常, 等用户。
+        """
+        row = await conn.fetchrow(
+            "SELECT budget, journal FROM missions WHERE id=$1", self._mission_id
+        )
         budget = row["budget"] or {}
         journal = row["journal"] or []
         if isinstance(budget, str):
@@ -409,20 +424,58 @@ class MissionRunner:
             journal = json.loads(journal)
         st = budget_status(budget, journal)
         if st["exhausted"]:
-            await self._escalate(conn, f"里程碑 [{ms.get('id')}] 失败且改道预算耗尽: {detail}")
-            return
-        # 记一次改道消耗(journal kind=fallback; 状态转 executing 保持可纠偏)
+            await self._escalate(
+                conn, f"里程碑 [{ms.get('id')}] 失败且改道预算耗尽: {detail}"
+            )
+            return "escalate"
+        # 消耗一次改道(journal kind=fallback)
         _, new_journal, allowed, reason = consume_fallback(
             budget, journal, f"[{ms.get('id')}] {detail}"
         )
         if allowed:
             await conn.execute(
-                "UPDATE missions SET journal=$2, state='executing', updated_at=now() "
+                "UPDATE missions SET journal=$2, updated_at=now() "
                 "WHERE id=$1 AND state IN ('executing','supervising')",
                 self._mission_id,
                 json.dumps(new_journal, ensure_ascii=False),
             )
-        await self._escalate(conn, f"里程碑 [{ms.get('id')}] 失败({reason}): {detail}")
+            journal = new_journal
+        # D-2 监督轮: 单次 LLM 纠偏判定(异常/解析失败 → wait_user 保守回退)
+        decision = {"action": "wait_user", "reason": "监督未执行"}
+        try:
+            from private_agent.core.mission_supervisor import supervise_failure
+
+            adapter = self._adapter_factory(None)
+            decision = await supervise_failure(
+                adapter, charter, plan, journal, ms, detail
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("supervisor unavailable: %s", e)
+        await self._append_journal(
+            conn,
+            "supervision",
+            f"action={decision['action']} reason={decision['reason'][:150]}",
+        )
+        if decision["action"] == "redelegate":
+            # 降回 executing(允许后续 escalate 条件更新命中)并通知前端纠偏
+            await conn.execute(
+                "UPDATE missions SET state='executing', updated_at=now() "
+                "WHERE id=$1 AND state IN ('executing','supervising')",
+                self._mission_id,
+            )
+            # W8: mission_report 状态汇报(上下文隔离, 前端状态卡片)
+            await self._push_report(
+                conn,
+                f"里程碑 [{ms.get('id')}] 失败, 监督判定方向正确, 重派"
+                f"(改道 {reason})。判定: {decision['reason'][:120]}",
+            )
+            return "retry"
+        await self._escalate(
+            conn,
+            f"里程碑 [{ms.get('id')}] 失败, 监督判定等用户: "
+            f"{decision['reason'][:200]} (失败详情: {detail[:200]})",
+        )
+        return "escalate"
 
     async def _escalate(self, conn, reason: str) -> None:
         st = await conn.execute(
@@ -483,6 +536,19 @@ class MissionRunner:
             "state": state,
             "detail": detail,
         })
+
+    async def _push_report(self, conn, content: str) -> None:
+        """W8: mission_report 状态汇报落 messages(msg_kind 隔离, 不进上下文)。"""
+        try:
+            from private_agent.tools.builtins.mission_tools import (
+                append_mission_report,
+            )
+
+            await append_mission_report(
+                conn, self._session_id, self._mission_id, content
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("mission_report append failed: #%s", self._mission_id)
 
     @staticmethod
     async def _safe_push(event_sink, ev: dict) -> None:
