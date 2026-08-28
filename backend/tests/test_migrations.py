@@ -25,7 +25,7 @@ EXPECTED_TABLES = [
     "version_snapshots",
     "eval_datasets",
     "eval_runs",
-    "async_tasks",
+    "missions",
     "config_runtime",
     "skills",
 ]

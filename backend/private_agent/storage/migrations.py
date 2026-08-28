@@ -206,6 +206,105 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     )
     # 2026-08-15(M2 P2-20): 任务级暂停/恢复 —— subagents.status 加 'paused'
     await _migrate_subagents_status_check(conn)
+    # 0.6.0 F1-1(2026-08-28): async_tasks(已建未用) → missions 长任务编排表
+    await _migrate_missions_table(conn)
+
+
+async def _migrate_missions_table(conn: asyncpg.Connection) -> None:
+    """0.6.0 F1-1: async_tasks(已建未用空表) → missions 长任务编排表(幂等)。
+
+    三分支(设计文档 §4.1/§八裁决 1):
+    - missions 已存在 → 仅补列/索引/CHECK(幂等跳过)
+    - async_tasks 存在(老部署) → RENAME + DROP 废弃列(status/progress/tool_name,
+      均未使用无数据) + 补新列
+    - 两者皆无 → 完整 CREATE(与 schema.sql 第 11 节同构)
+    状态列 status → state(枚举 planning/executing/supervising/done/failed/
+    cancelled/escalated), CHECK 幂等重建(检测 'escalated')。
+    """
+    missions_exists = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_tables "
+        "WHERE schemaname='public' AND tablename='missions')"
+    )
+    if not missions_exists:
+        async_tasks_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_tables "
+            "WHERE schemaname='public' AND tablename='async_tasks')"
+        )
+        if async_tasks_exists:
+            await conn.execute("ALTER TABLE async_tasks RENAME TO missions")
+            # 废弃列(旧表语义, 未使用): DROP(级联删除其 CHECK)
+            await conn.execute("ALTER TABLE missions DROP COLUMN IF EXISTS status")
+            await conn.execute("ALTER TABLE missions DROP COLUMN IF EXISTS progress")
+            await conn.execute("ALTER TABLE missions DROP COLUMN IF EXISTS tool_name")
+            # 旧索引名不含表名语义, 重建为 idx_missions_*
+            await conn.execute("DROP INDEX IF EXISTS idx_async_tasks_session")
+        else:
+            await conn.execute(
+                """
+                CREATE TABLE missions (
+                    id           BIGSERIAL PRIMARY KEY,
+                    session_id   BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    charter      JSONB,
+                    plan         JSONB DEFAULT '[]'::jsonb,
+                    budget       JSONB DEFAULT '{}'::jsonb,
+                    journal      JSONB DEFAULT '[]'::jsonb,
+                    state        VARCHAR(20) NOT NULL DEFAULT 'planning'
+                                 CHECK (state IN ('planning','executing','supervising',
+                                                  'done','failed','cancelled','escalated')),
+                    result       JSONB,
+                    error        TEXT,
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at   TIMESTAMPTZ DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ
+                )
+                """
+            )
+    # 幂等补列(RENAME 老表 / 部分迁移场景)
+    await conn.execute("ALTER TABLE missions ADD COLUMN IF NOT EXISTS charter JSONB")
+    await conn.execute(
+        "ALTER TABLE missions ADD COLUMN IF NOT EXISTS plan JSONB DEFAULT '[]'::jsonb"
+    )
+    await conn.execute(
+        "ALTER TABLE missions ADD COLUMN IF NOT EXISTS budget JSONB DEFAULT '{}'::jsonb"
+    )
+    await conn.execute(
+        "ALTER TABLE missions ADD COLUMN IF NOT EXISTS journal JSONB DEFAULT '[]'::jsonb"
+    )
+    await conn.execute(
+        "ALTER TABLE missions ADD COLUMN IF NOT EXISTS state "
+        "VARCHAR(20) NOT NULL DEFAULT 'planning'"
+    )
+    # state CHECK 幂等重建(检测 'escalated'; 命名约束统一为 missions_state_check)
+    rows = await conn.fetch(
+        """
+        SELECT conname, pg_get_constraintdef(oid) AS def
+        FROM pg_constraint
+        WHERE conrelid = 'missions'::regclass AND contype = 'c'
+        """
+    )
+    for r in rows:
+        def_text = r["def"] or ""
+        if "escalated" in def_text:
+            continue
+        conname = r["conname"]
+        await conn.execute(f'ALTER TABLE missions DROP CONSTRAINT "{conname}"')
+    has_state_check = any(
+        "escalated" in (r["def"] or "") for r in rows
+    )
+    if not has_state_check:
+        await conn.execute(
+            """
+            ALTER TABLE missions ADD CONSTRAINT missions_state_check
+            CHECK (state IN ('planning','executing','supervising',
+                             'done','failed','cancelled','escalated'))
+            """
+        )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_missions_session ON missions(session_id, state)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_missions_state ON missions(state)"
+    )
 
 
 async def _migrate_add_session_supplementary_skills(conn: asyncpg.Connection) -> None:

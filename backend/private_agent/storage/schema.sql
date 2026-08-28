@@ -324,22 +324,28 @@ CREATE INDEX idx_eval_runs_skill ON eval_runs(skill_name, skill_version);
 CREATE INDEX idx_eval_runs_started ON eval_runs(started_at DESC);
 
 -- ==============================================================================
--- 11. async_tasks - 异步任务状态 (§5.14 完整 DDL, §9.14 7天TTL)
+-- 11. missions - 长任务编排表 (0.6.0 Mission 层, F1-1)
+--     由 async_tasks(已建未用)演进: 状态列 state + charter/plan/budget/journal
+--     设计文档: docs/next-phase-plan-2026-08-28-wuya-long-task-orchestration.md §4.1
 -- ==============================================================================
-CREATE TABLE async_tasks (
-    id              BIGSERIAL PRIMARY KEY,
-    session_id      BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    tool_name       VARCHAR(100) NOT NULL,
-    status          VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
-    progress        FLOAT DEFAULT 0,
-    result          JSONB,
-    error           TEXT,
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW(),
-    completed_at    TIMESTAMPTZ
+CREATE TABLE missions (
+    id           BIGSERIAL PRIMARY KEY,
+    session_id   BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    charter      JSONB,                                  -- {goal, dod[], constraints[], env_snapshot}
+    plan         JSONB DEFAULT '[]'::jsonb,              -- milestones[] {id, milestone, executor_type, prompt_template, depends_on[], status}
+    budget       JSONB DEFAULT '{}'::jsonb,              -- {max_fallbacks, max_total_sec, max_subagents}
+    journal      JSONB DEFAULT '[]'::jsonb,              -- 追加式台账 [{ts, kind, detail}]
+    state        VARCHAR(20) NOT NULL DEFAULT 'planning'
+                 CHECK (state IN ('planning','executing','supervising','done','failed','cancelled','escalated')),
+    result       JSONB,
+    error        TEXT,
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_async_tasks_session ON async_tasks(session_id, status);
+CREATE INDEX idx_missions_session ON missions(session_id, state);
+CREATE INDEX idx_missions_state ON missions(state);
 
 -- ==============================================================================
 -- 12. config_runtime - 运行时配置 + API Key 密文 + ws_offset (§2.10, §2.12, §9.14 无TTL)
