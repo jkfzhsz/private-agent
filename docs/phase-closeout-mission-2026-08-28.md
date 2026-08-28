@@ -67,11 +67,15 @@
 
 ## 五、全量回归结果（回填区）
 
-- 后端 pytest：**1784 passed / 6 failed（35m13s）** —— 6 失败与 F1 批后基线
-  完全一致（test_pause_turn ×1 / test_react_loop limit ×2 /
-  test_react_loop_billing ×2 / test_react_loop_parallel ×1，均为 0.5.1 在途
-  react_loop 批次存量，worktree 判定与 Mission 零相关）；较 F1 基线
-  **新增 28 测全过，零回归**。
+- 后端 pytest：**1790 passed / 0 failed（26m25s，完全全绿）**。
+  - F1 后曾为 1784P/6F；6 个失败根因定位后当场修复：
+    ① react_loop.py:1294 工具完成检测 sleep(10) 轮询粒度缺陷（8-19 引入，
+    0.25s 工具实测卡 10.03s——**生产级 bug：每工具调用后卡最多 10s**），
+    修复=asyncio.wait 替代 sleep 轮询（心跳语义不变）；
+    ② 8-14 vision_chain 改造给 adapter.chat 无条件加 require_vision，
+    test_react_loop/test_react_loop_billing 旧签名 mock 未适配 → TypeError
+    → pause/limit/billing 五测试失败，修复=mock 补形参；
+    ③ billing 断言未解析 JSONB str（2026-08-15 教训复发），修复=json.loads。
 
 ## 六、遗留与后续
 

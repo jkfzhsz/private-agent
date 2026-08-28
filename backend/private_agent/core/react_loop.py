@@ -1289,9 +1289,14 @@ class ReactLoop:
                                 )
                             )
                             _tool_started = time.monotonic()
+                            # 2026-08-28 修复: asyncio.wait 替代 sleep 轮询 ——
+                            # 原实现 sleep(10) 粒度轮询, 工具完成后最长延迟 10s
+                            # 才继续流转(0.25s 工具实测卡 10.03s, 慢 40 倍);
+                            # wait 在 task 完成时立即返回, 心跳语义不变。
                             while not _exec_task.done():
-                                await asyncio.sleep(
-                                    _TOOL_PROGRESS_HEARTBEAT_SEC
+                                await asyncio.wait(
+                                    {_exec_task},
+                                    timeout=_TOOL_PROGRESS_HEARTBEAT_SEC,
                                 )
                                 if self._progress_cb is not None:
                                     try:

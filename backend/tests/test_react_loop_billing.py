@@ -6,6 +6,7 @@ Source: 蓝图 §3.13 + 2026-08-18 B 方案(去计价 + 缓存命中率)
 - adapter 未返回 usage → 守卫兜底, 不写事件(零数据兼容, 不破坏循环)
 """
 import asyncio
+import json
 import os
 
 import asyncpg
@@ -63,6 +64,7 @@ class _MockAdapter:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        require_vision: bool = False,  # 2026-08-14 vision_chain 参数(mock 适配)
     ) -> ChatResult:
         self.chat_calls.append((list(messages), list(tools) if tools else None))
         if self._idx >= len(self._responses):
@@ -111,7 +113,14 @@ def test_run_turn_persists_token_usage_event_when_adapter_returns_usage():
                 "WHERE session_id=$1 AND event_type='token_usage'",
                 session_id,
             )
-            return [dict(r) for r in rows]
+            out = []
+            for r in rows:
+                d = dict(r)
+                # asyncpg JSONB 返回 str(2026-08-15 教训): 解析后断言
+                if isinstance(d["payload"], str):
+                    d["payload"] = json.loads(d["payload"])
+                out.append(d)
+            return out
         finally:
             await conn.close()
 

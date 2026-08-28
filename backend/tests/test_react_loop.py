@@ -67,6 +67,7 @@ class _MockAdapter:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        require_vision: bool = False,  # 2026-08-14 vision_chain 参数(mock 适配)
     ) -> ChatResult:
         self.chat_calls.append((list(messages), list(tools) if tools else None))
         if self._idx >= len(self._responses):
