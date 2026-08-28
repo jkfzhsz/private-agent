@@ -213,13 +213,15 @@ def build_mission_tools(
         charter = row["charter"] or {}
         if isinstance(charter, str):
             charter = json.loads(charter)
-        fallbacks_used = sum(
-            1 for e in journal if isinstance(e, dict) and e.get("kind") == "fallback"
-        )
+        # F1-7: 预算统计统一走 BudgetLedger(与 D-3 纠偏判定同一实现)
+        from private_agent.core.mission_budget import budget_status
+
+        bstat = budget_status(budget, journal)
+        fallbacks_used, max_fb = bstat["used"], bstat["max"]
         lines = [
             f"Mission #{row['id']} state={row['state']}",
             f"目标: {charter.get('goal', '-')}",
-            f"预算: 改道已用 {fallbacks_used}/{budget.get('max_fallbacks', '-')}"
+            f"预算: 改道已用 {fallbacks_used}/{max_fb}"
             f", 总时长上限 {budget.get('max_total_sec', '-')}s",
             "里程碑:",
         ]
