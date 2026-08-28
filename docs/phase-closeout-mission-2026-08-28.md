@@ -51,7 +51,7 @@
 | W8 mission_report | ✅ 纠偏/终态经 append_mission_report 落库（msg_kind 隔离） |
 | W9 WS mission_* + 轮询兜底 | ✅ 五类事件推送 + GET /admin/missions |
 | W10 前端裁决 WS 化 | ✅ App.tsx onApproveFallback/onAbort → WS mission_control → mission_control_result Toast |
-| W11 admin.py 注释 | ⏳ 随 0.5.1 在途批（仍未提交，蒋先生定时机） |
+| W11 admin.py 注释 | ✅ 随 0.5.1 在途批提交（a845de6） |
 
 ## 四、测试基线
 
@@ -75,8 +75,10 @@
 
 ## 六、遗留与后续
 
-1. **0.5.1 在途改动仍未提交**（admin.py 等 8 文件 + react_loop 存量 6 失败同源，
-   由蒋先生决定提交与修复时机；提交后顺手补 W11 注释）。
+1. **0.5.1 在途改动已提交**（蒋先生批准，3 个原子 commit：f829467 P0-A /
+   a845de6 P0-B+补 W11 / 3db7887 P1-C+D；admin.py 的 skill-binding 修复
+   此前已随 D-2 commit 494b698 连带入库——隔离策略在该次操作中未执行到位，
+   已由 test_skill_binding_api 6 测覆盖验证）。
 2. **真实链路验收 V1~V7**：依赖后端启动 + 真实 LLM 会话（走用户实际触发路径），
    AI 侧 mock/集成测试已全绿；真实验收建议蒋先生打包后执行（打包按铁律由您
    手动 build-electron.bat）。
