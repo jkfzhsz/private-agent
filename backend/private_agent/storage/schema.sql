@@ -336,7 +336,7 @@ CREATE TABLE missions (
     budget       JSONB DEFAULT '{}'::jsonb,              -- {max_fallbacks, max_total_sec, max_subagents}
     journal      JSONB DEFAULT '[]'::jsonb,              -- 追加式台账 [{ts, kind, detail}]
     state        VARCHAR(20) NOT NULL DEFAULT 'planning'
-                 CHECK (state IN ('planning','executing','supervising','done','failed','cancelled','escalated')),
+                 CHECK (state IN ('planning','executing','supervising','paused','done','failed','cancelled','escalated')),
     result       JSONB,
     error        TEXT,
     created_at   TIMESTAMPTZ DEFAULT NOW(),

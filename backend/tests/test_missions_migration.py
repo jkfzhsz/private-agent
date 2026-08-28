@@ -26,7 +26,7 @@ MISSION_COLUMNS = {
 }
 LEGACY_COLUMNS = {"status", "progress", "tool_name"}
 VALID_STATES = {
-    "planning", "executing", "supervising",
+    "planning", "executing", "supervising", "paused",
     "done", "failed", "cancelled", "escalated",
 }
 

@@ -249,7 +249,7 @@ async def _migrate_missions_table(conn: asyncpg.Connection) -> None:
                     budget       JSONB DEFAULT '{}'::jsonb,
                     journal      JSONB DEFAULT '[]'::jsonb,
                     state        VARCHAR(20) NOT NULL DEFAULT 'planning'
-                                 CHECK (state IN ('planning','executing','supervising',
+                                 CHECK (state IN ('planning','executing','supervising','paused',
                                                   'done','failed','cancelled','escalated')),
                     result       JSONB,
                     error        TEXT,
@@ -284,18 +284,19 @@ async def _migrate_missions_table(conn: asyncpg.Connection) -> None:
     )
     for r in rows:
         def_text = r["def"] or ""
-        if "escalated" in def_text:
+        if "escalated" in def_text and "paused" in def_text:
             continue
         conname = r["conname"]
         await conn.execute(f'ALTER TABLE missions DROP CONSTRAINT "{conname}"')
     has_state_check = any(
-        "escalated" in (r["def"] or "") for r in rows
+        "escalated" in (r["def"] or "") and "paused" in (r["def"] or "")
+        for r in rows
     )
     if not has_state_check:
         await conn.execute(
             """
             ALTER TABLE missions ADD CONSTRAINT missions_state_check
-            CHECK (state IN ('planning','executing','supervising',
+            CHECK (state IN ('planning','executing','supervising','paused',
                              'done','failed','cancelled','escalated'))
             """
         )
