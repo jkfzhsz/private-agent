@@ -144,17 +144,20 @@ def test_react_loop_event_sink_invoked_on_each_event():
             await conn.close()
 
     sink_events, queue_events = asyncio.run(_run())
-    # event_sink 回调被调用 2 次(thinking + final)
-    assert len(sink_events) == 2
-    assert sink_events[0]["event_type"] == "thinking"
-    assert sink_events[1]["event_type"] == "final"
-    # event_queue 仍入队 2 条(两路并存,不破坏现有消费者)
+    # event_sink 回调被调用 3 次(status + thinking + final)。
+    # status(llm_calling)直接走 event_sink 仅 WS 推送 —— 不经 _emit_event,
+    # 不入 event_queue、不持久化(react_loop.py L773-775 注释)。
+    assert len(sink_events) == 3
+    assert sink_events[0]["event_type"] == "status"
+    assert sink_events[1]["event_type"] == "thinking"
+    assert sink_events[2]["event_type"] == "final"
+    # event_queue 仍入队 2 条(thinking + final, status 不入队)
     assert len(queue_events) == 2
     assert queue_events[0]["event_type"] == "thinking"
     assert queue_events[1]["event_type"] == "final"
-    # sink 与 queue 收到的事件内容一致
-    assert sink_events[0] == queue_events[0]
-    assert sink_events[1] == queue_events[1]
+    # sink 与 queue 收到的事件内容一致(非 status 事件)
+    assert sink_events[1] == queue_events[0]
+    assert sink_events[2] == queue_events[1]
 
 
 def test_react_loop_event_sink_none_default_preserves_existing_behavior():
@@ -200,3 +203,68 @@ def test_react_loop_event_sink_none_default_preserves_existing_behavior():
     assert events[0]["event_type"] == "thinking"
     assert events[1]["event_type"] == "final"
     assert final_state == ReactLoopState.IDLE
+
+
+def test_react_loop_persisted_events_backfill_db_event_id():
+    """0.5.1 A-1(C-4): _emit_event 落库后回填 event_id, 与 replay 同源。
+
+    实时推送事件携带 DB 自增 id(event_id) —— 断线重连后 replay 重放
+    同一条事件(id 相同), 前端按 event_id 去重, 避免该轮事件全量重放
+    导致 delta 重复累积/事件重复渲染。回归保护: event_id 必须等于
+    react_events 表实际 id, 否则去重锚点失效。
+    """
+    _setup_schema()
+
+    async def _run() -> tuple[list[dict], list[dict]]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await _create_session(conn)
+            cm = ContextManager(
+                session_id=session_id, system_prompt="sys", tools=[]
+            )
+            await cm.build_initial(conn)
+            adapter = _MockAdapter(
+                responses=[ChatResult(content="hello", used_provider="mock")]
+            )
+
+            sink_events: list[dict] = []
+
+            async def _sink(evt: dict) -> None:
+                sink_events.append(evt)
+
+            loop = ReactLoop(
+                session_id=session_id,
+                context_manager=cm,
+                adapter=adapter,
+                tools=[],
+                conn=conn,
+                event_sink=_sink,
+            )
+            await loop.run_turn("hi")
+
+            rows = await conn.fetch(
+                "SELECT id, event_type FROM react_events "
+                "WHERE session_id=$1 ORDER BY id ASC",
+                session_id,
+            )
+            return sink_events, [dict(r) for r in rows]
+        finally:
+            await conn.close()
+
+    sink_events, db_events = asyncio.run(_run())
+    # 经 _emit_event 持久化的事件必须带 event_id, 且与 DB 自增 id 一致。
+    # 注意: DB 可能多于 sink(context_injected/checkpoint 走直接 insert,
+    # 不经 _emit_event → 不进 sink), 只校验 sink 中带 event_id 的事件。
+    persisted = [e for e in sink_events if "event_id" in e]
+    assert len(persisted) >= 2, f"应至少 thinking+final 2 条, 实际 {len(persisted)}"
+    db_by_id = {r["id"]: r["event_type"] for r in db_events}
+    for evt in persisted:
+        assert evt["event_id"] in db_by_id, (
+            f"event_id({evt['event_id']}) 不在 DB 中"
+        )
+        assert evt["event_type"] == db_by_id[evt["event_id"]], (
+            f"event_type({evt['event_type']}) 与 DB({db_by_id[evt['event_id']]}) 不一致"
+        )
+    # thinking + final 必在(事件级去重锚点的核心受众)
+    types = {e["event_type"] for e in persisted}
+    assert {"thinking", "final"} <= types

@@ -38,11 +38,16 @@ def _setup_schema() -> None:
 async def _seed_events(
     conn: "asyncpg.Connection", session_id: int, turns: list[int],
 ) -> None:
-    """插入指定 turn 序列的事件。"""
+    """插入指定 turn 序列的事件。
+
+    2026-08-27: 事件类型用 tool_call 而非 thinking —— 2026-08-16 起
+    replay 过滤 thinking/delta 流式增量(重放只重建最终状态), thinking
+    种子会被全部过滤导致补发为空, 无法验证 turn 粒度语义。
+    """
     for turn in turns:
         await insert_react_event(
             conn, session_id=session_id, turn=turn,
-            event_type="thinking", payload={"turn": turn},
+            event_type="tool_call", payload={"turn": turn},
         )
 
 

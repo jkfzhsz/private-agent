@@ -648,3 +648,65 @@ def test_replay_backfills_missing_final_for_interrupted_turn():
     assert backfilled[0]["payload"]["content"] == "中断轮次的部分回答"
     # user 消息仍补发
     assert any(u["turn"] == 2 for u in result["users"])
+
+
+def test_build_replay_messages_filters_stable_zone_user_messages():
+    """C-5(架构修订 P2-6): zone 过滤 —— 仅 active 用户消息重放为气泡。
+
+    回归: KB/记忆注入以 user 角色写入 messages 且 zone='stable', 若重放
+    会污染历史界面并把注入片段当作真实用户发言(上下文误导)。
+    重放查询限定 (zone IS NULL OR zone='active'), stable 必须被过滤。
+    """
+    _setup_schema()
+
+    async def _run() -> list[dict]:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            session_id = await conn.fetchval(
+                "INSERT INTO sessions DEFAULT VALUES RETURNING id"
+            )
+            # 同一 turn: 真实用户消息(active) + KB/记忆注入(stable)
+            await conn.execute(
+                "INSERT INTO messages (session_id, turn, role, content, zone) "
+                "VALUES ($1, 1, 'user', '真实问题', 'active')",
+                session_id,
+            )
+            await conn.execute(
+                "INSERT INTO messages (session_id, turn, role, content, zone) "
+                "VALUES ($1, 1, 'user', '【知识库】注入片段', 'stable')",
+                session_id,
+            )
+            # zone 为 NULL 的历史消息(旧数据)也属 active 语义, 应重放
+            await conn.execute(
+                "INSERT INTO messages (session_id, turn, role, content, zone) "
+                "VALUES ($1, 2, 'user', '旧版无 zone 消息', NULL)",
+                session_id,
+            )
+            await insert_react_event(
+                conn, session_id=session_id, turn=1,
+                event_type="final", payload={"content": "回答", "turn": 1},
+            )
+            await insert_react_event(
+                conn, session_id=session_id, turn=2,
+                event_type="final", payload={"content": "回答2", "turn": 2},
+            )
+            msgs = await ws_offset.build_replay_messages(
+                conn, session_id=session_id, last_turn=0, full=True,
+            )
+            return msgs
+        finally:
+            await conn.close()
+
+    msgs = asyncio.run(_run())
+    users = [
+        m for m in msgs
+        if m["type"] == "react_event" and m["event_type"] == "user"
+    ]
+    # 只重放 active(或 NULL zone)的真实用户消息, stable 注入被过滤
+    assert len(users) == 2, f"应重放 2 条用户消息(active+NULL), 实际 {len(users)}"
+    contents = [u["payload"]["content"] for u in users]
+    assert "真实问题" in contents
+    assert "旧版无 zone 消息" in contents
+    assert not any("知识库" in c for c in contents), (
+        "stable zone 的 KB/记忆注入不应重放为气泡"
+    )
