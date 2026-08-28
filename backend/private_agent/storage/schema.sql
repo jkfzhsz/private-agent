@@ -73,6 +73,9 @@ CREATE TABLE messages (
     compressed_from JSONB,
     -- V1.1-3.3 消息精细化操作: 收藏标记
     starred         BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 0.6.0 F1-8 消息隔离: mission_report 状态汇报不进主对话上下文
+    -- (get_messages/reload_from_db 加载层过滤; 前端渲染为状态卡片)
+    msg_kind        VARCHAR(20) NOT NULL DEFAULT 'chat',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

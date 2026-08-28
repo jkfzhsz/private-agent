@@ -538,7 +538,7 @@ class ContextManager:
         rows = await conn.fetch(
             """
             SELECT id, turn, role, content, reasoning_content,
-                   tool_calls, tool_call_id, name, zone, compressed
+                   tool_calls, tool_call_id, name, zone, compressed, msg_kind
             FROM messages
             WHERE session_id=$1
             ORDER BY turn, id
@@ -551,6 +551,11 @@ class ContextManager:
         for row in rows:
             zone = row["zone"]
             role = row["role"]
+            # 0.6.0 F1-8 消息隔离: mission_report 状态汇报不进上下文 ——
+            # 不入三区内存 → 不进 get_messages(API)/get_messages_with_meta(压缩),
+            # 前端经独立查询渲染状态卡片(设计文档 §4.4 三层隔离·消息层)。
+            if (row["msg_kind"] or "chat") == "mission_report":
+                continue
             if zone == "frozen":
                 frozen.append({"role": role, "content": row["content"]})
             elif zone == "stable":

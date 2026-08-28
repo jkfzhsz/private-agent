@@ -208,6 +208,16 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await _migrate_subagents_status_check(conn)
     # 0.6.0 F1-1(2026-08-28): async_tasks(已建未用) → missions 长任务编排表
     await _migrate_missions_table(conn)
+    # 0.6.0 F1-8(2026-08-28): messages.msg_kind 消息隔离列
+    # (mission_report 状态汇报不进主对话上下文, 加载层过滤)
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS "
+        "msg_kind VARCHAR(20) NOT NULL DEFAULT 'chat'"
+    )
+    await conn.execute(
+        "ALTER TABLE messages_archive ADD COLUMN IF NOT EXISTS "
+        "msg_kind VARCHAR(20) NOT NULL DEFAULT 'chat'"
+    )
 
 
 async def _migrate_missions_table(conn: asyncpg.Connection) -> None:

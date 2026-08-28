@@ -28,6 +28,37 @@ MISSION_EXECUTOR_TYPES = ("subagent", "script", "wait")
 MISSION_TOOL_NAMES = ("mission_create", "mission_status", "mission_control")
 
 
+async def append_mission_report(
+    conn,
+    session_id: int,
+    mission_id: int,
+    content: str,
+    turn: int = 0,
+) -> int:
+    """写入 mission_report 状态汇报消息(F1-8, D 批监督轮调用)。
+
+    msg_kind='mission_report': reload_from_db 加载层过滤 → 不进主对话上下文
+    (不进 API/压缩/检索), 但 DB 行保留可回看(§八裁决 5), 前端经独立查询渲染
+    为状态卡片 —— 与用户/assistant 气泡视觉区分, 实现强约束隔离。
+
+    Returns:
+        新消息 id。
+    """
+    text = f"[Mission #{mission_id}] {content}"
+    return int(
+        await conn.fetchval(
+            """
+            INSERT INTO messages (session_id, turn, role, content, zone, msg_kind)
+            VALUES ($1, $2, 'assistant', $3, 'active', 'mission_report')
+            RETURNING id
+            """,
+            session_id,
+            turn,
+            text,
+        )
+    )
+
+
 def mission_cfg(cfg: dict | None) -> dict:
     """读取 tools.mission 配置段(带默认值; §八裁决 3: max_running 默认 2)。"""
     m = (cfg or {}).get("tools", {}).get("mission", {}) or {}
