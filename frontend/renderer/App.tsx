@@ -49,6 +49,15 @@ import SubagentPanel, {
   createSubagent,
   type SubagentState,
 } from "./components/SubagentPanel";
+// 0.6.0 F1-3(2026-08-28): Mission 长任务卡片(WS 事件 schema 先行契约见 MissionPanel 头注释;
+// D 批后端实现推送 + GET /admin/missions 轮询兜底)
+import MissionPanel, {
+  createMission,
+  type MissionJournalEntry,
+  type MissionMilestone,
+  type MissionState,
+  type MissionStateKind,
+} from "./components/MissionPanel";
 import { TurnCard, type TurnGroupData, type ReactEvent, type EventType } from "./components/TurnCard";
 
 
@@ -91,6 +100,13 @@ interface WSMessage {
   // 2026-08-19(断点恢复反馈): turn_resumed 携带的最新 checkpoint 轮
   // (后端断点恢复成功时补发, 区别于流程级"继续")。
   checkpoint_turn?: number;
+  // 0.6.0 F1-3: Mission 长任务事件(schema 先行契约, D 批后端推送)
+  mission_id?: number;
+  goal?: string;
+  state?: string;
+  detail?: string;
+  reason?: string;
+  entry?: { kind: string; ts: string; detail?: string };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -659,6 +675,8 @@ export default function App(): JSX.Element {
     reconnectAttemptRef.current = 0;
     // V1.5 项-1(M3 R7): 切换会话清空子代理卡片, 由重连后 DB 轮询重建
     setSubagents({});
+    // 0.6.0 F1-3: 切换会话清空 mission 卡片(D 批 DB 轮询兜底重建)
+    setMissions({});
     // 切换历史会话: 全量加载(忽略服务端 ws_offset, 否则 offset=1 会跳过第 1 轮)
     fullReloadRef.current = true;
     setSessionModel(modelId ?? "auto");
@@ -1022,6 +1040,8 @@ export default function App(): JSX.Element {
   const [isPaused, setIsPaused] = useState(false);
   // V1.5 项-1(ADR-012 M3): 子代理状态(WS 即时刷新, 重连/切会话从 DB 重建)
   const [subagents, setSubagents] = useState<Record<number, SubagentState>>({});
+  // 0.6.0 F1-3: mission 状态(WS 即时刷新; D 批 DB 轮询兜底)
+  const [missions, setMissions] = useState<Record<number, MissionState>>({});
   const pauseGeneration = useCallback((): void => {
     sendWs({ type: "pause", session_id: realSessionId ?? sessionId }, { userAction: true });
   }, [sendWs, realSessionId, sessionId]);
@@ -2238,6 +2258,80 @@ export default function App(): JSX.Element {
         break;
       }
 
+      // ── 0.6.0 F1-3: Mission 长任务事件(schema 先行契约, D 批后端推送) ──
+      // session_id 过滤同 subagent_*(子代理事件串窗教训 2026-08-11)
+      case "mission_created": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
+        if (msg.mission_id) {
+          const mid = msg.mission_id as number;
+          setMissions((prev) => ({
+            ...prev,
+            [mid]: createMission(mid, String(msg.goal ?? ""), (msg.state as MissionStateKind) ?? "planning"),
+          }));
+        }
+        break;
+      }
+      case "mission_update": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
+        if (msg.mission_id) {
+          const mid = msg.mission_id as number;
+          setMissions((prev) =>
+            prev[mid]
+              ? { ...prev, [mid]: { ...prev[mid], state: (msg.state as MissionStateKind) ?? prev[mid].state, detail: msg.detail ? String(msg.detail) : prev[mid].detail } }
+              : prev
+          );
+        }
+        break;
+      }
+      case "mission_journal": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
+        if (msg.mission_id && msg.entry) {
+          const mid = msg.mission_id as number;
+          const entry = msg.entry as MissionJournalEntry;
+          setMissions((prev) =>
+            prev[mid]
+              ? { ...prev, [mid]: { ...prev[mid], journal: [...prev[mid].journal, entry] } }
+              : prev
+          );
+        }
+        break;
+      }
+      case "mission_escalated": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
+        if (msg.mission_id) {
+          const mid = msg.mission_id as number;
+          setMissions((prev) =>
+            prev[mid]
+              ? { ...prev, [mid]: { ...prev[mid], state: "escalated", detail: msg.reason ? String(msg.reason) : prev[mid].detail } }
+              : prev
+          );
+        }
+        break;
+      }
+      case "mission_done": {
+        if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
+          return;
+        }
+        if (msg.mission_id) {
+          const mid = msg.mission_id as number;
+          setMissions((prev) =>
+            prev[mid]
+              ? { ...prev, [mid]: { ...prev[mid], state: (msg.state as MissionStateKind) ?? "done", result: msg.result ? String(msg.result) : prev[mid].result } }
+              : prev
+          );
+          void notifyUser("长任务结束", `Mission #${mid} ${String(msg.state ?? "done")}`);
+        }
+        break;
+      }
+
       case "turn_cancelled":
         // 打断/停止: 后端已取消当前 turn
         // 0.5.0 P6(2026-08-09): 只处理当前会话的取消(后台窗口的 cancel 不干扰)
@@ -3205,6 +3299,31 @@ export default function App(): JSX.Element {
                   v.status === "failed" ||
                   v.status === "cancelled"
                 ) {
+                  continue;
+                }
+                next[Number(k)] = v;
+              }
+              return next;
+            });
+          }}
+        />
+
+        {/* 0.6.0 F1-3: Mission 长任务卡片(escalated 裁决回调 D-3 接线 WS action) */}
+        <MissionPanel
+          missions={missions}
+          onApproveFallback={(mid) => {
+            // D-3 接线点: 经 WS 发送 mission_control approve_fallback 请求
+            console.info("[mission] approve_fallback requested:", mid);
+          }}
+          onAbort={(mid) => {
+            // D-3 接线点: 经 WS 发送 mission_control abort 请求
+            console.info("[mission] abort requested:", mid);
+          }}
+          onClearFinished={() => {
+            setMissions((prev) => {
+              const next: Record<number, MissionState> = {};
+              for (const [k, v] of Object.entries(prev)) {
+                if (v.state === "done" || v.state === "failed" || v.state === "cancelled") {
                   continue;
                 }
                 next[Number(k)] = v;
