@@ -168,6 +168,63 @@ def test_parse_decision_invalid_falls_back_wait_user():
     assert parse_supervision_decision('{"action": "redelegate"')["action"] == "wait_user"  # 截断 JSON
 
 
+def test_parse_adjust_plan_with_fix():
+    """adjust_plan 合法: 带 milestone_fix; 缺 fix → 保守回退 wait_user。"""
+    d = parse_supervision_decision(
+        '{"action": "adjust_plan", "reason": "描述不清", '
+        '"milestone_fix": {"id": "m1", "milestone": "修正后扫描", '
+        '"prompt_template": "改用镜像重试"}}'
+    )
+    assert d["action"] == "adjust_plan"
+    assert d["milestone_fix"]["id"] == "m1"
+    assert d["milestone_fix"]["prompt_template"] == "改用镜像重试"
+    # 缺 milestone_fix → 保守回退
+    d2 = parse_supervision_decision('{"action": "adjust_plan", "reason": "x"}')
+    assert d2["action"] == "wait_user"
+
+
+def test_redelegate_adjust_plan_updates_plan_and_succeeds():
+    """D-3 集成: 监督 adjust_plan → plan 里程碑被修正 + 重派成功 → done。"""
+    _setup_schema()
+    events: list = []
+    behavior = [
+        RuntimeError("boom"),                                   # 第 1 次子代理失败
+        ChatResult(content=json.dumps({
+            "action": "adjust_plan", "reason": "里程碑描述不清",
+            "milestone_fix": {"id": "m1", "milestone": "修正后的调研",
+                              "prompt_template": "按修正指令执行"},
+        })),                                                    # 监督: adjust_plan
+        ChatResult(content="修正后重派成功"),                     # 第 2 次子代理成功
+    ]
+    kw = _spawn_kwargs(1, events, behavior)
+
+    async def _flow() -> tuple:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            sid = await conn.fetchval(
+                "INSERT INTO sessions (title) VALUES ('d3-adjust') RETURNING id"
+            )
+            mid = await _create_mission(conn, sid, [
+                {"id": "m1", "milestone": "原描述", "executor_type": "subagent"}
+            ])
+        finally:
+            await conn.close()
+        await MissionRunner.spawn(cfg=_test_cfg(), mission_id=mid, **kw)
+        state = await _wait_terminal(mid)
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            row = await conn.fetchrow("SELECT plan FROM missions WHERE id=$1", mid)
+            plan = row["plan"] if not isinstance(row["plan"], str) else json.loads(row["plan"])
+            return state, plan
+        finally:
+            await conn.close()
+    state, plan = asyncio.run(_flow())
+    assert state == "done"
+    assert plan[0]["milestone"] == "修正后的调研"
+    assert plan[0]["prompt_template"] == "按修正指令执行"
+    assert plan[0]["status"] == "done"
+
+
 def test_user_prompt_contains_all_sections():
     prompt = build_supervision_user_prompt(
         {"goal": "整理缺陷清单", "constraints": ["不得换数据源"]},

@@ -37,13 +37,18 @@ logger = setup_logger("private_agent.mission_supervisor")
 SUPERVISOR_SYSTEM_PROMPT = (
     "你是长任务监督者。任务执行中某个里程碑失败, 你基于任务宪章与执行台账"
     "判断下一步处置。只回答一个 JSON 对象, 不输出其他内容:\n"
-    '{"action": "redelegate" | "wait_user", "reason": "<≤200字判定依据>"}\n'
-    "判定规则:\n"
+    '{"action": "redelegate" | "adjust_plan" | "wait_user", '
+    '"reason": "<≤200字判定依据>", "milestone_fix": '
+    '{"id": "<被修里程碑id>", "milestone": "<修正后描述>", "prompt_template":'
+    '"<可选: 修正后的执行指令>"}}\n'
+    "milestone_fix 仅 action=adjust_plan 时必填。判定规则:\n"
     "1. [方向一致] 失败原因属执行层(网络/环境/工具临时故障), 且当前里程碑"
     "仍是达成目标的正确路径 → action=redelegate(换可行方式重试同一里程碑);\n"
-    "2. [方向存疑] 失败暴露里程碑本身偏离任务目标 / 里程碑与目标无交集 / "
-    "需要的资源(权限/依赖/数据)超出子代理能力 → action=wait_user(等用户裁决);\n"
-    "3. 判断依据优先级: 任务目标 > 完成标准 > 硬约束 > 台账历史。"
+    "2. [计划缺陷] 失败暴露里程碑本身描述不清/顺序不当/缺少前置, 但目标路径"
+    "仍正确 → action=adjust_plan(给出 milestone_fix 修正该里程碑后重派);\n"
+    "3. [方向存疑] 里程碑与目标无交集 / 需要的资源(权限/依赖/数据)超出子代理"
+    "能力 → action=wait_user(等用户裁决);\n"
+    "4. 判断依据优先级: 任务目标 > 完成标准 > 硬约束 > 台账历史。"
 )
 
 
@@ -94,9 +99,22 @@ def parse_supervision_decision(raw: str) -> dict:
     except (ValueError, TypeError):
         return fallback
     action = data.get("action")
-    if action not in ("redelegate", "wait_user"):
+    if action not in ("redelegate", "adjust_plan", "wait_user"):
         return fallback
-    return {"action": action, "reason": str(data.get("reason", ""))[:300]}
+    out = {"action": action, "reason": str(data.get("reason", ""))[:300]}
+    if action == "adjust_plan":
+        fix = data.get("milestone_fix")
+        if not isinstance(fix, dict) or not fix.get("id"):
+            return fallback  # adjust_plan 必须带 milestone_fix
+        out["milestone_fix"] = {
+            "id": str(fix["id"]),
+            "milestone": str(fix.get("milestone", ""))[:300],
+            "prompt_template": (
+                str(fix["prompt_template"])[:2000]
+                if fix.get("prompt_template") else None
+            ),
+        }
+    return out
 
 
 async def supervise_failure(

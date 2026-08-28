@@ -107,6 +107,18 @@ _mcp_manager = None  # type: ignore[assignment]
 _session_locks: dict[int, "asyncio.Lock"] = {}
 # 打断/停止: per-session 运行 task 集合(T-3 架构修订 P0-4 修复——
 # 原单槽 dict 被并发 user_message 覆盖导致 cancel 打错目标)
+def _rowcount(result) -> int:
+    """解析 asyncpg execute() 状态串("UPDATE N")受影响行数(教训: 恒 False 比较)。"""
+    try:
+        return int(str(result).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+# 0.6.0 D-3(W10): mission spawn factory 注册表(session_id → runner_factory;
+# 供 WS mission_control approve 后重启续跑)
+_mission_spawn_factories: dict[int, Any] = {}
+
 _session_tasks: dict[int, "set[asyncio.Task]"] = {}
 # 2026-08-16(阶段2 反馈): per-session 当前 ReactLoop 实例引用 ——
 # WS continue_iteration/stop_iteration 消息定位到挂起中的循环(迭代上限询问)
@@ -937,6 +949,98 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "session_id": session_id,
                         "message": "当前没有运行中的任务",
                     })
+            elif msg_type == "mission_control":
+                # 0.6.0 D-3(W10): mission 用户裁决通道(前端 MissionPanel 裁决按钮)
+                # action: approve_fallback(预算+1 + 重新 spawn 续跑) / abort /
+                # pause。语义与 mission_tools.mission_control 一致(直写 DB)。
+                try:
+                    session_id = int(msg["session_id"])
+                    mission_id = int(msg["mission_id"])
+                    action = str(msg["action"])
+                except (KeyError, ValueError, TypeError):
+                    await ws.send_json({
+                        "type": "mission_control_result",
+                        "ok": False,
+                        "message": "mission_control: session_id/mission_id/action 必填",
+                    })
+                    continue
+                try:
+                    conn = await db.connect()
+                    try:
+                        import json as _json
+
+                        now_entry = _json.dumps(
+                            [{"kind": f"user_{action}", "ts": "", "detail": "用户裁决"}],
+                            ensure_ascii=False,
+                        )
+                        affected = 0
+                        if action == "approve_fallback":
+                            row = await conn.fetchrow(
+                                "SELECT budget FROM missions WHERE id=$1", mission_id
+                            )
+                            if row is not None:
+                                budget = row["budget"] or {}
+                                if isinstance(budget, str):
+                                    budget = _json.loads(budget)
+                                budget["max_fallbacks"] = int(
+                                    budget.get("max_fallbacks", 2)
+                                ) + 1
+                                affected = _rowcount(await conn.execute(
+                                    "UPDATE missions SET budget=$2, "
+                                    "state='executing', journal = journal || $3::jsonb, "
+                                    "updated_at=now() WHERE id=$1 AND state='escalated'",
+                                    mission_id,
+                                    _json.dumps(budget, ensure_ascii=False),
+                                    now_entry,
+                                ))
+                        elif action == "abort":
+                            affected = _rowcount(await conn.execute(
+                                "UPDATE missions SET state='cancelled', "
+                                "completed_at=now(), journal = journal || $2::jsonb, "
+                                "updated_at=now() WHERE id=$1 AND state IN "
+                                "('planning','executing','supervising','paused','escalated')",
+                                mission_id, now_entry,
+                            ))
+                        elif action == "pause":
+                            affected = _rowcount(await conn.execute(
+                                "UPDATE missions SET state='paused', "
+                                "journal = journal || $2::jsonb, updated_at=now() "
+                                "WHERE id=$1 AND state IN ('executing','supervising')",
+                                mission_id, now_entry,
+                            ))
+                        else:
+                            await ws.send_json({
+                                "type": "mission_control_result", "ok": False,
+                                "message": f"未知 action={action}",
+                            })
+                            continue
+                    finally:
+                        await conn.close()
+                    # approve 成功且无运行 runner(重启恢复场景) → 重新 spawn
+                    if action == "approve_fallback" and affected > 0:
+                        from private_agent.core.mission_runner import mission_tasks
+
+                        if mission_id not in mission_tasks:
+                            # 无内存 runner → 重新 spawn(经最近一次装配的 factory)
+                            _spawn_fn = _mission_spawn_factories.get(session_id)
+                            if _spawn_fn is not None:
+                                await _spawn_fn(mission_id)
+                    await ws.send_json({
+                        "type": "mission_control_result",
+                        "ok": affected > 0,
+                        "action": action,
+                        "mission_id": mission_id,
+                        "message": (
+                            f"已执行 {action}" if affected > 0
+                            else f"{action} 未生效(状态不匹配或不存在)"
+                        ),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    _logger.exception("mission_control failed")
+                    await ws.send_json({
+                        "type": "mission_control_result", "ok": False,
+                        "message": f"mission_control 异常: {e}",
+                    })
             elif msg_type == "resume":
                 # V1.5 项-5/项-4: resume 双语义, 按会话状态区分 ——
                 # 1) 会话运行中 paused=True → 流程级"继续"(解除挂起)
@@ -1580,6 +1684,7 @@ async def _handle_user_message(
                         "mission #%s spawn rejected (registry full / state)", mission_id
                     )
 
+            _mission_spawn_factories[session_id] = _mission_spawn
             tools = [
                 *tools,
                 *build_mission_tools(

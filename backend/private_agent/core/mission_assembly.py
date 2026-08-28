@@ -100,31 +100,24 @@ class MissionRegistry:
     async def acquire(self, timeout_sec: float = 30.0) -> bool:
         """获取一个 mission 并发名额; 超时返回 False(调用方拒绝创建)。
 
-        Python 3.10 兼容: 无 asyncio.timeout(3.11+), 用 wait_for 包装
-        (wait_for 在超时时 cancel 内部协程并抛 TimeoutError)。
+        轮询实现(0.2s): release 必须可在 task done_callback(同步上下文)中
+        调用 —— Condition.wait/notify 需要 async 上下文, 在"task 未被调度即被
+        取消"场景(协程体未执行, finally 不跑)无法保证释放; done_callback 是
+        task 终结的唯一可靠释放点(并发上限 2, 轮询成本可忽略)。
         """
-        async def _acquire_once() -> bool:
-            async with self._cond:
-                while self._count >= self._max:
-                    await self._cond.wait()
-                self._count += 1
-                return True
-
-        try:
-            return await asyncio.wait_for(_acquire_once(), timeout=timeout_sec)
-        except asyncio.TimeoutError:
-            return False
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout_sec
+        while self._count >= self._max:
+            if loop.time() > deadline:
+                return False
+            await asyncio.sleep(0.2)
+        self._count += 1
+        return True
 
     def release(self) -> None:
-        """释放名额(mission 终态; 幂等安全: count 不为负)。"""
+        """释放名额(mission 终态; 同步安全 —— 供 task done_callback 调用;
+        幂等: count 不为负)。"""
         self._count = max(0, self._count - 1)
-
-    def _notify(self) -> None:
-        """release 后唤醒等待者(测试与 D-1 内部使用)。"""
-
-    async def notify(self) -> None:
-        async with self._cond:
-            self._cond.notify_all()
 
     def running(self) -> int:
         return self._count

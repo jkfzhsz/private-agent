@@ -102,6 +102,7 @@ interface WSMessage {
   checkpoint_turn?: number;
   // 0.6.0 F1-3: Mission 长任务事件(schema 先行契约, D 批后端推送)
   mission_id?: number;
+  ok?: boolean;
   goal?: string;
   state?: string;
   detail?: string;
@@ -2316,6 +2317,13 @@ export default function App(): JSX.Element {
         }
         break;
       }
+      case "mission_control_result": {
+        // D-3(W10): 裁决结果反馈(成功/失败 Toast; 状态变化由 mission_* 事件刷新)
+        if (msg.ok) {
+          void notifyUser("任务裁决", String(msg.message ?? "已执行"));
+        }
+        break;
+      }
       case "mission_done": {
         if (msg.session_id && msg.session_id !== (realSessionIdRef.current ?? sessionIdRef.current)) {
           return;
@@ -3312,12 +3320,22 @@ export default function App(): JSX.Element {
         <MissionPanel
           missions={missions}
           onApproveFallback={(mid) => {
-            // D-3 接线点: 经 WS 发送 mission_control approve_fallback 请求
-            console.info("[mission] approve_fallback requested:", mid);
+            // D-3(W10): WS mission_control approve_fallback(预算+1 + 重启续跑)
+            sendWs({
+              type: "mission_control",
+              session_id: realSessionIdRef.current ?? sessionIdRef.current,
+              mission_id: mid,
+              action: "approve_fallback",
+            });
           }}
           onAbort={(mid) => {
-            // D-3 接线点: 经 WS 发送 mission_control abort 请求
-            console.info("[mission] abort requested:", mid);
+            // D-3(W10): WS mission_control abort
+            sendWs({
+              type: "mission_control",
+              session_id: realSessionIdRef.current ?? sessionIdRef.current,
+              mission_id: mid,
+              action: "abort",
+            });
           }}
           onClearFinished={() => {
             setMissions((prev) => {

@@ -120,15 +120,14 @@ def test_registry_acquire_times_out_when_full():
 
 
 def test_registry_release_wakes_waiter():
-    """release 唤醒等待者(排队语义: 不取消、不丢失)。"""
+    """release 后等待者获名额(轮询语义: 不取消、不丢失; done_callback 兼容)。"""
     async def _run() -> bool:
         reg = MissionRegistry(max_running=1)
         await reg.acquire(timeout_sec=0.1)
 
         async def _releaser():
             await asyncio.sleep(0.05)
-            reg.release()
-            await reg.notify()
+            reg.release()  # 同步(与 task done_callback 同一路径)
 
         task = asyncio.create_task(_releaser())
         got = await reg.acquire(timeout_sec=2)

@@ -171,7 +171,17 @@ class MissionRunner:
             compress_adapter=compress_adapter,
             tools=tools,
         )
+
+        def _on_task_done(t: asyncio.Task) -> None:
+            """task 终结唯一可靠释放点: 覆盖"协程体未执行即被取消"场景
+            (spawn 后立即 abort → asyncio.run 取消未调度 task → run() 的
+            finally 不会执行; done_callback 必然调用 —— D-3 修复的
+            registry 名额泄漏根因)。"""
+            mission_tasks.pop(mission_id, None)
+            mission_registry.release()
+
         task = asyncio.create_task(runner.run())
+        task.add_done_callback(_on_task_done)
         mission_tasks[mission_id] = task
         await cls._safe_push(event_sink, {
             "type": "mission_created",
@@ -252,9 +262,8 @@ class MissionRunner:
             logger.exception("mission run crashed: id=%s", self._mission_id)
             await self._fail(str(e))
         finally:
-            mission_tasks.pop(self._mission_id, None)
-            mission_registry.release()
-            await mission_registry.notify()
+            # 名额释放由 spawn 的 done_callback 统一负责(见 _on_task_done);
+            # 此处仅关闭连接。mission_tasks.pop 同样由 callback 负责。
             await conn.close()
 
     # ── 里程碑派发 ──────────────────────────────────────────────────────
@@ -456,7 +465,23 @@ class MissionRunner:
             "supervision",
             f"action={decision['action']} reason={decision['reason'][:150]}",
         )
-        if decision["action"] == "redelegate":
+        if decision["action"] in ("redelegate", "adjust_plan"):
+            # adjust_plan(D-3): 按 milestone_fix 修正 plan 中对应里程碑后重派
+            if decision["action"] == "adjust_plan":
+                fix = decision.get("milestone_fix") or {}
+                for item in plan:
+                    if isinstance(item, dict) and item.get("id") == fix["id"]:
+                        if fix.get("milestone"):
+                            item["milestone"] = fix["milestone"]
+                        if fix.get("prompt_template"):
+                            item["prompt_template"] = fix["prompt_template"]
+                        item["status"] = "pending"
+                        break
+                await conn.execute(
+                    "UPDATE missions SET plan=$2, updated_at=now() WHERE id=$1",
+                    self._mission_id,
+                    json.dumps(plan, ensure_ascii=False),
+                )
             # 降回 executing(允许后续 escalate 条件更新命中)并通知前端纠偏
             await conn.execute(
                 "UPDATE missions SET state='executing', updated_at=now() "
@@ -466,8 +491,9 @@ class MissionRunner:
             # W8: mission_report 状态汇报(上下文隔离, 前端状态卡片)
             await self._push_report(
                 conn,
-                f"里程碑 [{ms.get('id')}] 失败, 监督判定方向正确, 重派"
-                f"(改道 {reason})。判定: {decision['reason'][:120]}",
+                f"里程碑 [{ms.get('id')}] 失败, 监督判定"
+                f"{'计划已修正' if decision['action'] == 'adjust_plan' else '方向正确'}, "
+                f"重派(改道 {reason})。判定: {decision['reason'][:120]}",
             )
             return "retry"
         await self._escalate(
