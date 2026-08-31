@@ -185,6 +185,57 @@ def test_single_tool_failure_does_not_break_turn():
     assert event_types.count("final") >= 1
 
 
+def test_exec_plan_exception_isolated_not_breaking_turn(monkeypatch):
+    """_exec_plan 在 handler try/except 之外抛的异常 → 隔离成 ToolResult(error)。
+
+    2026-08-31(session-76 整轮崩溃): 原实现 gather 未传 return_exceptions,
+    装配标记解析这类"发生在 handler try/except 之外"的异常会让 gather 整体
+    抛出, 本轮其余已成功工具的成果全部丢弃、前端零回复。
+
+    本用例 monkeypatch 强制 `_parse_assembly_marker` 抛异常, 精确复现该路径,
+    验证: ① 异常降级为 error 而非冒泡; ② 并行兄弟工具不受牵连; ③ 轮次走完。
+    """
+    import private_agent.core.react_loop as rl
+
+    def _boom(output: str):
+        raise RuntimeError("marker parse blew up")
+
+    monkeypatch.setattr(rl, "_parse_assembly_marker", _boom)
+    _setup_schema()
+
+    def _mcp_browse_tool() -> ToolDef:
+        async def _handler(args: dict) -> ToolResult:
+            # mempalace 3.8.0 exec 风格返回: 顶层数组
+            return ToolResult(output=json.dumps([{"id": "evt_1"}]))
+
+        return ToolDef(
+            name="mcp_browse",
+            description="browse mcp tools",
+            parameters_schema={
+                "type": "object", "properties": {"text": {"type": "string"}},
+            },
+            handler=_handler,
+        )
+
+    tools = [_mcp_browse_tool(), _sleep_tool("t_good", 0.05)]
+    adapter = _MockAdapter(["mcp_browse", "t_good"])
+
+    events, _, state = _run(adapter, tools)
+
+    assert state == ReactLoopState.IDLE
+    results = _tool_results(events)
+    assert len(results) == 2
+    by_name = {r["payload"]["tool_name"]: r for r in results}
+    # ① 崩溃工具被隔离成 error, 而不是炸掉整轮
+    assert by_name["mcp_browse"]["payload"]["error"] is not None
+    assert "RuntimeError" in by_name["mcp_browse"]["payload"]["error"]
+    # ② 并行兄弟工具成果保留
+    assert by_name["t_good"]["payload"]["error"] is None
+    assert by_name["t_good"]["payload"]["output"] == "t_good:ok"
+    # ③ 轮次走完(final 事件产出)
+    assert [e["event_type"] for e in events].count("final") >= 1
+
+
 def test_concurrent_limit_all_complete():
     """信号量并发上限(默认 5)下, 5 个工具全部执行完成。"""
     _setup_schema()

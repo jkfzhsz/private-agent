@@ -1455,11 +1455,34 @@ class ReactLoop:
                 for p in serial_plans:
                     results_by_idx[p["idx"]] = await _exec_plan(p)
                 if parallel_plans:
+                    # 2026-08-31(session-76): 单个工具的异常不得炸掉整轮。
+                    # 原实现未传 return_exceptions, 任一 _exec_plan 抛异常 →
+                    # gather 整体抛出 → 本轮其他已成功工具的成果全部丢弃,
+                    # 前端零回复(用户连催两次无响应)。现改为逐项隔离: 异常
+                    # 项降级成 ToolResult(error=...) 交还给模型处理。
                     outcomes = await asyncio.gather(
-                        *(_exec_plan(p) for p in parallel_plans)
+                        *(_exec_plan(p) for p in parallel_plans),
+                        return_exceptions=True,
                     )
-                    for p, tr in zip(parallel_plans, outcomes):
-                        results_by_idx[p["idx"]] = tr
+                    for p, out in zip(parallel_plans, outcomes):
+                        if isinstance(out, BaseException):
+                            # CancelledError 不降级: 取消语义必须向上传播,
+                            # 否则 idle 超时/用户中断会被吞掉, 轮次继续跑。
+                            if isinstance(out, asyncio.CancelledError):
+                                raise out
+                            self._logger.exception(
+                                "tool %s raised, isolated to ToolResult(error)",
+                                p["tool_name"],
+                                exc_info=out,
+                            )
+                            out = ToolResult(
+                                output="",
+                                error=(
+                                    f"【程序异常】工具 {p['tool_name']} 执行失败: "
+                                    f"{type(out).__name__}: {out}。"
+                                ),
+                            )
+                        results_by_idx[p["idx"]] = out
 
                 # B-1(2026-08-15 compress_now 工具): 模型调用 compress_now →
                 # 置本轮压缩请求标记(本轮结束 _maybe_compress 以
