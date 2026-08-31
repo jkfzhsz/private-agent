@@ -54,8 +54,14 @@ def _load_mcp_cfg() -> dict:
 
 
 async def _mcp_server_list_handler(args: dict) -> ToolResult:
-    """列出所有 MCP server 配置(只读, 不泄 token 明文)。"""
-    mcp_cfg = _load_mcp_cfg()
+    """列出所有 MCP server 配置(只读, 不泄 token 明文)。
+
+    2026-08-31: 改用 `_wrap_merged_mcp_cfg()`(config.yaml + config_runtime
+    合并)。MCP server 实际存 config_runtime(设置页动态管理), config.yaml 的
+    servers 恒为空数组 —— 原实现只读 yaml, 导致本工具**恒报 0 个 server**,
+    与 `mcp_browse`(读合并配置)口径打架, 并误导智能体判断 MCP 现状。
+    """
+    mcp_cfg = await _wrap_merged_mcp_cfg()
     servers = mcp_cfg.get("servers", [])
     lines: list[str] = []
     for s in servers:
@@ -108,8 +114,11 @@ async def _mcp_server_add_handler(args: dict) -> ToolResult:
         if not str(args.get(field) or "").strip():
             return ToolResult(output="", error=f"type={stype} 需提供 {field}")
 
-    # 读取现有配置
-    mcp_cfg = _load_mcp_cfg()
+    # 读取现有配置做重复 id 检测。
+    # 2026-08-31: 同 `_mcp_server_list_handler` —— 必须读合并配置。原实现
+    # 只读恒为空的 config.yaml, 导致 config_runtime 中已存在的 server 检测
+    # 不到, **重复 id 校验形同虚设**(可构造出与现有 server 同名的条目)。
+    mcp_cfg = await _wrap_merged_mcp_cfg()
     servers = list(mcp_cfg.get("servers", []))
     for s in servers:
         if (s.get("id") or s.get("name")) == sid:
