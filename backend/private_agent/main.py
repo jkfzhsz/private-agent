@@ -2138,7 +2138,13 @@ async def _on_startup() -> None:
                     cleanup_missions_on_startup,
                 )
 
-                _n_missions = await cleanup_missions_on_startup(conn, cfg)
+                # 2026-08-31: 原实现直接复用上方 `async with` 块遗留的 conn ——
+                # 该块结束时连接已归还池, 再 execute 必抛 asyncpg InterfaceError
+                # "connection has been released back to the pool", 每次启动必报,
+                # mission 重启恢复实际静默失效。此处自行 acquire, 与同函数内
+                # 其余 DB 操作(KM 自检/僵尸子代理清理)写法保持一致。
+                async with db._pool.acquire() as conn:
+                    _n_missions = await cleanup_missions_on_startup(conn, cfg)
                 if _n_missions > 0:
                     _logger.info(
                         "startup: %d interrupted mission(s) -> escalated",
