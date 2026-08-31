@@ -73,6 +73,15 @@ def _parse_assembly_marker(output: str) -> dict | None:
         data = json.loads(output)
     except Exception:  # noqa: BLE001
         return None
+    # 2026-08-31(session-76 整轮崩溃修复): json.loads 只保证"是合法 JSON",
+    # 不保证"是 dict"。mcp_browse action=exec 的 output 由被调用的 MCP
+    # server 决定(mempalace 3.8.0 的 event_list/find_tunnels/search 等常
+    # 返回数组) → 解析出 list/str/int/float/bool/null 时, 下一行 .get()
+    # 抛 AttributeError; 且该行原在 try 块之外 except 兜不住, 异常沿
+    # asyncio.gather 冒泡炸掉整轮, 用户侧表现为"连催两次零输出"。
+    # list=纯文本索引(loads 失败)、assemble/remove=dict 均安全, 唯 exec 不可控。
+    if not isinstance(data, dict):
+        return None
     marker = data.get("__mcp_assembly")
     return marker if isinstance(marker, dict) else None
 
