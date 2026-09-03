@@ -54,6 +54,23 @@ class TestCodeExecutionToolDef:
         assert isinstance(CODE_EXECUTION_TOOL.description, str)
         assert len(CODE_EXECUTION_TOOL.description) > 0
 
+    def test_description_forbids_full_tree_glob(self) -> None:
+        """回归防护: 工具描述必须写死"禁止全树递归 glob"并给出 O(1) 替代方案。
+
+        背景(2026-09-03, session-76): 模型为查 mempalace 版本生成了
+        "4 个基目录 x 4 个模式" 的 glob(..., recursive=True), 其中一个基目录是
+        os.path.expanduser("~") = C:\\Users\\zongxin (548,728 条目)。
+        实测暖缓存 137.55s, 叠加内存颠簸下的冷缓存惩罚后越过 300s 超时。
+        约束只有写进 tool schema 才能真正纠正代码生成策略(修复方案 A)。
+        """
+        desc = CODE_EXECUTION_TOOL.description
+        # 1) 必须点名禁止 recursive glob 这类全树遍历
+        assert "recursive=True" in desc
+        # 2) 必须给出取包版本的 O(1) 正解, 替代 "glob 找 METADATA/PKG-INFO"
+        assert "importlib.metadata" in desc
+        # 3) 必须点名禁止以用户主目录/~ 作为遍历起点(本次耗时 98.7% 的来源)
+        assert "~" in desc
+
     def test_tool_def_parameters_schema(self) -> None:
         schema = CODE_EXECUTION_TOOL.parameters_schema
         assert schema["type"] == "object"

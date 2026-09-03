@@ -97,6 +97,22 @@ CODE_EXECUTION_TOOL = ToolDef(
         "user-provided Python scripts safely. "
         "Windows 提示: 调用外部命令(docker/ps 等)时输出可能是 GBK 中文, "
         "subprocess 请用 encoding='gbk' 或 errors='replace', 避免解码崩溃。"
+        # 2026-09-03(修复方案 A, 源自 session-76 超时事故): 约束写进 tool schema
+        # 才能从源头纠正代码生成策略。事故代码为查包版本做了
+        # "4 基目录 x 4 模式" 的 glob(..., recursive=True), 其中基目录含
+        # os.path.expanduser("~") = C:\Users\zongxin (548,728 条目) —— 实测
+        # 暖缓存 137.55s(占全部耗时 98.7%), 叠加冷缓存惩罚后越过 300s 超时。
+        "【文件系统硬约束 · 必须遵守】禁止对大目录做全树递归遍历: "
+        "glob.glob(..., recursive=True) / Path.rglob / os.walk 的起点必须是"
+        "明确的窄范围子目录(预计条目数 < 1 万); 严禁以用户主目录 ~ "
+        "(如 C:\\Users\\<name>)、盘符根或项目根作为起点 —— 单次遍历可达"
+        "数十万条目、耗时 100s 以上, 必然触发本工具的 300s 超时。"
+        "查已安装包的版本或元数据, 一律用 importlib.metadata.version(\"pkg\") "
+        "或 importlib.metadata.metadata(\"pkg\")(O(1), 直读 dist-info), "
+        "禁止用 glob 搜索 METADATA / PKG-INFO / version.py 的方式找包。"
+        "定位文件优先用已知精确路径 + os.path.exists 校验; 确需搜索时只做"
+        "一次浅层匹配(glob 不带 recursive=True, 或 os.scandir 限定深度), "
+        "且命中后立即 break 早退, 不做多余遍历。"
     ),
     parameters_schema={
         "type": "object",
