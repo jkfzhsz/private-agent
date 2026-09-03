@@ -11,7 +11,11 @@ from private_agent.errors import SandboxTimeoutError
 from private_agent.sandbox.executor import SandboxExecutor
 from private_agent.sandbox.resource_limiter import ResourceLimiter, disable_network
 from private_agent.sandbox.result import CodeWarning, SandboxResult
-from private_agent.sandbox.security import CodeScanner, EnvSanitizer
+from private_agent.sandbox.security import (
+    TRAVERSAL_BLOCKED_MESSAGE,
+    CodeScanner,
+    EnvSanitizer,
+)
 from private_agent.sandbox.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -138,6 +142,22 @@ class SandboxService:
 
         # 3. 代码预扫描(告警不阻断)
         warnings = self._code_scanner.scan(code, language) if self._code_scanner else []
+
+        # 3.1 阻断级预检(2026-09-03 方案 B): 以 ~ / 盘符根 / 项目根为起点的
+        #     全树递归遍历 → **执行前**拒绝。scan() 的告警只在事后拼进 output,
+        #     来不及阻止; session-76 这类代码要干等满 300s 才超时。
+        if self._code_scanner:
+            violation = self._code_scanner.find_blocking_violation(code, language)
+            if violation:
+                return SandboxResult(
+                    stdout="",
+                    stderr=TRAVERSAL_BLOCKED_MESSAGE.format(
+                        line=violation.line, snippet=violation.snippet
+                    ),
+                    exit_code=-1,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    warnings=[*warnings, violation],
+                )
 
         # 4. 环境变量脱敏 + 网络隔离(阶段二批次 3: 接线 disable_network;
         #    默认禁网, config limits.network_enabled=true 或 工具显式

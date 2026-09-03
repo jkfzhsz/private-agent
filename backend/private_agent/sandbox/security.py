@@ -6,6 +6,22 @@ from pathlib import Path
 
 from private_agent.sandbox.result import CodeWarning
 
+# 阻断提示(面向模型, 必须给出可操作的替代方案, 而不只是报错)。
+# 2026-09-03 方案 B: 配套 `CodeScanner.find_blocking_violation()` 使用。
+TRAVERSAL_BLOCKED_MESSAGE = (
+    "【执行前拦截】检测到以超大目录为起点的全树递归遍历, 已拒绝执行"
+    "(第 {line} 行: {snippet})。\n"
+    "原因: 这类遍历单次可达数十万条目(实测 C:\\Users\\<name> 548,728 项 / "
+    "暖缓存 12.5s、冷缓存 ≈56s); 4 基目录 x 4 模式即 137.55s, 叠加冷缓存惩罚"
+    "必然越过本工具 300s 超时 —— 结果是干等 5 分钟零输出。\n"
+    "替代方案:\n"
+    "1. 查已安装包的版本/元数据 → importlib.metadata.version(\"pkg\")"
+    "(O(1), 实测 0.001~0.01s)\n"
+    "2. 定位文件 → 先用已知精确路径 + os.path.exists 校验\n"
+    "3. 确需遍历 → 起点收窄到明确的小目录(预计条目 < 1 万), 或用 os.scandir "
+    "限定深度, 命中即 break"
+)
+
 
 class CodeScanner:
     """危险代码预扫描器(蓝图 §6.8 / spec m2-sandbox AC-5)。
@@ -37,6 +53,26 @@ class CodeScanner:
         r"globalThis\.fetch\s*\(",
     ]
 
+    # 2026-09-03(修复方案 B, 源自 session-76 超时事故): 阻断级规则 ——
+    # 「以超大目录为起点的全树递归遍历」。与 DEFAULT_DANGEROUS_PATTERNS
+    # (只告警、不阻断)不同, 这一类必须**执行前**拦截: 单次遍历
+    # C:\Users\zongxin 实测 548,728 条目 / 暖缓存 12.5s、冷缓存 ≈56s;
+    # 事故代码 4 基目录 x 4 模式 = 137.55s, 叠加冷缓存惩罚即越过 300s
+    # 墙钟超时, 用户干等 5.5 分钟零输出。干等的代价 >> 误拦一次。
+    RECURSIVE_MARKERS: list[str] = [
+        r"recursive\s*=\s*True",   # glob.glob(..., recursive=True)
+        r"os\.walk\s*\(",
+        r"\.rglob\s*\(",
+    ]
+    # 超大目录起点(盘符根 / POSIX 根 / 用户主目录 / HOME 系环境变量)
+    HUGE_ROOT_MARKERS: list[str] = [
+        r"expanduser\(\s*['\"]~['\"]\s*\)",
+        r"Path\.home\s*\(",
+        r"environ(?:\.get)?\s*[\[(]\s*['\"](?:HOME|USERPROFILE)['\"]",
+        r"['\"][A-Za-z]:[\\/]+['\"]",
+        r"['\"]/['\"]",
+    ]
+
     def __init__(self, patterns: list[str] | None = None) -> None:
         self._patterns = patterns or list(self.DEFAULT_DANGEROUS_PATTERNS)
 
@@ -64,6 +100,38 @@ class CodeScanner:
                     snippet=match.group(),
                 ))
         return warnings
+
+    def find_blocking_violation(
+        self, code: str, language: str = "python"
+    ) -> CodeWarning | None:
+        """阻断级预检: 全树递归遍历以超大目录为起点。
+
+        与 `scan()` 的区别: `scan()` 只告警(记录到 react_events.warnings、
+        事后拼进 output), 而本方法的结果由 SandboxService 用于**执行前拒绝**。
+
+        Args:
+            code: 用户提交的代码文本。
+            language: 语言标识; 仅 python 生效(JS 遍历语义不同, 避免误伤)。
+
+        Returns:
+            命中的违规项(含行号与命中片段); 无风险则返回 None。
+        """
+        if language != "python":
+            return None
+        # 两个条件同时成立才拦: 有递归遍历写法 + 起点是超大目录。
+        # 只命中其一属合法用法(如窄目录 glob / 读主目录下的单个配置文件)。
+        if not any(re.search(p, code) for p in self.RECURSIVE_MARKERS):
+            return None
+        for pattern in self.HUGE_ROOT_MARKERS:
+            match = re.search(pattern, code)
+            if match:
+                line = code[: match.start()].count("\n") + 1
+                return CodeWarning(
+                    pattern=pattern,
+                    line=line,
+                    snippet=match.group(),
+                )
+        return None
 
 
 class EnvSanitizer:
