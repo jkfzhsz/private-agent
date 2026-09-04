@@ -26,12 +26,30 @@ def _embedding_mock_env(monkeypatch):
     monkeypatch.setenv("PA_EMBEDDING_MOCK", "1")
 
 
+@pytest.fixture(scope="session")
+def _pa_appdata_dir(tmp_path_factory):
+    """session 级隔离 APPDATA 根目录(整个回归只建 1 个)。
+
+    2026-09-03(全量回归随机失败根因): 原实现在 function 级 fixture 里
+    tmp_path_factory.mktemp("pa-appdata") → 每个测试新建 1 个目录(全量
+    1908 个), pytest 只保留最近 3 个故滚动删除; 单个目录回收时若含数百
+    文件(PA 写入的 backend.env / master key / 用户数据) 即超过 WorkBuddy
+    safe-delete shim 的 50 文件阈值 → 被拒并抛 SystemExit: 1 → 后续用例
+    连锁失败(实测一次毁掉 97 个), 且打断收尾输出。改为 session 级共享
+    1 个目录后, 滚动删除不复存在, 该故障模式根除。
+    """
+    return tmp_path_factory.mktemp("pa-appdata")
+
+
 @pytest.fixture(autouse=True)
-def _isolate_appdata(monkeypatch, tmp_path_factory):
+def _isolate_appdata(monkeypatch, _pa_appdata_dir):
     """APPDATA 指向 session 级临时目录: 用户配置写文件类操作(backend.env /
-    master key)不污染真实用户目录。APPDATA 跨测试稳定 → master key 继承稳定。"""
-    appdata = tmp_path_factory.mktemp("pa-appdata")
-    monkeypatch.setenv("APPDATA", str(appdata))
+    master key)不污染真实用户目录。APPDATA 跨测试稳定 → master key 继承稳定。
+
+    注: 目录本身 session 级共享(见 _pa_appdata_dir), monkeypatch 仍为
+    function 级, 保证每个测试结束后环境变量自动恢复。
+    """
+    monkeypatch.setenv("APPDATA", str(_pa_appdata_dir))
 
 
 @pytest.fixture(autouse=True)
