@@ -1570,7 +1570,10 @@ export default function App(): JSX.Element {
         // 注入一条系统消息触发无涯立即执行 apply_optim(副作用: 对话流多一条
         // 【系统】消息, 透明可审计)。
         sendWs({
-          type: "user",
+          // 2026-08-28(修复): type 必须是 user_message(后端 WS 唯一识别的
+          // 用户消息类型); 原 type:"user" 无对应分支被静默丢弃, 导致审批后
+          // 无涯收不到通知、不自动执行(2026-08-18 机制从未生效)。
+          type: "user_message",
           session_id: realSessionId ?? sessionId,
           content:
             status === "approved"

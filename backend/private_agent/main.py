@@ -1248,6 +1248,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     "confirmation_id": confirmation_id,
                     "message": "已挂起, 可稍后决定(期间仍可同意/拒绝)",
                 })
+            else:
+                # 2026-08-28: 未知消息类型不再静默丢弃(曾致审批注入消息
+                # type="user" 被忽略、无涯收不到批准通知不自动执行), 记日志便于诊断。
+                _logger.warning(
+                    "ws: unknown message type=%r (session=%s), ignored",
+                    msg_type, session_id,
+                )
     except WebSocketDisconnect:
         # 0.5.0 P1: 释放 ws_conns 计数
         if collector is not None:
