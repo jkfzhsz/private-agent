@@ -90,3 +90,6 @@ backend/backend/
 tools/codegraph/
 # 根目录沙箱产物
 /.sandbox/
+
+# 改动前自动备份产物(2026-09-07 C5: 一次性历史遗留已清理, 防再生)
+*.bak-*
