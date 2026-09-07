@@ -170,3 +170,53 @@ def test_pytest_run_focused_file():
     assert result is not None
     if result.error is None:
         assert "通过" in result.output
+
+
+# ── 2026-09-07 F1/F5: 超时参数探测降级 + 选择器前置校验 ──────────────────
+
+
+def test_has_pytest_timeout_detects_real_venv():
+    """F1: 真实 backend venv 已装 pytest-timeout → 探测为 True。"""
+    from private_agent.tools.builtins.pytest_run import _has_pytest_timeout
+
+    backend_dir = os.path.abspath(".")
+    assert (Path(backend_dir) / ".venv").is_dir()
+    assert _has_pytest_timeout(backend_dir) is True
+
+
+def test_has_pytest_timeout_false_when_venv_missing():
+    """F1: 无 .venv 的目录 → False(降级省略 --timeout 参数)。"""
+    from private_agent.tools.builtins.pytest_run import _has_pytest_timeout
+
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _has_pytest_timeout(tmp) is False
+
+
+def test_pytest_run_rejects_hallucinated_selector():
+    """F5: 不存在的测试路径前置拦截(不执行 pytest), 错误含引导语。"""
+    backend_dir = os.path.abspath(".")
+
+    async def _run():
+        return await _pytest_run_handler({
+            "workspace": str(Path(backend_dir).parent),
+            "tests": "tests/test_not_exist_hallucinated.py",
+            "timeout": 60,
+        })
+
+    result = asyncio.run(_run())
+    assert result.error is not None
+    assert "测试路径不存在" in result.error
+    assert "file_read" in result.error
+
+
+def test_pytest_run_selector_validation_with_nodeid():
+    """F5: nodeid 语法(tests/x.py::test_y)按文件部分校验。"""
+    from private_agent.tools.builtins.pytest_run import _missing_selectors
+
+    backend_dir = os.path.abspath(".")
+    assert _missing_selectors(
+        backend_dir, ["tests/test_git_tools.py::test_pytest_run_tool_safety"]
+    ) == []
+    assert _missing_selectors(
+        backend_dir, ["tests/nope.py::test_x"]
+    ) == ["tests/nope.py"]

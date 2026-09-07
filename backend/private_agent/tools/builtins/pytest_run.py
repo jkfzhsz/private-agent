@@ -34,6 +34,45 @@ _MAX_OUTPUT_CHARS = 4000 * 4
 _DEFAULT_TIMEOUT = 180
 
 
+def _has_pytest_timeout(backend_dir: str) -> bool:
+    """探测目标 venv 是否安装 pytest-timeout(2026-09-07 F1)。
+
+    背景: --timeout 参数此前硬编码, 但 venv 未装 pytest-timeout 时
+    pytest 直接 exit=4 "unrecognized arguments" —— 工具 100% 必败
+    (生产 65% 失败率的主因)。用文件系统探测(不启动 python, 冷启动
+    ~16s 不可接受)。
+    """
+    sp = Path(backend_dir) / ".venv" / "Lib" / "site-packages"
+    if not sp.is_dir():
+        return False
+    for child in sp.iterdir():
+        name = child.name.lower()
+        if name.startswith("pytest_timeout") or name.startswith("pytest-timeout"):
+            return True
+    return False
+
+
+def _missing_selectors(backend_dir: str, selectors: list[str]) -> list[str]:
+    """前置校验测试选择器路径存在性(2026-09-07 F5)。
+
+    背景: 无涯幻觉不存在的测试文件(如 tests/test_system_metrics.py)
+    → pytest exit=4 "file or directory not found" 整批作废。在调用前
+    拦截并给出可读错误, 引导先 file_read/目录确认。
+    """
+    missing: list[str] = []
+    for sel in selectors:
+        path_part = sel.split("::")[0].strip()
+        if not path_part:
+            continue
+        # nodeid 目录参数或 -k 表达式等非路径形式不校验
+        if path_part.startswith("-") or "=" in path_part:
+            continue
+        if not (Path(backend_dir) / path_part).exists():
+            missing.append(path_part)
+    return missing
+
+
+
 def resolve_backend_dir(workspace: str) -> str | None:
     """从会话工作区解析 PA 后端源码树路径。
 
@@ -72,8 +111,12 @@ async def _pytest_run_handler(args: dict) -> ToolResult:
     cmd = [
         ".venv/Scripts/python.exe", "-m", "pytest",
         "-q", "-p", "no:cacheprovider",
-        "--timeout=180", "--timeout-method=thread",
     ]
+    # 2026-09-07(F1): --timeout 参数按 venv 实际安装情况注入 ——
+    # 未装 pytest-timeout 时硬编码该参数会让 pytest exit=4 必败
+    # (生产 pytest_run 65% 失败率的主因)。
+    if _has_pytest_timeout(backend_dir):
+        cmd += ["--timeout=180", "--timeout-method=thread"]
     if tests:
         # 2026-08-16(阶段2 实测反馈): 支持空格分隔的多个选择器 ——
         # 无涯一次传 'tests/a.py tests/b.py' 时原实现拼成单个字符串参数
@@ -83,6 +126,17 @@ async def _pytest_run_handler(args: dict) -> ToolResult:
         selectors = shlex.split(tests)
         if not selectors:
             return ToolResult(output="", error="tests 参数无效(空)")
+        # 2026-09-07(F5): 选择器路径前置校验 —— 拦截幻觉文件名
+        missing = _missing_selectors(backend_dir, selectors)
+        if missing:
+            return ToolResult(
+                output="",
+                error=(
+                    "测试路径不存在(未执行): " + ", ".join(missing)
+                    + "。请先用 file_read/ws_list 确认真实测试文件名后重试"
+                    "(勿凭记忆猜测文件名)。"
+                ),
+            )
         cmd.extend(selectors)
     else:
         # 全量: 忽略 eval_full_cycle(依赖真实 LLM 链路, 不在开发闭环内)
@@ -144,7 +198,12 @@ PYTEST_RUN_TOOL = ToolDef(
     name="pytest_run",
     description=(
         "在 PA 后端源码树运行 pytest 测试(开发沙箱)。用于验证代码改动无回归。"
-        "tests 可限定单文件/用例(推荐, 快); 空=全量(忽略 eval_full_cycle, 慢)。"
+        "tests 可限定单文件/用例(推荐, 快); 空=全量(忽略 eval_full_cycle)。\n"
+        "使用纪律(2026-09-07 强化):\n"
+        "① 禁止全量跑 —— 本机全量约 21 分钟, 必然超时被杀; 单文件通常 <60s;\n"
+        "② 勿凭记忆猜测试文件名 —— 不确定时先 file_read/ws_list 确认"
+        "(不存在的路径会被前置拦截);\n"
+        "③ 超时(timeout)按预估上调, 默认 180s 仅够单文件。\n"
         "自动加载后端环境(WORKSPACE=backend + 测试库), 只读安全。"
     ),
     parameters_schema={
