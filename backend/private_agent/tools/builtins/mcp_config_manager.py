@@ -127,6 +127,9 @@ async def _mcp_server_add_handler(args: dict) -> ToolResult:
     entry: dict = {
         "id": sid,
         "type": stype,
+        "enabled": True,
+        "timeout_sec": 30.0,
+        "protocol_version": "auto",
     }
     if stype == "stdio":
         entry["command"] = str(args.get("command") or "").strip()
@@ -143,8 +146,19 @@ async def _mcp_server_add_handler(args: dict) -> ToolResult:
 
     env_token = str(args.get("env_token") or "").strip()
     if env_token:
-        # 复用 config_runtime 加密通道(admin 同源)
-        entry["auth_token_encrypted"] = env_token  # 占位, 落库时加密
+        # 复用 admin 同源加密通道(AES-256-GCM, master key 双钥匙纪律)
+        try:
+            from private_agent.api.admin import _ensure_master_key
+            from private_agent.config import secrets
+
+            entry["auth_token_encrypted"] = secrets.encrypt_api_key(
+                env_token, _ensure_master_key()
+            )
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(
+                output="",
+                error=f"token 加密失败(未落库): {type(e).__name__}: {e}",
+            )
     tags = args.get("tags")
     if tags:
         if isinstance(tags, str):
@@ -152,16 +166,36 @@ async def _mcp_server_add_handler(args: dict) -> ToolResult:
         elif isinstance(tags, list):
             entry["tags"] = [str(t) for t in tags]
 
-    # 写回 config.yaml(通过 config_runtime 持久化? 此处直接写 yaml 需谨慎)
-    # 2026-08-16 阶段4: 复用 admin 的 config_runtime 通道 —— 通过 admin API
-    # 语义: MCP server 配置在 config.yaml, 新增需写回 yaml + 运行时热加载。
-    # 为安全与可回滚, 此处仅返回待写入条目, 由 apply_optim 或用户手动落库。
+    # 2026-09-07(F2): 真实落库 config_runtime(与设置页 POST /settings/mcp
+    # 同源 _write_servers_runtime 通道, 同名覆盖) —— 此前仅返回"待写入
+    # 条目"是死端(工具自认"由 apply_optim 或用户手动落库"), 且指引错写
+    # config.yaml(实际配置在 config_runtime), 无涯被迫走 code_execution
+    # 手工路径 → 安装 MCP 工作流断裂的根因。
+    # 生效方式: MCPManager 按 server id 惰性连接(mcp_tools L135-166),
+    # mcp_browse exec 每次读合并配置 → 新 server 即刻可 exec 验证;
+    # 新会话装配亦即时可见, 无需重启。
+    try:
+        from private_agent.config import loader as cfg_loader
+        from private_agent.storage import db
+
+        conn = await db.connect(cfg_loader.load_config())
+        try:
+            from private_agent.api.admin import _write_servers_runtime
+
+            await _write_servers_runtime(conn, [entry])
+        finally:
+            await conn.close()
+    except Exception as e:  # noqa: BLE001
+        return ToolResult(
+            output="",
+            error=f"落库失败(config_runtime): {type(e).__name__}: {e}",
+        )
     return ToolResult(
         output=(
-            f"MCP server {sid} 配置已构造(待落库):\n"
+            f"MCP server {sid} 已写入 config_runtime 并启用 ✅\n"
             + json.dumps(entry, ensure_ascii=False, indent=1)
-            + "\n\n安全提示: 新增 MCP server 是核心改动, 建议先向用户说明"
-              "该 server 的用途/数据流向, 经确认后写入 config.yaml 并重启生效。"
+            + "\n\n生效说明: 即刻可经 mcp_browse(action=exec) 调用验证; "
+              "建议先 exec 一个只读工具确认连通性, 再 assemble 装配进会话。"
         )
     )
 
@@ -185,8 +219,9 @@ MCP_SERVER_LIST_TOOL = ToolDef(
 MCP_SERVER_ADD_TOOL = ToolDef(
     name="mcp_server_add",
     description=(
-        "构造新的 MCP server 配置(stdio/sse/http), 供接入评估后落库。"
-        "会触发权限确认。新增 MCP 属核心改动, 应说明用途后经确认。"
+        "新增 MCP server(stdio/sse/http)并落库 config_runtime(与设置页同源), "
+        "即刻可经 mcp_browse exec 验证连通性。会触发权限确认。"
+        "新增 MCP 属核心改动, 应先向用户说明该 server 的用途/数据流向。"
     ),
     parameters_schema={
         "type": "object",
