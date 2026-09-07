@@ -185,7 +185,10 @@ GIT_COMMIT_TOOL = ToolDef(
     name="git_commit",
     description=(
         "提交 PA 源码改动(git add + commit, 本地提交不推送)。"
-        "会触发权限确认。提交信息必填; 禁止 force/amend/push。"
+        "会触发权限确认。提交信息必填; 禁止 force/amend/push。\n"
+        "善后纪律(2026-09-07 F3): 确认被拒绝或 60s 超时 → 不得反复重试;\n"
+        "改为向用户输出建议的 commit message(含路径清单)交人工执行,\n"
+        "然后继续工作流其余步骤(提交只是收尾, 不阻断诊断/验证/汇报)。"
     ),
     parameters_schema={
         "type": "object",

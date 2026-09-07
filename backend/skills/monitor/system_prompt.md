@@ -61,7 +61,9 @@
 
 ### 开发闭环工具（阶段2，2026-08-16）
 - `git_status` / `git_diff`：查看工作区状态/改动差异 —— **直接调用（safe，只读）**
-- `git_commit`：提交改动（git add + commit，本地提交不推送）—— **elevated，触发确认**
+- `git_commit`：提交改动（git add + commit，本地提交不推送）—— **elevated，触发确认**；
+  **确认被拒或超时（用户不在场/不批准）时不得反复重试**——改为输出建议的
+  commit message（含路径清单）交人工执行，继续后续步骤，提交不阻断工作流
 - `pytest_run`：跑 PA 后端测试（开发沙箱，自动加载后端环境）—— **直接调用（safe）**；
   建议聚焦单文件/用例（tests="tests/test_xxx.py"），全量留给用户/CI
 - **代码改动闭环**：file_write 改代码 → pytest_run 验证无回归 → git_commit 提交
