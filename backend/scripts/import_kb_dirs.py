@@ -1,14 +1,17 @@
-"""子瞻(office)知识库批量导入 —— 记忆宫殿三库 → PA 原生 KB(PostgreSQL)。
+"""场景知识库批量导入 —— 记忆宫殿六库 → PA 原生 KB(PostgreSQL)。
 
 来源(2026-08-09 蒋先生指定, 均为 Karpathy wiki 形态 md 编译产物):
-- D:/wiki-knowledge      商业银行公司金融/公司信贷(wiki/*.md, 18 篇)
-- D:/finance-five-articles  金融五篇大文章 + 中央金融工作(wiki/*.md, 10 篇)
-- D:/icbc-wiki          工商银行(wiki/*.md, 9 篇)
+- D:/wiki-knowledge      商业银行公司金融/公司信贷(wiki/*.md, 18 篇) → office
+- D:/finance-five-articles  金融五篇大文章 + 中央金融工作(wiki/*.md, 10 篇) → office
+- D:/icbc-wiki          工商银行(wiki/*.md, 9 篇) → office
+- D:/family-wealth-wiki 家庭财富管理(wiki/*.md) → data_analysis
+- D:/securities-investing-wiki 证券投资(wiki/*.md) → data_analysis
+- D:/health-wiki        生活健康(wiki/*.md, 12 篇) → frontend_design(2026-09-07 新增)
 
 目标:
-- scenario=office(子瞻), 技能 knowledge_base 已启用 auto_retrieve=true
-  → 灌入后子瞻会话自动检索 + search_knowledge 可查。
-- 增量导入: 不 --reset; 按 filename+scenario 查重, 已存在跳过。
+- 各场景技能 knowledge_base 已启用 auto_retrieve=true
+  → 灌入后场景会话自动检索 + search_knowledge 可查。
+- 增量导入: 不 --reset; 按 filename+scenario 查重(hash 相同跳过)。
 
 用法: cd backend && python scripts/import_kb_dirs.py
 """
@@ -32,6 +35,9 @@ SOURCES: list[dict] = [
     # 2026-08-09 19:40: 白圭(data_analysis)两库 —— 记忆宫殿新增
     {"dir": "D:/family-wealth-wiki", "scenario": "data_analysis", "prefix": "family-wealth-wiki"},
     {"dir": "D:/securities-investing-wiki", "scenario": "data_analysis", "prefix": "securities-investing-wiki"},
+    # 2026-09-07(自检 B1): 清和(frontend_design)健康知识库 —— 08-12 建成未挂载,
+    # 补齐清和健康建议的检索能力(此前仅 3 篇 PG KB, 靠模型通识)
+    {"dir": "D:/health-wiki", "scenario": "frontend_design", "prefix": "health-wiki"},
 ]
 
 
