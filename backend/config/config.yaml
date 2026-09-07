@@ -9,7 +9,9 @@
 # ------------------------------------------------------------------------------
 system:
   app_name: "Private Agent"
-  version: "0.1.0"
+  # 单一版本源(2026-09-07 S6): 全项目以此为准, frontend/package.json
+  # 须保持一致 —— 由 tests/test_version_consistency.py 守护, 漂移即红。
+  version: "0.6.0"
   workspace_root: "${PA_USER_DATA}"         # 工作区根目录(打包版=userData, 程序/用户数据分离)
   sidecar:
     memory_limit_mb: 1536                  # Python Sidecar 内存上限 [runtime]
@@ -278,7 +280,7 @@ tools:
       # 0.5.0 M1: 记忆按需检索(全局其他内容/归档召回)无条件注入
       - "memory_search"
   web_search:
-    backend: "duckduckgo"  # duckduckgo(国际,无 key) | bocha(已停用) | bing(HTML 解析, 当前默认 .env)
+    backend: "duckduckgo"  # 当前默认 duckduckgo(国际,无 key); 可选 bing(HTML 解析) | bocha(已停用)
     # 外部服务统一从前端接入(MCP), 专用搜索 API(如 bocha)不再后端配置
   permission:
     cache_ttl_sec: 3600  # [runtime]

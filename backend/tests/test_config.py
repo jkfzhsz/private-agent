@@ -24,9 +24,13 @@ def test_config_system_app_name():
 
 
 def test_config_system_version():
-    """system.version == '0.1.0'(蓝图 §9.13)。"""
+    """system.version == '0.6.0'(2026-09-07 S6: 单一版本源, 蓝图 §9.13)。
+
+    版本变更时同步更新本断言与 frontend/package.json
+    (一致性由 test_version_consistency.py 守护)。
+    """
     cfg = loader.load_config()
-    assert cfg["system"]["version"] == "0.1.0"
+    assert cfg["system"]["version"] == "0.6.0"
 
 
 def test_mcp_protocol_version_is_2026_07_28():
