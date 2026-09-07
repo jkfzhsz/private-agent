@@ -91,6 +91,47 @@ class TestEnvSanitizer:
         assert result["USER"] == "tester"
         assert result["LANG"] == "en_US"
 
+    # ── 2026-09-07 S7(自检 P2-#9): 解释器注入类变量阻断 ─────────────────
+
+    def test_sanitize_blocks_pythonpath(self) -> None:
+        """S7: PYTHONPATH 不透传(sitecustomize 注入沙箱的缺口)。"""
+        sanitizer = EnvSanitizer()
+        env = {"PYTHONPATH": "D:/evil/shim", "PATH": "/usr/bin"}
+        result = sanitizer.sanitize(env)
+        assert "PYTHONPATH" not in result
+        assert result["PATH"] == "/usr/bin"
+
+    def test_sanitize_blocks_all_injection_vars(self) -> None:
+        """S7: 全部注入类变量精确名阻断(大小写不敏感)。"""
+        sanitizer = EnvSanitizer()
+        env = {
+            "PYTHONPATH": "x", "PYTHONSTARTUP": "x", "PYTHONHOME": "x",
+            "PYTHONINSPECT": "1", "NODE_OPTIONS": "--require evil",
+            "LD_PRELOAD": "x", "LD_LIBRARY_PATH": "x",
+            "DYLD_INSERT_LIBRARIES": "x", "DYLD_LIBRARY_PATH": "x",
+            "PATH": "/usr/bin",
+        }
+        result = sanitizer.sanitize(env)
+        for key in env:
+            if key != "PATH":
+                assert key not in result, f"{key} 应被阻断"
+        assert result["PATH"] == "/usr/bin"
+
+    def test_sanitize_injection_block_survives_custom_patterns(self) -> None:
+        """S7: 自定义敏感模式不影响注入类阻断(两层过滤正交)。"""
+        sanitizer = EnvSanitizer(sensitive_patterns=["FOO"])
+        env = {"PYTHONPATH": "x", "NODE_OPTIONS": "x", "NORMAL": "y"}
+        result = sanitizer.sanitize(env)
+        assert "PYTHONPATH" not in result
+        assert "NODE_OPTIONS" not in result
+        assert result["NORMAL"] == "y"
+
+    def test_sanitize_lowercase_pythonpath_blocked(self) -> None:
+        """S7: 小写 pythonpath(POSIX 环境大小写敏感但防御性阻断)。"""
+        sanitizer = EnvSanitizer()
+        result = sanitizer.sanitize({"pythonpath": "x"})
+        assert "pythonpath" not in result
+
 
 class TestPathFilter:
     def test_readonly_path_allowed(self, tmp_path) -> None:

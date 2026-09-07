@@ -137,7 +137,13 @@ class CodeScanner:
 class EnvSanitizer:
     """环境变量脱敏器(蓝图 §6.8 / spec m2-sandbox AC-6)。
 
-    过滤 KEY/SECRET/TOKEN/PASSWORD 等敏感模式。
+    两层过滤:
+    1. 敏感模式(保密): KEY/SECRET/TOKEN/PASSWORD 等子串匹配;
+    2. 注入类变量精确阻断(2026-09-07 S7, 自检 P2-#9): PYTHONPATH 等
+       不含敏感词、但可劫持沙箱进程解释器的变量 —— PYTHONPATH 经
+       sitecustomize 注入任意代码、NODE_OPTIONS 注入 --require、
+       PYTHONSTARTUP 执行启动脚本、LD_PRELOAD 劫持动态链接。
+       此前全部透传进沙箱(环境隔离缺口), 一律精确名阻断。
     """
 
     DEFAULT_SENSITIVE_PATTERNS: list[str] = [
@@ -146,11 +152,19 @@ class EnvSanitizer:
         "DATABASE_URL", "DB_PASSWORD", "CONNECTION_STRING",
     ]
 
+    # 解释器注入类变量(精确名, 大小写不敏感) —— 与敏感模式正交,
+    # 不受 sensitive_patterns 自定义影响, 恒阻断。
+    BLOCKED_INJECTION_VARS: frozenset[str] = frozenset({
+        "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONINSPECT",
+        "PYTHONBREAKPOINT", "NODE_OPTIONS", "LD_PRELOAD",
+        "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    })
+
     def __init__(self, sensitive_patterns: list[str] | None = None) -> None:
         self._patterns = sensitive_patterns or list(self.DEFAULT_SENSITIVE_PATTERNS)
 
     def sanitize(self, env: dict[str, str]) -> dict[str, str]:
-        """过滤敏感环境变量,防止 Agent 代码读取本地凭证。
+        """过滤敏感/注入类环境变量,防止 Agent 代码读取凭证或被注入。
 
         Args:
             env: 原始环境变量 dict。
@@ -160,7 +174,7 @@ class EnvSanitizer:
         """
         sanitized: dict[str, str] = {}
         for key, value in env.items():
-            if self._is_sensitive(key):
+            if self._is_sensitive(key) or self._is_injection_var(key):
                 continue
             sanitized[key] = value
         # 保留必要的基础变量
@@ -173,6 +187,9 @@ class EnvSanitizer:
     def _is_sensitive(self, key: str) -> bool:
         key_upper = key.upper()
         return any(p in key_upper for p in self._patterns)
+
+    def _is_injection_var(self, key: str) -> bool:
+        return key.upper() in self.BLOCKED_INJECTION_VARS
 
 
 class PathFilter:
