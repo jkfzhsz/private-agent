@@ -343,6 +343,93 @@ def test_maybe_extract_without_adapter_returns_none(repo: _MockRepo):
     assert len(result) == 0
 
 
+# ── 2026-09-07 S4: 真实对话历史接入提取 ─────────────────────────────────
+
+
+class _DialogueRepo(_MockRepo):
+    """带 get_recent_dialogue 的 repo(模拟生产 MemoriesRepo 新方法)。"""
+
+    def __init__(self, dialogue: list[dict] | None = None) -> None:
+        super().__init__()
+        self.dialogue = dialogue if dialogue is not None else [
+            {"role": "user", "content": "我喜欢简洁的回答"},
+            {"role": "assistant", "content": "好的, 后续回答保持简洁"},
+        ]
+
+    async def get_recent_dialogue(
+        self, session_id: int, limit: int = 16
+    ) -> list[dict]:
+        return self.dialogue[:limit]
+
+
+class _RecordingAdapter:
+    """记录收到的 prompt 的压缩适配器。"""
+
+    def __init__(self, response_text: str = "[fact] 用户偏好简洁回答") -> None:
+        self._response_text = response_text
+        self.prompts: list[str] = []
+
+    async def chat(self, messages: list[dict], tools: list | None = None, **kwargs) -> ChatResult:
+        self.prompts.append(messages[0]["content"])
+        return ChatResult(content=self._response_text)
+
+
+def test_load_dialogue_window_uses_real_history():
+    """S4 修复核心: 提取 prompt 使用真实对话历史, 不再是占位符。"""
+    repo = _DialogueRepo()
+    adapter = _RecordingAdapter()
+    mgr = MemoryManager(memories_repo=repo, compress_adapter=adapter)
+    asyncio_run(mgr._extract_memories(session_id=1, current_turn=8))
+    assert len(adapter.prompts) == 1
+    prompt = adapter.prompts[0]
+    assert "我喜欢简洁的回答" in prompt
+    assert "用户:" in prompt and "助手:" in prompt
+    # 占位符时代标记(无历史时的退化形态)不应出现在有历史的场景
+    assert "无可用对话历史" not in prompt
+
+
+def test_load_dialogue_window_fallback_when_repo_lacks_method():
+    """旧 mock/无 get_recent_dialogue 的 repo → 占位兜底, 不崩溃。"""
+    repo = _MockRepo()  # 无 get_recent_dialogue
+    adapter = _RecordingAdapter()
+    mgr = MemoryManager(memories_repo=repo, compress_adapter=adapter)
+    result = asyncio_run(mgr._extract_memories(session_id=1, current_turn=8))
+    assert "无可用对话历史" in adapter.prompts[0]
+    assert len(result) == 1  # 解析仍正常工作
+
+
+def test_load_dialogue_window_truncates_long_messages():
+    """单条消息截断 per_msg_chars, 空白归一化。"""
+    repo = _DialogueRepo(dialogue=[
+        {"role": "user", "content": "长  文本\n\n" + "甲" * 500},
+    ])
+    mgr = MemoryManager(memories_repo=repo, compress_adapter=_RecordingAdapter())
+    window = asyncio_run(mgr._load_dialogue_window(session_id=1, current_turn=1))
+    assert "长 文本" in window  # 空白归一化
+    assert len(window) < 320  # "用户: " 前缀 + 300 字符截断
+
+
+def test_load_dialogue_window_empty_dialogue():
+    """空对话 → 占位说明。"""
+    repo = _DialogueRepo(dialogue=[])
+    mgr = MemoryManager(memories_repo=repo, compress_adapter=_RecordingAdapter())
+    window = asyncio_run(mgr._load_dialogue_window(session_id=7, current_turn=3))
+    assert "session_id=7" in window and "无可用对话历史" in window
+
+
+def test_extract_scope_fallback_still_applies():
+    """真实历史接入后, scope 兜底语义不变(会话场景 → 场景记忆)。"""
+    repo = _DialogueRepo()
+    mgr = MemoryManager(
+        memories_repo=repo,
+        compress_adapter=_RecordingAdapter("[fact] 用户在做信贷分析"),
+    )
+    result = asyncio_run(
+        mgr._extract_memories(session_id=1, current_turn=8, scope="office")
+    )
+    assert result[0].scope == "office"
+
+
 # ── helper ──────────────────────────────────────────────────────────────
 
 

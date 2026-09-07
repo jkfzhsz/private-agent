@@ -74,6 +74,33 @@ class MemoriesRepo:
     def __init__(self, conn: asyncpg.Connection) -> None:
         self._conn = conn
 
+    async def get_recent_dialogue(
+        self, session_id: int, limit: int = 16
+    ) -> list[dict]:
+        """读取会话最近对话消息(2026-09-07 S4 修复: 记忆提取接真实历史)。
+
+        此前 MemoryManager._extract_memories 用占位符冒充对话历史,
+        导致自动提取管线全场景空转(生产 3 次触发仅 1 条泛化产出)。
+        仅取 user/assistant 消息(排除 system/tool), 按时间正序返回。
+
+        Args:
+            session_id: 会话 ID。
+            limit: 最大消息条数(默认 16, 约 8 轮对话)。
+
+        Returns:
+            [{"role": ..., "content": ...}, ...] 时间正序列表。
+        """
+        rows = await self._conn.fetch(
+            """
+            SELECT role, content FROM messages
+            WHERE session_id = $1 AND role IN ('user', 'assistant')
+            ORDER BY id DESC LIMIT $2
+            """,
+            session_id,
+            limit,
+        )
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
     async def insert(self, memory: Memory) -> int:
         """插入单条记忆,返回 id。
 

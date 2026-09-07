@@ -313,6 +313,93 @@ def _build_compress_adapter(cfg):
     return build_compress_adapter(cfg)
 
 
+def _build_memory_manager(conn, cfg):
+    """构造 MemoryManager(蓝图 §4.2-§4.5) —— 2026-09-07 抽取共享。
+
+    供两处使用: ① _handle_user_message 每轮结束后的间隔提取;
+    ② WebSocketDisconnect 会话结束提取(S4 接线, 此前 on_session_end
+    全仓零调用, 会话结束提取路径从未生效)。
+    react_events_insert 用 partial 绑定 conn —— 2026-08-19 修复前
+    误传裸模块函数(需 conn 首参) → TypeError → turn_end 后崩溃误报
+    user_message_failed。
+    """
+    from functools import partial
+
+    from private_agent.storage.react_events import insert_react_event
+
+    memories_repo = MemoriesRepo(conn)
+    return MemoryManager(
+        memories_repo=memories_repo,
+        compress_adapter=_build_compress_adapter(cfg),
+        react_events_insert=partial(insert_react_event, conn),
+        extract_interval_turns=cfg.get("memory", {}).get(
+            "extract_interval_turns", 8
+        ),
+        inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
+        inject_global_n=cfg.get("memory", {}).get(
+            "inject_ratio", {}
+        ).get("global", 2),
+        eviction_max_active=cfg.get("memory", {}).get(
+            "eviction", {}
+        ).get("max_active_count", 200),
+        eviction_min_importance=cfg.get("memory", {}).get(
+            "eviction", {}
+        ).get("min_importance_threshold", 0.3),
+        eviction_expire_days=cfg.get("memory", {}).get(
+            "eviction", {}
+        ).get("expire_days", 30),
+        archive_before_evict=bool(
+            cfg.get("memory", {}).get("archive_before_evict", True)
+        ),
+    )
+
+
+async def _session_end_memory_extract(conn, session_id: int) -> None:
+    """会话结束(WS 断连)时补触发记忆提取(2026-09-07 S4 接线)。
+
+    背景: on_session_end 此前全仓零调用; 真实会话平均仅 1.6~3.7 轮,
+    间隔提取(每 8 轮)生产全库仅触发 3 次 → 自动提取管线空转。
+
+    触发守卫: 距上次间隔提取的尾部轮次 ≥ 2 才提取 —— 1 轮短会话
+    (office 的主体形态)提取价值低、且每会话一次 LLM 调用成本高;
+    尾部 0/1 轮说明刚在 8 的倍数轮提取过或几乎无新内容。
+
+    失败静默(记日志), 不影响断连主流程。
+    """
+    try:
+        row = await conn.fetchrow(
+            "SELECT memory_enabled, locked_skill_name "
+            "FROM sessions WHERE id = $1",
+            session_id,
+        )
+        if not row or row["memory_enabled"] is False:
+            return
+        max_turn = int(
+            await conn.fetchval(
+                "SELECT COALESCE(MAX(turn), 0) FROM messages "
+                "WHERE session_id = $1 AND role = 'user'",
+                session_id,
+            )
+            or 0
+        )
+        cfg = await _load_cfg_with_runtime()
+        interval = int(
+            cfg.get("memory", {}).get("extract_interval_turns", 8)
+        )
+        if max_turn % max(1, interval) < 2:
+            return
+        mgr = _build_memory_manager(conn, cfg)
+        await mgr.on_session_end(
+            session_id=session_id,
+            current_turn=max_turn,
+            scope=row["locked_skill_name"],
+        )
+    except Exception:  # noqa: BLE001 - 提取失败不影响断连主流程
+        _logger.exception(
+            "session-end memory extract failed (session=%s)", session_id
+        )
+
+
 def _build_hook_runner(cfg):
     """构造 Hooks 调度器(阶段三批次2 B-1)。
 
@@ -1268,6 +1355,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     await CheckpointManager.mark_session_interrupted(
                         conn, session_id
                     )
+                    # 2026-09-07(S4): 会话结束记忆提取接线(蓝图 §4.2 条件 2)。
+                    # 此前 on_session_end 全仓零调用 —— 真实会话平均仅
+                    # 1.6~3.7 轮, 间隔提取(每 8 轮)几乎不触发, 自动提取
+                    # 管线全场景空转; 断连时补提取未达间隔的尾部轮次。
+                    await _session_end_memory_extract(conn, session_id)
                 finally:
                     await conn.close()
             except Exception:
@@ -1713,41 +1805,10 @@ async def _handle_user_message(
             )
             memory_mgr = None
             if memory_enabled is not False:
-                # 构造 MemoryManager(蓝图 §4.2-§4.5)
-                # V2 补齐(§4.4 [MVP]): 注入 react_events_insert, 使记忆提取/
-                # 淘汰事件在生产路径真正入库(memory_extracted/memory_evicted)
-                # 2026-08-19(修复): partial 绑定 conn —— 此前误传裸模块函数
-                # insert_react_event(需 conn 首参), manager 调用缺 conn →
-                # TypeError → turn_end 后崩溃误报 user_message_failed。
-                from functools import partial
-
-                from private_agent.storage.react_events import insert_react_event
-
-                memories_repo = MemoriesRepo(conn)
-                memory_mgr = MemoryManager(
-                    memories_repo=memories_repo,
-                    compress_adapter=_build_compress_adapter(cfg),
-                    react_events_insert=partial(insert_react_event, conn),
-                    extract_interval_turns=cfg.get("memory", {}).get(
-                        "extract_interval_turns", 8
-                    ),
-                    inject_limit=cfg.get("memory", {}).get("inject_limit", 10),
-                    inject_global_n=cfg.get("memory", {}).get(
-                        "inject_ratio", {}
-                    ).get("global", 2),
-                    eviction_max_active=cfg.get("memory", {}).get(
-                        "eviction", {}
-                    ).get("max_active_count", 200),
-                    eviction_min_importance=cfg.get("memory", {}).get(
-                        "eviction", {}
-                    ).get("min_importance_threshold", 0.3),
-                    eviction_expire_days=cfg.get("memory", {}).get(
-                        "eviction", {}
-                    ).get("expire_days", 30),
-                    archive_before_evict=bool(
-                        cfg.get("memory", {}).get("archive_before_evict", True)
-                    ),
-                )
+                # 构造 MemoryManager(蓝图 §4.2-§4.5; V1.1-3.5 记忆关闭时跳过)
+                # 2026-09-07: 抽取为 _build_memory_manager 共享(会话结束
+                # 提取路径复用同一构造)。
+                memory_mgr = _build_memory_manager(conn, cfg)
             # 0.5.0 M2: 场景 KB 自动检索配置(从锁定 skill 的 knowledge_base 段读取)
             kb_auto_retrieve = False
             kb_scenario = None

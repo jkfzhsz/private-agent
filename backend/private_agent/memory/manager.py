@@ -490,9 +490,15 @@ class MemoryManager:
         """
         if not self._compress_adapter:
             return []
-        # 构建提取 prompt(简化: 无实际消息历史时使用占位)
+        # 2026-09-07(S4 修复): 接入真实对话历史 —— 此前用占位符
+        # "[session_id=X, turn=Y]" 冒充历史, LLM 无料可提取, 自动提取
+        # 管线全场景空转(生产全库仅触发 3 次、产出 1 条泛化记忆,
+        # office 106 会话 0 记忆的根因之一)。
+        session_messages = await self._load_dialogue_window(
+            session_id, current_turn
+        )
         prompt = EXTRACT_PROMPT_TEMPLATE.format(
-            session_messages=f"[session_id={session_id}, turn={current_turn}]"
+            session_messages=session_messages
         )
         result = await self._compress_adapter.chat(
             messages=[{"role": "user", "content": prompt}], tools=[]
@@ -572,6 +578,54 @@ class MemoryManager:
             except Exception:  # noqa: BLE001
                 pass
         return [memory]
+
+    async def _load_dialogue_window(
+        self,
+        session_id: int,
+        current_turn: int,
+        max_messages: int = 16,
+        max_chars: int = 4000,
+        per_msg_chars: int = 300,
+    ) -> str:
+        """加载会话最近对话窗口, 格式化为提取 prompt 的历史文本。
+
+        单条截断 per_msg_chars, 总量封顶 max_chars(超出从最早的消息
+        开始丢弃); 无历史时返回占位说明(防御: 新会话/消息缺失场景)。
+
+        Args:
+            session_id: 会话 ID。
+            current_turn: 当前轮次(仅用于占位文本)。
+            max_messages: 最大消息条数。
+            max_chars: 历史文本总字符上限。
+            per_msg_chars: 单条消息字符上限。
+
+        Returns:
+            对话历史文本。
+        """
+        try:
+            dialogue = await self._repo.get_recent_dialogue(
+                session_id, limit=max_messages
+            )
+        except Exception:  # noqa: BLE001 - 历史读取失败不阻断提取
+            dialogue = []
+        if not dialogue:
+            return (
+                f"[session_id={session_id}, turn={current_turn}]"
+                "(无可用对话历史)"
+            )
+        lines: list[str] = []
+        total = 0
+        for m in dialogue:
+            role = "用户" if m["role"] == "user" else "助手"
+            text = " ".join((m["content"] or "").split())[:per_msg_chars]
+            if not text:
+                continue
+            line = f"{role}: {text}"
+            if total + len(line) > max_chars:
+                break
+            lines.append(line)
+            total += len(line)
+        return "\n".join(lines) if lines else "(无可用对话历史)"
 
     @staticmethod
     def _parse_extracted(
