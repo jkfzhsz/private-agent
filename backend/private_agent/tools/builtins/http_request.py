@@ -71,7 +71,11 @@ async def http_request_handler(args: dict) -> ToolResult:
         # 显式关闭防护(不推荐): 保持原行为
         import httpx
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        # 2026-09-08: trust_env=False —— 不读系统代理(本机系统代理常被改写为
+        # 失效端口 31181, 会让所有出网请求 "All connection attempts failed")。
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=False, trust_env=False
+        ) as client:
             if method == "GET":
                 response = await client.get(url)
             else:

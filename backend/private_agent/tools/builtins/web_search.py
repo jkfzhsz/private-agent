@@ -85,7 +85,10 @@ async def web_search_handler(args: dict) -> ToolResult:
 async def _search_duckduckgo(query: str) -> ToolResult:
     """DuckDuckGo Instant Answer API(无需 key)。"""
     _check_search_endpoint("https://api.duckduckgo.com/")
-    async with httpx.AsyncClient(timeout=_TIMEOUT, headers={"User-Agent": _UA}) as client:
+    # 2026-09-08: trust_env=False —— 不读系统代理(失效端口会让出网全失败)
+    async with httpx.AsyncClient(
+        timeout=_TIMEOUT, headers={"User-Agent": _UA}, trust_env=False
+    ) as client:
         resp = await client.get(
             "https://api.duckduckgo.com/",
             params={"q": query, "format": "json", "no_html": "1"},
@@ -121,7 +124,7 @@ async def _search_bocha(query: str) -> ToolResult:
                 "设置环境变量 PA_BOCHA_API_KEY 后重试"
             ),
         )
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False) as client:
         resp = await client.post(
             "https://api.bochaai.com/v1/web-search",
             headers={
@@ -150,6 +153,7 @@ async def _search_bing(query: str) -> ToolResult:
     async with httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=True,
+        trust_env=False,
         headers={"User-Agent": _UA, "Accept-Language": "zh-CN,zh;q=0.9"},
     ) as client:
         resp = await client.get(

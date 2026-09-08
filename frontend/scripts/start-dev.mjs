@@ -136,6 +136,13 @@ async function main() {
     if (isWin && process.env.PA_ELECTRON_SANDBOX !== "1") {
       electronArgs.push("--no-sandbox");
     }
+    // 2026-09-08: Chromium 默认读取 Windows 系统代理, 本机该代理常被改写为
+    // 失效端口(127.0.0.1:31181 无进程监听) → 首页天气(Open-Meteo)显示
+    // "暂不可用"。显式禁用代理解析, 前端出网直连。
+    // 需要代理时: 设 PA_ELECTRON_USE_SYSTEM_PROXY=1。
+    if (process.env.PA_ELECTRON_USE_SYSTEM_PROXY !== "1") {
+      electronArgs.push("--no-proxy-server");
+    }
     const electron = spawn(electronExe, electronArgs, { cwd: root, env: electronEnv });
     electron.on("exit", (code) => {
       console.log(`[start] Electron 退出 (code=${code}), 清理 vite ...`);

@@ -17,7 +17,11 @@ export const SCENE_NAME_MAP: Record<string, string> = {
   frontend_design: "清和",
 };
 
-const IMAGE_PATH_RE = /(?:^|[^\w/])((?:\/?outputs\/)?[\w\-\u4e00-\u9fff]+\.(?:png|jpg|jpeg|gif|svg|webp))/gi;
+// 2026-09-08: outputs/ 前缀必选 —— 此前为可选前缀, 导致工具结果文本里的
+// 任意图片引用(典型: http_request 抓回网页 HTML 中的 <img src="icon.png">
+// 相对路径)被误提取并渲染为 <img src=".../files/outputs/icon.png"> → 404
+// 破损图占位。生成物预览只应识别明确的 outputs 产物路径。
+const IMAGE_PATH_RE = /((?:[A-Za-z]:[\\/])?(?:[\w\-\u4e00-\u9fff]+[\\/])*(?:[\\/])?outputs[\\/][\w\-\u4e00-\u9fff]+\.(?:png|jpg|jpeg|gif|svg|webp))/gi;
 
 const FILES_BASE = "http://127.0.0.1:8765/files/outputs";
 
@@ -39,11 +43,12 @@ export function extractImagePaths(text: string): string[] {
 }
 
 export function imagePathToUrl(path: string): string {
-  // 取 outputs/ 之后的部分作为 filename,拼接后端文件服务绝对地址
+  // 取路径最后一段作为 filename, 拼接后端文件服务绝对地址
   // (vite 5173 下相对路径会请求前端自身导致 404)
-  // 2026-08-10 22:00: [\w\-\.] → [\w\-\u4e00-\u9fff] 支持中文文件名
-  const match = path.match(/outputs\/([\w\-\u4e00-\u9fff]+)$/i);
-  const filename = match ? match[1] : path.replace(/^\/?outputs\//, "");
+  // 2026-08-10 22:00: 支持中文文件名
+  // 2026-09-08: 直接按分隔符取末段(兼容 Windows 反斜杠与多级目录,
+  // 旧实现的正则因文件名含 . 而失配导致整路径进 URL)
+  const filename = path.split(/[\\/]/).pop() || path;
   return `${FILES_BASE}/${filename}`;
 }
 

@@ -139,7 +139,11 @@ async def _probe_domain(host: str) -> tuple[bool, str | None]:
     try:
         import httpx
 
-        async with httpx.AsyncClient(timeout=PREFLIGHT_TIMEOUT_SEC) as client:
+        # 2026-09-08: trust_env=False —— 连通预检必须测"直连能力", 否则会被
+        # 失效系统代理(31181)污染为"不可达", 误导依赖安装决策。
+        async with httpx.AsyncClient(
+            timeout=PREFLIGHT_TIMEOUT_SEC, trust_env=False
+        ) as client:
             resp = await client.head(f"https://{host}/", follow_redirects=True)
             # 4xx/5xx 也算"可达"(网络通, 服务拒绝是另一回事)
             _ = resp.status_code

@@ -96,8 +96,12 @@ class OpenAICompatibleAdapter(ModelAdapter):
         # 响应即 fallback 下一 provider(官方 API 快), 总等待有界。
         self._timeout = httpx.Timeout(60.0, connect=15.0)
         # 注入 client(测试用 MockTransport);默认新建 AsyncClient
+        # 2026-09-08: trust_env=False —— 不再读取 Windows 系统代理/环境代理。
+        # 根因: 本机系统代理常被改写为失效端口(127.0.0.1:31181 无进程监听),
+        # httpx trust_env 默认读取后全部模型 API 报 "All connection attempts
+        # failed"。provider 端点直连可达, PA 出网不依赖系统代理。
         self._client = client if client is not None else httpx.AsyncClient(
-            timeout=self._timeout
+            timeout=self._timeout, trust_env=False
         )
 
     async def chat(
@@ -134,7 +138,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
                         await self._client.aclose()
                     except Exception:
                         pass
-                    self._client = httpx.AsyncClient(timeout=self._timeout)
+                    # 2026-09-08: 重建 client 同样保持 trust_env=False(见上方注释)
+                    self._client = httpx.AsyncClient(
+                        timeout=self._timeout, trust_env=False
+                    )
                     continue
                 raise ProviderError(self.provider_name, f"http error: {e}") from e
         assert resp is not None
