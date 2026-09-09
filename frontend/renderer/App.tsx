@@ -1587,36 +1587,6 @@ export default function App(): JSX.Element {
     [loadOptimLog, sendWs, realSessionId, sessionId]
   );
 
-  // 2026-08-16(阶段1-d, G2): 会话工具装配视图(通道收敛可感知)
-  type ToolsAssembly = {
-    scene: string;
-    kind: string;
-    workspace: string;
-    mcp_servers: string[];
-    monitor_tools: string[];
-    builtin_tools: string[];
-    anchor_tools: string[];
-  };
-  const [toolsAssembly, setToolsAssembly] = useState<ToolsAssembly | null>(null);
-
-  const loadToolsAssembly = useCallback(async (): Promise<void> => {
-    const sid = realSessionId ?? sessionId;
-    if (!sid || sid <= 0) return;
-    try {
-      const resp = await adminFetch(
-        `http://127.0.0.1:8765/admin/sessions/${sid}/tools-assembly`
-      );
-      if (!resp.ok) return;
-      const data = (await resp.json()) as ToolsAssembly;
-      setToolsAssembly(data);
-    } catch {
-      /* 加载失败静默 */
-    }
-  }, [realSessionId, sessionId]);
-  useEffect(() => {
-    void loadToolsAssembly();
-  }, [loadToolsAssembly, view]);
-
   const loadDiagnostics = useCallback(async (): Promise<void> => {
     setDiagBusy(true);
     try {
@@ -3197,42 +3167,6 @@ export default function App(): JSX.Element {
                     padding: 4,
                   }}
                 >
-        {/* 2026-08-16(阶段1-d, G2): monitor 窗口工具装配视图 —— 展示无涯
-            实际装配的工具/MCP/工作区(通道收敛可感知) */}
-        {activeSlot === 0 && !activeSkill && toolsAssembly && (
-          <div
-            style={{
-              marginBottom: 12, borderRadius: 12,
-              border: "1px solid var(--border-strong)",
-              background: "var(--panel-bg-solid)",
-              padding: 12,
-            }}
-          >
-            <div className="subhead">
-              🧰 工具装配
-              <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginLeft: 8, fontWeight: 400 }}>
-                {toolsAssembly.workspace ? `工作区: ${toolsAssembly.workspace}` : "无工作区"}
-              </span>
-            </div>
-            <div style={{ fontSize: 11, lineHeight: 1.7, color: "var(--text-secondary)" }}>
-              <div>
-                <b>MCP 装配</b>: {(toolsAssembly.mcp_servers ?? []).length > 0
-                  ? (toolsAssembly.mcp_servers ?? []).join(", ")
-                  : "(无, 走全量)"}
-              </div>
-              <div>
-                <b>锚点工具</b>: {(toolsAssembly.anchor_tools ?? []).length > 0
-                  ? (toolsAssembly.anchor_tools ?? []).join(", ")
-                  : "(未配置)"}
-              </div>
-              {(toolsAssembly.monitor_tools ?? []).length > 0 && (
-                <div>
-                  <b>专属工具</b>: {(toolsAssembly.monitor_tools ?? []).join(", ")}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
         {turnGroups.length === 0 && (
           <div style={{ color: "var(--text-tertiary)", textAlign: "center", paddingTop: 40, lineHeight: 1.8 }}>
             {/* 0.5.0 P6(2026-08-09): 统一渲染后空态按角色区分 —— 主智能体显示监控引导 */}
