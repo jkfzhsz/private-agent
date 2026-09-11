@@ -942,9 +942,20 @@ export default function Sidebar({
   const statusColor =
     status === "connected" ? "var(--success-text)" :
     status === "reconnecting" ? "var(--warning-text)" : "var(--danger-text)";
+  // 2026-09-11(蒋先生反馈: 误以为"连接断开"= PA 停止工作): 状态文案统一带
+  // "本地服务"前缀 —— 该连接是本机前端 ↔ 本地后端进程的 WS(ws://localhost)，
+  // 与互联网无关；断开的典型原因是后端进程重启，前端会自动重连，会话记录
+  // 存于数据库不丢失。细节(重连次数/含义)移入 title 悬停提示。
   const statusLabel =
-    status === "connected" ? "已连接" :
-    status === "reconnecting" ? `重连中（第 ${reconnectCount} 次）` : "未连接";
+    status === "connected" ? "本地服务已连接" :
+    status === "reconnecting" ? "本地服务重连中" : "本地服务未连接";
+  const statusTitle =
+    status === "connected"
+      ? "与本机后端服务的连接正常（非互联网连接）"
+      : status === "reconnecting"
+        ? `与本机后端服务的连接中断（非互联网问题），正在自动重连（第 ${reconnectCount} 次）。` +
+          "会话记录已保存在数据库，重连后自动恢复；若当时正在生成，该轮需重新发送消息继续。"
+        : "与本机后端服务的连接已断开。会话记录已保存，可点击“重连”或等待自动重连。";
 
   const renderItem = (item: { key: ViewKey; label: string; icon: JSX.Element }): JSX.Element => (
     <button
@@ -1320,7 +1331,10 @@ export default function Sidebar({
             </div>
             <div style={{ fontSize: 13, flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600, lineHeight: 1.2 }}>本地用户</div>
-              <div style={{ fontSize: 11, color: "var(--text-tertiary)", display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+              <div
+                title={statusTitle}
+                style={{ fontSize: 11, color: "var(--text-tertiary)", display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}
+              >
                 {/* P0-1(2026-08-17): 状态点 + 文案; 重连中脉冲动画, 断线显示手动重连按钮 */}
                 <span
                   role="img"

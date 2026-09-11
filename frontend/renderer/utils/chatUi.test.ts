@@ -24,8 +24,11 @@ describe("extractImagePaths(2026-09-08 收紧: outputs 前缀必选)", () => {
     expect(extractImagePaths("已保存到 outputs/持仓热力图.png")).toEqual([
       "outputs/持仓热力图.png",
     ]);
+    // 2026-09-11: 断言与实现对齐 —— 正则含可选前导斜杠 `(?:[\\/])?`,
+    // 带斜杠的输入原样保留(与下方 Windows 绝对路径用例同一约定);
+    // imagePathToUrl 取路径末段, 前导斜杠不影响最终 URL。
     expect(extractImagePaths("生成完成: /outputs/report_page_1.png")).toEqual([
-      "outputs/report_page_1.png",
+      "/outputs/report_page_1.png",
     ]);
   });
 

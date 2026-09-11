@@ -2,7 +2,8 @@
 
 三级权限:
 - safe / none: 自动执行,不打断 Agent
-- elevated: WS 推送确认请求 → 等待用户响应(默认 60s 超时自动拒绝) → 会话级缓存
+- elevated: WS 推送确认请求 → 等待用户响应(超时秒数由调用方注入,
+  默认 300s, 见 main._permission_confirm_timeout; 超时 fail-closed 拒绝) → 会话级缓存
 - dangerous: 直接拦截,不入队
 
 阶段三批次 1(B-2/B-3/B-4, 调研 round2 §4.2.1):
@@ -200,7 +201,7 @@ class PermissionManager:
         *,
         force: bool = False,
     ) -> str:
-        """elevated 确认执行(缓存命中 / WS 推送 / 60s 超时拒绝)。
+        """elevated 确认执行(缓存命中 / WS 推送 / 超时 fail-closed 拒绝)。
 
         Args:
             force: True 时跳过会话级缓存(plan/cautious/规则 ask)。
@@ -244,6 +245,10 @@ class PermissionManager:
                 "mode": self._mode,
                 "risk_level": risk_level,
                 "reason": reason,
+                # 2026-09-11(session-85 诊断): 携带真实等待超时, 前端据此
+                # 渲染倒计时。此前后端 60s→300s 可配置化后前端仍硬编码 55s,
+                # 弹窗提前约 4 分钟自动关闭 → 用户"漏看导致任务失败"根因。
+                "timeout_sec": self._timeout,
             }
         )
 

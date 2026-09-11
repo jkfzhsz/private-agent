@@ -124,6 +124,9 @@ class TestElevatedFlow:
         assert emitted[0]["event_type"] == "tool_confirmation_required"
         assert emitted[0]["tool_name"] == "code_execution"
         assert "confirmation_id" in emitted[0]
+        # 2026-09-11(session-85): 事件须携带真实超时值 —— 前端倒计时据此渲染
+        # (此前前端硬编码 55s 与后端可配置 300s 不一致, 弹窗提前关闭致漏确认)
+        assert emitted[0]["timeout_sec"] == 2.0
 
     def test_elevated_cache_hit_second_time(self) -> None:
         """同会话同工具同参数:缓存命中,二次直接放行不 emit。"""

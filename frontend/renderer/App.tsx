@@ -117,6 +117,19 @@ interface WSMessage {
 const WS_URL = "ws://localhost:8765/ws";
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 const MAX_RECONNECT_DELAY = 16000;
+// 2026-09-11(session-85 诊断): 权限确认弹窗倒计时 —— 以后端 payload.timeout_sec
+// 为准(后端默认 300s, 可经 PA_CONFIRM_TIMEOUT / config permission.confirm_timeout_sec
+// 覆盖); 提前 LEAD 秒关闭, 避免超时边界点击导致 unknown confirmation_id。
+// 老事件(无 timeout_sec)回退 DEFAULT, 保证与后端默认一致而非旧的 60s。
+const CONFIRM_COUNTDOWN_LEAD_SEC = 5;
+const DEFAULT_CONFIRM_TIMEOUT_SEC = 300;
+/** 倒计时文案: 超过 60s 显示"N 分 M 秒", 否则"N 秒"(用户一眼看出剩余窗口) */
+function formatCountdown(sec: number): string {
+  if (sec < 60) return `${sec} 秒`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s > 0 ? `${m} 分 ${s} 秒` : `${m} 分钟`;
+}
 
 // P0-2(2026-08-17): 事件底色改引 var(--event-*) token(design-tokens.css 亮/暗双值)
 const EVENT_STYLES: Record<EventType, { bg: string; label: string; icon: string }> = {
@@ -177,7 +190,8 @@ export default function App(): JSX.Element {
   const [input, setInput] = useState("");
   // 0.5.1 A(2026-08-09 蒋先生反馈): 权限确认全局弹窗 —— 独立置顶,
   // 任何窗口收到确认请求都弹出(不再只渲染在对话流内导致错过/超时)。
-  // payload 来自 tool_confirmation_required 事件; 倒计时默认 60s(与后端一致)。
+  // payload 来自 tool_confirmation_required 事件; 倒计时时长以后端
+  // payload.timeout_sec 为准(缺省回退 DEFAULT_CONFIRM_TIMEOUT_SEC)。
   const [pendingConfirm, setPendingConfirm] = useState<{
     confirmation_id: string;
     session_id: number;
@@ -187,10 +201,17 @@ export default function App(): JSX.Element {
     argsPreview?: string;
     // 2026-08-15: 后端人性化描述(title/summary 人话要点, 未登录老事件无此字段)
     display?: { title?: string; summary?: string[]; tool_label?: string };
+    // 2026-09-11(session-85 诊断): 后端真实等待超时(秒)。此前前端硬编码
+    // 倒计时 55s 与后端可配置超时(默认 300s)不一致 —— 弹窗提前约 4 分钟
+    // 自动关闭、用户根本来不及确认("漏看导致任务失败"根因)。
+    timeout_sec?: number;
   } | null>(null);
-  // 确认弹窗倒计时(秒)。比后端超时(60s)提前 5s 关闭 —— 避免用户在
-  // 超时边界点击"同意"时后端 confirmation_id 已过期 → unknown confirmation_id
-  const [confirmCountdown, setConfirmCountdown] = useState<number>(55);
+  // 确认弹窗倒计时(秒)。提前 CONFIRM_COUNTDOWN_LEAD_SEC 关闭 —— 避免用户在
+  // 超时边界点击"同意"时后端确认已过期 → unknown confirmation_id。
+  // 初值仅占位, 真实值在弹窗打开时按后端 payload 计算(见下方 useEffect)。
+  const [confirmCountdown, setConfirmCountdown] = useState<number>(
+    DEFAULT_CONFIRM_TIMEOUT_SEC - CONFIRM_COUNTDOWN_LEAD_SEC
+  );
   // 2026-08-18(请求卡片点不了): 已过期/已处理的确认 ID 集合 —— 对应
   // TurnCard 内嵌卡片按钮禁用并显示"已过期", 防用户对失效确认重复点击
   // 报 unknown confirmation_id。标记时机: ① 点击同意/拒绝/稍后决定(立即
@@ -232,7 +253,16 @@ export default function App(): JSX.Element {
   const [lastEventAt, setLastEventAt] = useState<number>(() => Date.now());
   useEffect(() => {
     if (!pendingConfirm) return;
-    setConfirmCountdown(55);
+    // 2026-09-11(session-85 诊断): 倒计时时长取后端 payload.timeout_sec
+    // (缺省回退 300s), 提前 LEAD 秒关闭。此前硬编码 55s —— 后端超时经
+    // 4fa5e98 改为可配置 300s 后前端仍按 55s 早退, 弹窗提前约 4 分钟自动
+    // 关闭, 用户根本来不及确认(任务因此失败)。
+    const raw = Number(pendingConfirm.timeout_sec);
+    const timeoutSec =
+      Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CONFIRM_TIMEOUT_SEC;
+    setConfirmCountdown(
+      Math.max(1, Math.floor(timeoutSec) - CONFIRM_COUNTDOWN_LEAD_SEC)
+    );
     const iv = setInterval(() => {
       setConfirmCountdown((c) => {
         if (c <= 1) {
@@ -1806,6 +1836,8 @@ export default function App(): JSX.Element {
             reason?: string;
             args_summary?: Record<string, unknown>;
             display?: { title?: string; summary?: string[]; tool_label?: string };
+            // 2026-09-11: 后端真实等待超时(秒) —— 弹窗倒计时据此渲染
+            timeout_sec?: number;
           };
           if (p.confirmation_id) {
             // 2026-08-15: 修正字段名不匹配(此前读 p.risk/p.args_preview,
@@ -1828,6 +1860,8 @@ export default function App(): JSX.Element {
               reason: p.reason,
               argsPreview,
               display: p.display,
+              // 2026-09-11: 透传后端超时(缺失时由弹窗倒计时 effect 回退默认值)
+              timeout_sec: p.timeout_sec,
             });
             // 系统通知(后台/其他窗口时也能提醒)
             notifyUser("需要你的确认", String(p.display?.title ?? p.message ?? "工具执行需确认"));
@@ -2567,6 +2601,14 @@ export default function App(): JSX.Element {
       toast.info("正在生成中，请等待本轮完成或点「停止」后再发送");
       return;
     }
+    // 2026-09-11(断连误导闭环): 连接未就绪时直接拦截 —— 此前 Enter 仍会
+    // 走到 sendWs(未连接 → 静默丢弃 + toast), 但用户消息照样上屏、输入框
+    // 被清空, 用户误以为已发送、内容还得重打。与 isGenerating 同一防御模式:
+    // 不上屏、不清空、明确提示, 重连后原样重试即可。
+    if (status !== "connected") {
+      toast.error("与本地服务的连接中断，正在重连…消息未发送，请稍候重试");
+      return;
+    }
     let content = input.trim();
     if (!content) return;
     setIsPaused(false); // V1.5 项-5: 发送新消息前清除暂停态
@@ -2638,7 +2680,7 @@ export default function App(): JSX.Element {
     setPendingUpload(null); // 发送后清除文件引用(一次一文件)
     setPendingImage(null); // 发送后清除图片引用
     setIsGenerating(true); // 生成中(显示"停止"按钮)
-  }, [input, sessionId, sendWs, pendingUpload, pendingImage, editingOriginal, realSessionId, autoExec, autoRounds, availableSkills, isGenerating]);
+  }, [input, sessionId, sendWs, pendingUpload, pendingImage, editingOriginal, realSessionId, autoExec, autoRounds, availableSkills, isGenerating, status]);
 
   // 2026-08-12 Phase 3: /召唤技能 —— 浮层过滤列表(按斜杠后关键字模糊匹配)
   const slashFilteredSkills = useMemo(() => {
@@ -3583,10 +3625,13 @@ export default function App(): JSX.Element {
             placeholder={
               // P0-1(2026-08-17): 断线/重连时明确提示原因, 而非让用户从按钮变灰推断
               // 2026-08-19: 生成中提示不可发送(输入可预输入, 发送被防御拦截)
+              // 2026-09-11(蒋先生反馈): 原"连接已断开，正在重连…"被误解为
+              // 外网中断/PA 停摆 —— 实为本机前端与本地后端服务的 WS 连接
+              // (ws://localhost), 会话记录在数据库不丢失, 重连后自动恢复。
               isGenerating
                 ? "正在生成中… 可先输入, 本轮结束后发送(Enter 暂不可用)"
                 : status !== "connected"
-                  ? "连接已断开，正在重连…"
+                  ? "本地服务连接中断，正在重连…（会话记录已保存，重连后可继续）"
                   : activeSlot === 0 && !activeSkill
                     ? `向${agentName || "主智能体"}提问(如: 查看系统性能)…`
                     : "输入消息,Enter 发送,Shift+Enter 换行,输入 / 可召唤技能"
@@ -4676,11 +4721,15 @@ export default function App(): JSX.Element {
                 <span
                   style={{
                     fontSize: 11,
-                    color: "var(--text-tertiary)",
+                    // 2026-09-11(session-85 诊断): 最后 60s 转警示色, 降低"漏看"概率
+                    color:
+                      confirmCountdown <= 60
+                        ? "var(--warning-text)"
+                        : "var(--text-tertiary)",
                     marginLeft: "auto",
                   }}
                 >
-                  {confirmCountdown}s 后超时
+                  {formatCountdown(confirmCountdown)}后超时
                 </span>
               </div>
               {/* 2026-08-15: 优先渲染人性化描述(title/summary), 老事件回退 message */}

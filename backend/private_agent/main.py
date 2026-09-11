@@ -101,6 +101,10 @@ _RUN_TURN_IDLE_TIMEOUT = float(
 )
 
 _scheduler = None  # APScheduler 单例(startup 创建,shutdown 停止)
+
+# 2026-09-11(session-85 断连诊断): 进程启动时刻(monotonic), 供 shutdown 日志
+# 报告运行时长。判定规则见 _on_shutdown docstring。
+_STARTED_MONO: float | None = None
 # MCP 外轨工具管理器(进程级单例, 懒连接 + 缓存, shutdown 时关闭)
 _mcp_manager = None  # type: ignore[assignment]
 # V2 P1: per-session 运行锁(user_message 改 create_task 后防同会话并发 turn 冲突)
@@ -2385,16 +2389,38 @@ def _inject_rag_paths(cfg: dict) -> None:
 
 @app.on_event("shutdown")
 async def _on_shutdown() -> None:
-    """关闭钩子:停止 scheduler + 关闭 MCP 客户端 + 关闭连接池。"""
+    """关闭钩子:停止 scheduler + 关闭 MCP 客户端 + 关闭连接池。
+
+    2026-09-11(session-85 断连诊断): 补优雅退出日志。
+    此前退出路径无任何日志 —— agent.log 中"用户手动重启 PA"与"进程崩溃
+    后被 Electron SidecarManager 自动拉起"留下的痕迹完全相同(都只有一行
+    "Sidecar started"), 无法区分。补日志后判定规则:
+      - 有 "Sidecar shutdown: begin" 记录 → 优雅退出(用户重启 / SIGTERM)
+      - 只有 "Sidecar started" 而无 shutdown 记录 → 崩溃或强杀(OOM 等),
+        需另查 stderr / Windows 事件日志
+    """
     global _scheduler
+    uptime = time.monotonic() - _STARTED_MONO if _STARTED_MONO else None
+    _logger.info(
+        "Sidecar shutdown: begin graceful exit (uptime=%s)",
+        f"{uptime:.1f}s" if uptime is not None else "unknown",
+    )
+    scheduler_stopped = False
     if _scheduler is not None and _scheduler.running:
         _scheduler.shutdown(wait=False)
+        scheduler_stopped = True
     # 断开 MCP 客户端(进程级单例, 装配用)
+    mcp_ok = True
     try:
         await _mcp_manager.close_all()
     except Exception:  # noqa: BLE001
-        pass
+        mcp_ok = False
     await db.close_pool()
+    _logger.info(
+        "Sidecar shutdown: done (scheduler=%s mcp=%s db=closed)",
+        "stopped" if scheduler_stopped else "idle",
+        "ok" if mcp_ok else "error",
+    )
 
 
 def run_sidecar() -> None:
@@ -2431,6 +2457,9 @@ def run_sidecar() -> None:
         _inject_rag_paths(cfg)
     host = cfg["server"]["http"]["host"]
     http_port = cfg["server"]["http"]["port"]
+    # 2026-09-11(session-85 断连诊断): 记录启动时刻, 供 shutdown 日志报告 uptime
+    global _STARTED_MONO
+    _STARTED_MONO = time.monotonic()
     _logger.info(f"Sidecar started: host={host} http_port={http_port}")
     uvicorn.run(app, host=host, port=http_port)
 
