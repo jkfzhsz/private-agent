@@ -113,7 +113,8 @@ async def _git_commit_handler(args: dict) -> ToolResult:
 
     Args:
         message: 提交信息(必填)。
-        path: 待提交路径(默认 "." 全部改动)。
+        path: 待提交路径(默认 "." 全部改动; 支持逗号分隔多路径,
+              如 "a.py,b.py" 一次提交多个文件)。
     """
     ws = _workspace(args)
     if not ws:
@@ -122,10 +123,19 @@ async def _git_commit_handler(args: dict) -> ToolResult:
     if not message:
         return ToolResult(output="", error="message required(提交信息必填)")
     path = str(args.get("path") or ".").strip()
-    # 先 add
-    rc, out, err = await asyncio.to_thread(_run_git, ["add", "--", path], ws)
-    if rc != 0:
-        return ToolResult(output="", error=f"git add 失败: {err.strip() or out.strip()}")
+    # 2026-09-11(session-78067 反馈#2): path 支持逗号分隔多路径 —— 一次
+    # commit 覆盖多个文件(原实现单路径, 多文件需拆多次 git_commit, 每次都
+    # 触发权限确认, 一次完整改动要确认多次)。注意不用空格分隔: Windows
+    # 路径本身含空格(D:\Private agent\...), 空格分隔会拆坏单路径。
+    paths = [p.strip() for p in path.split(",") if p.strip()] or ["."]
+    # 先 add(逐个路径)
+    for pth in paths:
+        rc, out, err = await asyncio.to_thread(_run_git, ["add", "--", pth], ws)
+        if rc != 0:
+            return ToolResult(
+                output="",
+                error=f"git add 失败({pth}): {err.strip() or out.strip()}",
+            )
     # commit(禁止 force/amend/push)
     rc, out, err = await asyncio.to_thread(
         _run_git, ["commit", "-m", message], ws,

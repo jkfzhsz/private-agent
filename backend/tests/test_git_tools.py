@@ -220,3 +220,65 @@ def test_pytest_run_selector_validation_with_nodeid():
     assert _missing_selectors(
         backend_dir, ["tests/nope.py::test_x"]
     ) == ["tests/nope.py"]
+
+
+
+def test_git_commit_multiple_paths():
+    """path 逗号分隔多路径 → 一次 commit 覆盖多个文件。
+
+    2026-09-11(session-78067 反馈#2): 原实现 path 只支持单路径, 一次完整
+    改动(多文件)需拆多次 git_commit → 每次触发权限确认。修复后支持
+    "a.py,b.py" 一次 add + 一次 commit, 一次确认完成。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _init_git_repo(tmp)
+        (Path(tmp) / "m1.py").write_text("x", encoding="utf-8")
+        (Path(tmp) / "m2.py").write_text("y", encoding="utf-8")
+        (Path(tmp) / "m3.py").write_text("z", encoding="utf-8")
+
+        async def _run():
+            return await _git_commit_handler(
+                {
+                    "workspace": tmp,
+                    "message": "feat: multi paths",
+                    "path": "m1.py,m2.py,m3.py",
+                }
+            )
+
+        result = asyncio.run(_run())
+        assert result.error is None, result.error
+        assert "已提交" in result.output
+        # 三个文件都在一次 commit 中
+        out = subprocess.run(
+            ["git", "show", "--stat", "--oneline", "HEAD"],
+            cwd=tmp, capture_output=True, text=True, check=True,
+        ).stdout
+        assert "m1.py" in out and "m2.py" in out and "m3.py" in out
+        # 工作区无残留未提交改动
+        st = subprocess.run(
+            ["git", "status", "--short"], cwd=tmp,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert st == ""
+
+
+def test_git_commit_single_path_with_spaces():
+    """含空格单路径(Windows 风格)不被逗号拆分逻辑破坏。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        _init_git_repo(tmp)
+        subdir = Path(tmp) / "dir with space"
+        subdir.mkdir()
+        (subdir / "s.py").write_text("s", encoding="utf-8")
+
+        async def _run():
+            return await _git_commit_handler(
+                {
+                    "workspace": tmp,
+                    "message": "feat: spaced path",
+                    "path": str(subdir / "s.py"),
+                }
+            )
+
+        result = asyncio.run(_run())
+        assert result.error is None, result.error
+        assert "已提交" in result.output

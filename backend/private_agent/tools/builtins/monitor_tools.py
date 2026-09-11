@@ -268,6 +268,27 @@ async def _apply_optim_handler(
             )
             if skipped:
                 result += "\n跳过明细: " + "; ".join(skipped[:5])
+            # 2026-09-11(session-78067 反馈#1): 零执行不得标记 applied ——
+            # 原实现 plan 步骤全非法(非 dict)时 executed=0 仍 UPDATE applied,
+            # 用户侧看到"已执行"但实际什么都没做(确认 1 次 + 1 分钟白等)。
+            # 改为: 零执行 → 保持 approved(可修正 plan 后重试), 返回明确 error。
+            if executed == 0 and skipped:
+                await conn.execute(
+                    "UPDATE optim_log SET result=$2, reviewed_at=now() "
+                    "WHERE id=$1",
+                    int(optim_id),
+                    result,
+                )
+                return ToolResult(
+                    output="",
+                    error=(
+                        f"optim #{row['id']} 零执行: plan 无有效可执行步骤"
+                        f"(跳过 {len(skipped)} 步)。已保持 approved 状态, "
+                        "请修正 plan(每步需为 dict 且 tool 在 "
+                        "code_execution/file_write/file_read 白名单)后重试。\n"
+                        + "跳过明细: " + "; ".join(skipped[:5])
+                    ),
+                )
             await conn.execute(
                 "UPDATE optim_log SET status='applied', result=$2, reviewed_at=now() "
                 "WHERE id=$1",

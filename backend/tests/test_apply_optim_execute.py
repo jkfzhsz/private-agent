@@ -397,3 +397,41 @@ def test_apply_optim_missing_or_unknown_id(monkeypatch):
         assert "不存在" in r2.error
 
     asyncio.run(_run())
+
+
+def test_apply_optim_zero_execution_keeps_approved(monkeypatch):
+    """plan 全为非法步骤 → 零执行, 状态保持 approved(不标记 applied)。
+
+    2026-09-11(session-78067 反馈#1): 原实现 executed=0 仍 UPDATE applied,
+    用户侧看到"已执行"但实际什么都没做。修复后零执行 → 明确 error +
+    状态保持 approved, 便于修正 plan 后重试。
+    """
+    asyncio.run(_run_schema())
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            oid = await _seed_optim(
+                conn, plan=[
+                    "备份文件",        # 非 dict(自然语言步骤)
+                    42,               # 非 dict
+                    {"tool": "rm_rf", "args": {}},  # 非白名单
+                ]
+            )
+            result = await _apply_optim_handler({"optim_id": oid}, ctx=None)
+            row = await conn.fetchrow(
+                "SELECT status, result FROM optim_log WHERE id = $1", oid
+            )
+            return result, row
+        finally:
+            await conn.close()
+
+    result, row = asyncio.run(_run())
+    # 零执行 → 返回明确 error, 不是"已执行"
+    assert result.error is not None
+    assert "零执行" in result.error
+    assert "已保持 approved" in result.error
+    # 状态保持 approved(未流转到 applied)
+    assert row["status"] == "approved"
+    # result 仍落库供追溯
+    assert "跳过 3 步" in row["result"]
