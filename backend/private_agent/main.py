@@ -167,6 +167,26 @@ def _get_pause_controller(session_id: int) -> _PauseController:
     return ctrl
 
 
+def _permission_confirm_timeout() -> float:
+    """确认弹窗等待超时(秒): PA_CONFIRM_TIMEOUT env > config permission.confirm_timeout_sec > 默认 300。
+
+    2026-09-11(session-78067 反馈#3): 原硬编码 60s 太短, 用户漏看/离开时
+    fail-closed 拒绝 → 工具未执行、任务失败(本会话已两次踩坑)。改为可配置,
+    默认拉长到 300s(5 分钟)给足反应窗口; 超时后的拒绝语义不变(安全边界)。
+    """
+    env = os.environ.get("PA_CONFIRM_TIMEOUT", "").strip()
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    try:
+        cfg = loader.load_config()
+        return float(cfg.get("permission", {}).get("confirm_timeout_sec", 300.0))
+    except Exception:  # noqa: BLE001
+        return 300.0
+
+
 def _get_permission_manager(session_id: int):
     """惰性创建会话级 PermissionManager(缓存确认结果按会话隔离)。"""
     global _permission_managers
@@ -174,7 +194,7 @@ def _get_permission_manager(session_id: int):
     if pm is None:
         from private_agent.tools.permission_manager import PermissionManager
 
-        pm = PermissionManager(timeout=60.0)
+        pm = PermissionManager(timeout=_permission_confirm_timeout())
         _permission_managers[session_id] = pm
     return pm
 

@@ -285,6 +285,8 @@ tools:
   permission:
     cache_ttl_sec: 3600  # [runtime]
     elevated_require_ws_confirm: true  # [runtime]
+    confirm_timeout_sec: 300  # [runtime] 确认弹窗等待超时(默认 300s=5 分钟;
+                              # 可用环境变量 PA_CONFIRM_TIMEOUT 覆盖)
   timeout:
     default_sec: 30  # [runtime]
     categories:  # [runtime]
