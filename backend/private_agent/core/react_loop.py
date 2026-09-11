@@ -926,8 +926,44 @@ class ReactLoop:
                     func = tc.get("function", tc)
                     tool_name = func["name"]
                     args_raw = func.get("arguments", "{}")
-                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                     tool_call_id = tc.get("id", f"call_{self._iteration}")
+                    # 2026-09-11(session-78067 中断修复): LLM 偶发输出非法 JSON
+                    # 工具参数(如缺逗号) → json.loads 抛 JSONDecodeError 曾致整轮
+                    # 崩溃(user_message_failed, 需用户重发消息才恢复)。改为单工具
+                    # 降级: error 回传模型自行修正, 不中断整轮 —— 复用 unknown
+                    # tool / 权限拒绝的 early_tool_msgs 模式, Phase C 事务统一落库。
+                    try:
+                        args = (
+                            json.loads(args_raw)
+                            if isinstance(args_raw, str)
+                            else args_raw
+                        )
+                    except (json.JSONDecodeError, TypeError) as _exc:
+                        reason = (
+                            f"tool args JSON parse failed: "
+                            f"{type(_exc).__name__}: {_exc} "
+                            f"(tool={tool_name}, args_raw={str(args_raw)[:200]})"
+                        )
+                        self._logger.warning(
+                            "tool args JSON parse failed (tool=%s): %s",
+                            tool_name, _exc,
+                        )
+                        await self._emit_event(
+                            "tool_result",
+                            payload={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "output": "",
+                                "error": reason,
+                            },
+                        )
+                        early_tool_msgs.append({
+                            "tool_call_id": tool_call_id,
+                            "content": "",
+                            "name": tool_name,
+                            "error": reason,
+                        })
+                        continue
 
                     # V2 状态栏: 记录工具调用(计数供状态栏渲染)
                     self._status_bar.record_tool_call(tool_name)
