@@ -49,6 +49,10 @@ const api = {
   },
   // 2026-08-08: 工作区目录选择(渲染进程调起原生目录选择器)
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("app:pick-directory"),
+  // 2026-09-11(会议室 P2): 在系统文件管理器中打开已存在的目录/文件
+  // (房间信息条「打开目录」)。返回 {ok} 或 {ok:false, error}。
+  openPath: (targetPath: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("app:open-path", targetPath),
 };
 
 contextBridge.exposeInMainWorld("pa", api);

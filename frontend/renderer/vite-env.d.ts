@@ -34,5 +34,7 @@ interface Window {
     adminToken?: string;
     // 2026-08-08: 工作区目录选择(原生目录选择器; 非 Electron 环境不存在)
     pickDirectory?: () => Promise<string | null>;
+    // 2026-09-11(会议室 P2): 在系统文件管理器中打开已存在的目录/文件
+    openPath?: (targetPath: string) => Promise<{ ok: boolean; error?: string }>;
   };
 }

@@ -12,7 +12,14 @@ import ConfirmDialog from "./ConfirmDialog";
 export const SIDEBAR_EXPANDED_WIDTH = 220;
 export const SIDEBAR_COLLAPSED_WIDTH = 44;
 
-export type ViewKey = "home" | "chat" | "knowledge" | "memory" | "agents" | "settings";
+export type ViewKey =
+  | "home"
+  | "chat"
+  | "meeting"
+  | "knowledge"
+  | "memory"
+  | "agents"
+  | "settings";
 
 export interface SessionItem {
   id: number;
@@ -24,7 +31,10 @@ export interface SessionItem {
   user_msg_count?: number;
   updated_at: string | null;
   model_id?: string | null; // 会话选择的模型(auto 为 null/空)
-  kind?: string | null; // main / sub / monitor(0.5.0 P3: 主智能体监控会话)
+  kind?: string | null; // main / sub / monitor / room(0.6.0 P1 会议室)
+  // 0.6.0 P2(会议室): 后端 list_sessions 已下发, 供"会议室"分组行展示
+  // 主持人/成员数(与 kind='room' 配套; 非房间会话为 {})
+  room_meta?: { host_role?: string; members?: string[]; goal?: string } | null;
 }
 
 const stroke = {
@@ -34,6 +44,50 @@ const stroke = {
   strokeLinecap: "round" as const,
   strokeLinejoin: "round" as const,
 };
+
+/** 历史的"场景类"分组键(不含 global)。 */
+export const HISTORY_SCENE_KEYS = [
+  "monitor",
+  "room",
+  "office",
+  "data_analysis",
+  "frontend_design",
+] as const;
+
+/**
+ * 0.6.0 P2(会议室): 会话 → 历史分组键。
+ *
+ * kind 优先于 locked_skill_name —— 房间会话的 locked_skill_name 是**主持人
+ * 角色**(office/data_analysis/frontend_design), 若不先判 kind='room' 就会被
+ * 误归入"子瞻/白圭/清和"场景组, 历史树看不出这是一次多智能体协同。
+ */
+export function historyGroupKey(
+  s: Pick<SessionItem, "kind" | "locked_skill_name">
+): string {
+  if (s.kind === "room") return "room";
+  if (s.kind === "monitor") return "monitor";
+  const locked = s.locked_skill_name;
+  return HISTORY_SCENE_KEYS.includes(
+    locked as (typeof HISTORY_SCENE_KEYS)[number]
+  )
+    ? locked!
+    : "global";
+}
+
+/** 按 historyGroupKey 分组(纯函数, 便于单测)。 */
+export function groupHistorySessions(
+  sessions: SessionItem[]
+): Map<string, SessionItem[]> {
+  const map = new Map<string, SessionItem[]>();
+  for (const k of HISTORY_SCENE_KEYS) map.set(k, []);
+  map.set("global", []);
+  for (const s of sessions) {
+    const key = historyGroupKey(s);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(s);
+  }
+  return map;
+}
 
 const WORKSPACE_ITEMS: { key: ViewKey; label: string; icon: JSX.Element }[] = [
   {
@@ -51,6 +105,20 @@ const WORKSPACE_ITEMS: { key: ViewKey; label: string; icon: JSX.Element }[] = [
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" style={stroke}>
         <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+      </svg>
+    ),
+  },
+  {
+    // 2026-09-11(会议室 P2): 多智能体协同入口(设计文档 §7.1)。
+    // 置于「对话」之后 —— 单会话 → 多智能体协同, 认知顺序自然。
+    key: "meeting",
+    label: "会议室",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" style={stroke}>
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
       </svg>
     ),
   },
@@ -381,22 +449,15 @@ function TaskTree({
   // (对话名后带"已归档"标签), 取消底部独立"已归档"大区。
   const SCENE_GROUPS: { key: string; name: string; icon: string }[] = [
     { key: "monitor", name: agentName || "主智能体", icon: "🤖" },
+    // 0.6.0 P2(2026-09-11 会议室): 房间单独成组 —— 否则会因
+    // locked_skill_name = 主持人角色(office/data_analysis/frontend_design)
+    // 被误归入"子瞻/白圭/清和"场景组, 从历史树看不出这是一次协同。
+    { key: "room", name: "会议室", icon: "🏛" },
     { key: "office", name: "子瞻", icon: "📄" },
     { key: "data_analysis", name: "白圭", icon: "📈" },
     { key: "frontend_design", name: "清和", icon: "🎨" },
   ];
-  const sceneMap = new Map<string, SessionItem[]>();
-  for (const g of SCENE_GROUPS) sceneMap.set(g.key, []);
-  sceneMap.set("global", []);
-  for (const s of sessions) {
-    const key =
-      s.kind === "monitor"
-        ? "monitor"
-        : SCENE_GROUPS.some((g) => g.key === s.locked_skill_name)
-          ? s.locked_skill_name!
-          : "global";
-    sceneMap.get(key)!.push(s);
-  }
+  const sceneMap = groupHistorySessions(sessions);
 
   const toggleScene = (key: string): void => {
     setSceneOpen((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -498,7 +559,15 @@ function TaskTree({
               )}
             </span>
             <span className="fs-10 text-tertiary">
-              {sceneName(s.locked_skill_name)}
+              {/* 0.6.0 P2: 房间行不写"子瞻"(那是主持人, 不是单会话归属),
+                  改写「主持人 X · N 人」—— 与房间信息条同一语义 */}
+              {s.kind === "room"
+                ? `主持人 ${sceneName(s.locked_skill_name)}${
+                    (s.room_meta?.members?.length ?? 0) > 0
+                      ? ` · ${s.room_meta!.members!.length} 人`
+                      : ""
+                  }`
+                : sceneName(s.locked_skill_name)}
               {s.last_turn > 0 ? ` · ${s.last_turn} 轮` : ""}
               {s.user_msg_count ? ` · ${s.user_msg_count} 条` : ""}
             </span>

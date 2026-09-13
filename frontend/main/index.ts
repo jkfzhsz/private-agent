@@ -3,10 +3,10 @@
 // 流程:whenReady → 加载 backend/.env(可选) → loadSidecarConfig →
 // SidecarManager.start(拉起 Python Sidecar) → waitForHealth → createWindow;
 // 退出时停止 Sidecar。
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { execSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { isAbsolute, join } from "path";
 import { loadSidecarConfig } from "./config-loader";
 import { SidecarManager } from "./sidecar";
 import { createWindow } from "./window";
@@ -247,6 +247,23 @@ app.whenReady().then(() => {
       return result.filePaths[0];
     } catch {
       return null;
+    }
+  });
+
+  // 2026-09-11(会议室 P2): 在系统文件管理器中打开目录/文件。
+  // 用途: 房间信息条的「打开目录」—— 产物交接后用户要直接去看房间共享目录。
+  // 安全: 只接受绝对路径且必须**已存在**(不存在直接返回错误, 不触发系统弹窗);
+  // shell.openPath 只做"交给系统默认程序打开", 不执行路径内容。
+  ipcMain.handle("app:open-path", async (_event, targetPath: string) => {
+    try {
+      const p = String(targetPath ?? "").trim();
+      if (!p) return { ok: false, error: "empty_path" };
+      if (!isAbsolute(p)) return { ok: false, error: "not_absolute" };
+      if (!existsSync(p)) return { ok: false, error: "not_found" };
+      const err = await shell.openPath(p);
+      return err ? { ok: false, error: err } : { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
     }
   });
 

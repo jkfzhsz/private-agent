@@ -43,6 +43,8 @@ const KnowledgeView = lazy(() => import("./views/KnowledgeView"));
 const MemoryView = lazy(() => import("./views/MemoryView"));
 const SettingsView = lazy(() => import("./views/SettingsView"));
 const AgentLibraryView = lazy(() => import("./views/AgentLibraryView"));
+// 0.6.0 P2(2026-09-11): 会议室视图(房间列表 + 新建弹层) —— 懒加载与其余视图一致
+const MeetingRoomView = lazy(() => import("./views/MeetingRoomView"));
 
 // V1.5 项-1(ADR-012 §3.4 M3): 子任务卡片面板(WS 即时刷新 + DB 轮询兜底)
 import SubagentPanel, {
@@ -53,12 +55,17 @@ import SubagentPanel, {
 // D 批后端实现推送 + GET /admin/missions 轮询兜底)
 import MissionPanel, {
   createMission,
+  missionStateFromRow,
+  normalizePlan,
   type MissionJournalEntry,
   type MissionMilestone,
   type MissionState,
   type MissionStateKind,
 } from "./components/MissionPanel";
 import { TurnCard, type TurnGroupData, type ReactEvent, type EventType } from "./components/TurnCard";
+// 0.6.0 P2(2026-09-11): 会议室 —— 房间信息条 + 房间 API/角色表(设计文档 §7.3)
+import RoomInfoBar from "./components/RoomInfoBar";
+import { getRoom, roleName, type RoomInfo } from "./utils/rooms";
 
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -108,6 +115,9 @@ interface WSMessage {
   detail?: string;
   reason?: string;
   entry?: { kind: string; ts: string; detail?: string };
+  // 0.6.0 P3(V1/V2): mission_created/update 携带的里程碑数组
+  // [{id, milestone, executor_type, role?, status}](后端 _mission_plan_view)
+  plan?: unknown;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -318,6 +328,11 @@ export default function App(): JSX.Element {
   const [realSessionId, setRealSessionId] = useState<number | null>(null);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [view, setView] = useState<ViewKey>("home");
+  // 0.6.0 P2(2026-09-11 会议室): 当前打开的房间(元数据 + 目录清单)。
+  // null = 未进入房间(会议室视图显示房间列表); 非 null = 房间内(显示信息条 +
+  // MissionPanel + 对话区)。房间**不属于**四个单智能体窗口 —— 否则会顶掉
+  // 主持人自己的窗口快照(见 enterMeetingRoom 的 activeSlot = -1)。
+  const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
   // V1.4-8.4 主题切换(light/dark, localStorage 持久化)
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     try {
@@ -685,6 +700,12 @@ export default function App(): JSX.Element {
     modelId?: string | null,
     kind?: string | null
   ): void => {
+    // 0.6.0 P2(会议室): 历史树点房间 → 走会议室呈现(房间信息条 + 房间语义),
+    // 而非按 locked_skill_name(主持人角色)当成"子瞻的单会话"打开。
+    if (kind === "room") {
+      void enterMeetingRoom(id);
+      return;
+    }
     if (id === sessionId && view === "chat") return;
     // 0.5.0 P2: 切换会话前保存当前窗口快照(输入框/事件流不丢失)
     saveWindowSnapshot();
@@ -934,6 +955,101 @@ export default function App(): JSX.Element {
       toast.error(`进入监控窗口失败: ${String(e)}`);
     }
   }, [saveWindowSnapshot, bumpSlots]);
+
+  // ── 0.6.0 P2(2026-09-11 会议室): 进入 / 退出房间 ────────────────────────
+  // 进入房间 = 把当前会话切到房间会话(kind='room', 主持人即该会话主循环)。
+  // 与 enterMonitorWindow 的关键差异: 房间**不占用**四个单智能体窗口 ——
+  // 主持人可能是子瞻/白圭/清和任一, 若复用其槽位会顶掉该智能体自己的窗口
+  // 快照。故 activeSlot 置 -1(不参与 WINDOW_SLOTS, 审批面板等 activeSlot===0
+  // 的门控自然不触发); 侧边栏用「会议室」项表达当前所在位置。
+  const enterMeetingRoom = useCallback(
+    async (roomId: number): Promise<void> => {
+      saveWindowSnapshot();
+      try {
+        const info = await getRoom(roomId);
+        // 归档房间进入即恢复(可继续对话); 失败不影响进入
+        if (info.status === "archived") {
+          void adminFetch(
+            `http://127.0.0.1:8765/admin/sessions/${roomId}`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "active" }),
+            }
+          ).catch(() => undefined);
+        }
+        setRoomInfo(info);
+        setView("meeting");
+        // 复用既有对话管线: 与 handleSwitchSession 同款状态重置
+        setIsPaused(false);
+        setIsGenerating(false);
+        setEvents([]);
+        setInput("");
+        // 助手名/模型标签沿用既有渲染 —— 房间内助手即主持人
+        setActiveSkill(info.host_role || null);
+        lastTurnRef.current = 0;
+        setTurnStartTimes(new Map());
+        setTurnEndTimes(new Map());
+        setTurnDurations(new Map());
+        reconnectAttemptRef.current = 0;
+        setSubagents({});
+        setMissions({});
+        setResumeInfo(null);
+        fullReloadRef.current = true;
+        // 同步 ref(不等 effect) —— 切换瞬间旧窗口事件不误收
+        sessionIdRef.current = roomId;
+        realSessionIdRef.current = roomId;
+        activeSlotRef.current = -1;
+        setRealSessionId(roomId);
+        setSessionId(roomId);
+        setActiveSlot(-1);
+      } catch (e) {
+        toast.error(`进入会议室失败: ${String(e)}`);
+      }
+    },
+    [saveWindowSnapshot]
+  );
+
+  // 退出房间 → 回到会议室列表(房间与产物全部保留, 不归档 —— 归档是
+  // 「关闭房间」语义, 见 closeRoom)。
+  const exitRoomToList = useCallback((): void => {
+    setRoomInfo(null);
+    setView("meeting");
+  }, []);
+
+  // 0.6.0 P4(会议室收尾): 「关闭房间」= 归档(可恢复), 与「← 房间列表」
+  // (仅离开、保留)区分 —— 设计文档 §4.6: 退出归档, 历史树「🏛 会议室」组
+  // 可见可恢复; 再次进入会自动把 status 置回 active(enterMeetingRoom)。
+  // 产物/交接文件**不删**, 仍在房间共享目录。
+  const closeRoom = useCallback((): void => {
+    const roomId = realSessionIdRef.current ?? sessionIdRef.current;
+    if (roomId && roomId > 0) {
+      void adminFetch(`http://127.0.0.1:8765/admin/sessions/${roomId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "archived" }),
+      })
+        .then((r) => {
+          if (r.ok) {
+            void notifyUser(
+              "房间已归档",
+              "可在历史树「🏛 会议室」组找到并点击恢复；成员产物仍保留在房间共享目录"
+            );
+          }
+        })
+        .catch(() => undefined);
+    }
+    setRoomInfo(null);
+    setView("meeting");
+  }, []);
+
+  // 侧边栏导航: 任何导航都退出房间呈现(roomInfo 的语义 = "当前正在房间内"),
+  // 点「会议室」回到房间列表, 点其他项则普通视图 —— 不会把房间信息条带到
+  // 子瞻/白圭/清和的单会话对话里。
+  const handleNavigate = useCallback((v: ViewKey): void => {
+    setRoomInfo(null);
+    setView(v);
+  }, []);
 
   // 切换窗口: 保存当前 → 恢复目标(有快照)或重置为新窗口
   const switchWindow = useCallback(
@@ -1505,6 +1621,36 @@ export default function App(): JSX.Element {
       })
       .catch(() => {
         /* 轮询失败静默(WS 事件仍可即时刷新) */
+      });
+  }, []);
+
+  // 0.6.0 P3(V3/G6 修复): mission 卡片 DB 轮询兜底 —— 后端 GET /admin/missions
+  // 早已就绪, 但前端从未调用(G6); WS mission_* 断线/重开会丢, 长任务进度
+  // 只能靠它全量重建。合并原则同 fetchSubagents: WS 实时字段优先保留,
+  // state/milestones/journal 以 DB 为准。
+  const fetchMissions = useCallback((): void => {
+    void adminFetch(
+      `http://127.0.0.1:8765/admin/missions?session_id=${sessionIdRef.current}`
+    )
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: unknown[]) => {
+        if (!Array.isArray(rows) || rows.length === 0) return;
+        setMissions((prev) => {
+          const next: Record<number, MissionState> = { ...prev };
+          for (const row of rows) {
+            if (!row || typeof row !== "object") continue;
+            const id = Number((row as { id?: unknown }).id);
+            if (!Number.isFinite(id)) continue;
+            next[id] = missionStateFromRow(
+              row as Record<string, unknown>,
+              prev[id]
+            );
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        /* 轮询失败静默 */
       });
   }, []);
 
@@ -2274,9 +2420,17 @@ export default function App(): JSX.Element {
         }
         if (msg.mission_id) {
           const mid = msg.mission_id as number;
+          // 0.6.0 P3(V1/G5 修复): 后端 payload 已带 goal + plan —— 此前只有
+          // id/state, 里程碑列表恒为空, 首帧只能靠 REST 兜底。
+          const milestones = Array.isArray(msg.plan)
+            ? normalizePlan(msg.plan)
+            : [];
           setMissions((prev) => ({
             ...prev,
-            [mid]: createMission(mid, String(msg.goal ?? ""), (msg.state as MissionStateKind) ?? "planning"),
+            [mid]: {
+              ...createMission(mid, String(msg.goal ?? ""), (msg.state as MissionStateKind) ?? "planning"),
+              milestones,
+            },
           }));
         }
         break;
@@ -2287,9 +2441,19 @@ export default function App(): JSX.Element {
         }
         if (msg.mission_id) {
           const mid = msg.mission_id as number;
+          // 0.6.0 P3(V2): 里程碑状态(plan)随 mission_update 实时下发,
+          // doneCount 不再只能等 mission_done。
+          const nextMilestones = Array.isArray(msg.plan)
+            ? normalizePlan(msg.plan)
+            : undefined;
           setMissions((prev) =>
             prev[mid]
-              ? { ...prev, [mid]: { ...prev[mid], state: (msg.state as MissionStateKind) ?? prev[mid].state, detail: msg.detail ? String(msg.detail) : prev[mid].detail } }
+              ? { ...prev, [mid]: {
+                  ...prev[mid],
+                  state: (msg.state as MissionStateKind) ?? prev[mid].state,
+                  detail: msg.detail ? String(msg.detail) : prev[mid].detail,
+                  ...(nextMilestones ? { milestones: nextMilestones } : {}),
+                } }
               : prev
           );
         }
@@ -2491,6 +2655,8 @@ export default function App(): JSX.Element {
         });
         // V1.5 项-1(M3 R7): 重连后从 DB 重建子代理卡片(WS 丢事件兜底)
         fetchSubagents();
+        // 0.6.0 P3(V3): 重连后同样重建 mission 卡片(WS mission_* 会丢)
+        fetchMissions();
       };
 
       ws.onmessage = (ev: MessageEvent) => {
@@ -2732,8 +2898,10 @@ export default function App(): JSX.Element {
         last_event_id: maxEventIdRef.current || undefined,
       });
       fetchSubagents();
+      // 0.6.0 P3(V3): 切换会话同步重建 mission 卡片
+      fetchMissions();
     }
-  }, [sessionId, sendWs, fetchSubagents]);
+  }, [sessionId, sendWs, fetchSubagents, fetchMissions]);
 
   // ── 生命周期:挂载时连接,卸载时关闭 ──────────────────────────────────────
   // 0.5.0 P6(2026-08-09): 依赖去掉 sessionId —— 单 WS 复用, WS 只在挂载时
@@ -2919,7 +3087,7 @@ export default function App(): JSX.Element {
       >
         <Sidebar
           active={view}
-          onChange={setView}
+          onChange={handleNavigate}
           currentSessionId={realSessionId ?? sessionId}
           onSwitchSession={handleSwitchSession}
           status={status}
@@ -2983,7 +3151,19 @@ export default function App(): JSX.Element {
                 故 PA 图标进入后渲染与场景会话一致的对话视图(chat), 顶部 tab 条 +
                 消息列表 + 输入框。MonitorPanel 移除(监控工具由主智能体在对话中
                 主动调用 system_metrics_query/system_status 完成分析)。 */}
-            {view === "chat" && (
+            {/* 0.6.0 P2(2026-09-11): 会议室 —— 未进入房间时显示房间列表 + 新建弹层 */}
+            {view === "meeting" && !roomInfo && (
+              <Suspense
+                fallback={
+                  <div style={{ padding: 24, fontSize: 13, color: "var(--text-tertiary)" }}>加载中…</div>
+                }
+              >
+                <MeetingRoomView onEnterRoom={(id) => void enterMeetingRoom(id)} />
+              </Suspense>
+            )}
+            {/* 0.6.0 P2(2026-09-11): 房间内复用既有对话区(view="meeting" 且已进房间),
+                房间信息条在下方对话头部之后插入 —— 避免复制一份 900 行对话视图。 */}
+            {(view === "chat" || (view === "meeting" && roomInfo)) && (
               <div
                 className="glass-panel"
                 style={{
@@ -3167,6 +3347,17 @@ export default function App(): JSX.Element {
                     )}
                   </div>
                 </div>
+                {/* 0.6.0 P2(会议室 §7.3): 房间信息条 —— 主持人/成员/共享目录常驻可见。
+                    产物交接是核心诉求, 目录不可见则交接退化为猜测。 */}
+                {view === "meeting" && roomInfo && (
+                  <RoomInfoBar
+                    info={roomInfo}
+                    onExit={exitRoomToList}
+                    onNotify={(text, ok) =>
+                      ok === false ? toast.error(text) : toast.info(text)
+                    }
+                  />
+                )}
                 {/* V1.5 项-4: 断点恢复横幅(interrupted 会话 + 存在 checkpoint) */}
                 {resumeInfo?.resumable && !isGenerating && (
                   <div
@@ -3211,8 +3402,16 @@ export default function App(): JSX.Element {
                 >
         {turnGroups.length === 0 && (
           <div style={{ color: "var(--text-tertiary)", textAlign: "center", paddingTop: 40, lineHeight: 1.8 }}>
-            {/* 0.5.0 P6(2026-08-09): 统一渲染后空态按角色区分 —— 主智能体显示监控引导 */}
-            {activeSlot === 0 && !activeSkill ? (
+            {/* 0.6.0 P2: 房间空态 —— 明确"主持人统筹、产物落共享目录"的协作语义 */}
+            {view === "meeting" && roomInfo ? (
+              <>
+                你是本次会议的主持人「{roleName(roomInfo.host_role)}」。
+                <br />
+                说明会议目标即可 —— 主持人会拆解任务并派给
+                {roomInfo.members.length > 1 ? "其他成员" : "成员"}，产物统一落在房间共享目录。
+              </>
+            ) : /* 0.5.0 P6(2026-08-09): 统一渲染后空态按角色区分 —— 主智能体显示监控引导 */
+            activeSlot === 0 && !activeSkill ? (
               <>
                 我是{agentName || "主智能体"} —— 负责系统监控与优化。
                 <br />
@@ -4884,13 +5083,20 @@ export default function App(): JSX.Element {
         {/* P0-3(2026-08-17): 玻璃确认弹层(替代 window.confirm) */}
         <ConfirmDialog
           open={closeConfirmOpen}
-          title="关闭当前对话"
-          body="将归档至历史任务, 可随时恢复。"
-          confirmText="关闭"
+          title={view === "meeting" && roomInfo ? "关闭会议室" : "关闭当前对话"}
+          body={
+            view === "meeting" && roomInfo
+              ? "房间将归档至历史树「🏛 会议室」组，可随时恢复；成员产物仍保留在房间共享目录。"
+              : "将归档至历史任务, 可随时恢复。"
+          }
+          confirmText={view === "meeting" && roomInfo ? "关闭房间" : "关闭"}
           danger
           onConfirm={() => {
             setCloseConfirmOpen(false);
-            closeWindow(activeSlot);
+            // 0.6.0 P4: 房间走 closeRoom(归档 + 回会议室列表),
+            // 不走 closeWindow —— 房间不占四窗口槽位(activeSlot=-1)。
+            if (view === "meeting" && roomInfo) closeRoom();
+            else closeWindow(activeSlot);
           }}
           onCancel={() => setCloseConfirmOpen(false)}
         />
