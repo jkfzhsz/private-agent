@@ -44,6 +44,11 @@ backend/skills/reasonix-skills-main.zip
 # 运行时用户配置(不入库)
 backend/agent-profile.json
 
+# 本地备份归档(不入库) —— .bak 等备份统一移入 D:\Private agent\archive\
+# 2026-09-13: 加此行前 archive/ 一直是"未追踪但未被忽略"状态, 若误用
+# `git add -A` 会把备份带进仓库; 显式忽略以消除该隐患。
+archive/
+
 # HuggingFace 模型缓存(不入库)
 models--*/
 
