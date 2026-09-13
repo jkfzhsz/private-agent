@@ -716,14 +716,17 @@ async def _get_system_prompt(cfg, session_id: int, conn):
     from private_agent.tools.mcp_tools import build_tools_guide
     from private_agent.tools.registry import ToolRegistry
 
-    locked_skill = await conn.fetchval(
-        "SELECT locked_skill_name FROM sessions WHERE id = $1",
+    # 0.6.0 P1 会议室: 一次取回 locked_skill/kind/room_meta/workspace。
+    # room_meta 供下方「会议室约定」注入使用(房间会话与其成员子会话均非空,
+    # 其余会话为 NULL → 零影响); 合并查询避免为房间场景多打一次往返。
+    sess_row = await conn.fetchrow(
+        "SELECT locked_skill_name, kind, room_meta, workspace "
+        "FROM sessions WHERE id = $1",
         session_id,
     )
+    locked_skill = sess_row["locked_skill_name"] if sess_row is not None else None
     # 0.5.0 P3: monitor 会话(主智能体) → 专属监控提示词
-    session_kind = await conn.fetchval(
-        "SELECT kind FROM sessions WHERE id = $1", session_id
-    )
+    session_kind = sess_row["kind"] if sess_row is not None else None
     if session_kind == "monitor":
         # 2026-08-13 fix: _monitor_system_prompt 是 async, 此前缺 await →
         # base_prompt 变成 coroutine repr, monitor 会话(无涯)系统提示词损坏
@@ -831,6 +834,35 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         base_prompt = f"{base_prompt}{runtime_guidelines}"
     except Exception:  # noqa: BLE001
         _logger.warning("runtime guidelines injection failed", exc_info=True)
+    # 0.6.0 P1 会议室(W3): 注入「会议室约定」——共享目录分工(artifacts/ 放产物、
+    # notes/ 记交接)与主持人/成员各自职责。触发条件 = room_meta 非空:
+    #   · kind='room' → 主持人视角(统筹 / 委派角色 / 收口复用上游产物);
+    #   · kind='sub'  → 成员视角(只讲"写哪里 / 读哪里", 与成员自身场景人格
+    #     零冲突, 避免成员擅自发起委派)。
+    # 非房间会话 room_meta 为 NULL → 完全零影响(零回归)。
+    try:
+        from private_agent.core import room as room_core
+
+        room_meta = (
+            room_core.parse_room_meta(sess_row["room_meta"])
+            if sess_row is not None
+            else {}
+        )
+        if room_meta:
+            room_contract = room_core.build_room_contract(
+                goal=str(room_meta.get("goal") or ""),
+                host_role=str(room_meta.get("host_role") or ""),
+                members=list(room_meta.get("members") or []),
+                room_dir=str(
+                    (sess_row["workspace"] if sess_row is not None else "") or ""
+                ),
+                self_role=str(locked_skill or ""),
+                is_host=session_kind == room_core.ROOM_KIND,
+            )
+            if room_contract:
+                base_prompt = f"{base_prompt}\n\n{room_contract}"
+    except Exception:  # noqa: BLE001
+        _logger.warning("room contract injection failed", exc_info=True)
     try:
         servers = cfg.get("tools", {}).get("mcp", {}).get("servers", [])
         guide = build_tools_guide(_get_mcp_manager(), servers)
@@ -1755,6 +1787,45 @@ async def _handle_user_message(
                 build_delegate_subtask_tool,
             )
 
+            # 0.6.0 P1(会议室, 2026-09-11): 角色工具装配解析器。
+            # 按房间角色解析该角色的工具白名单, 与场景会话**同源**
+            # (同 SkillLoader → 同 manifest.dependencies.tools 算法 → 同 MCP
+            # skill_binding), 保证角色子代理的工具集与"该角色独立场景会话"
+            # 逐项一致 —— 这是设计文档 §4.4 首项风险「只换人格不换工具」的守门。
+            # 注意: 刻意不改造 _get_frozen_tools 复用它 —— 该函数的返回值参与
+            # 全量会话的 frozen_hash 计算, 任何细微差异都会触发冻结区重建。
+            async def _resolve_role_tools(role: str) -> list:
+                from private_agent.core.room import resolve_role_whitelist
+                from private_agent.tools.builtins import register_all_builtins
+                from private_agent.tools.registry import ToolRegistry
+
+                whitelist = await resolve_role_whitelist(cfg, conn, role)
+                whitelist |= _ALWAYS_AVAILABLE_TOOLS
+                registry = ToolRegistry()
+                register_all_builtins(registry)
+                builtins_for_role = registry.list_tools_for_session(
+                    sorted(whitelist)
+                )
+                # MCP 外轨: 按该角色的 skill_binding 装配(与 _get_tools 同语义)。
+                # MCP 装配失败降级为"仅内置工具"而非让整个委派失败 ——
+                # 角色专属工具之外的能力缺失比委派直接报错更可接受(有日志)。
+                mcp_tools: list = []
+                try:
+                    binding = (
+                        cfg.get("tools", {})
+                        .get("mcp", {})
+                        .get("skill_binding", {})
+                        or {}
+                    )
+                    bound = binding.get(role)
+                    server_ids = list(bound) if bound is not None else None
+                    mcp_tools = await _get_mcp_manager().get_tools(cfg, server_ids)
+                except Exception:  # noqa: BLE001
+                    _logger.exception(
+                        "room role MCP assembly failed: role=%s", role
+                    )
+                return [*builtins_for_role, *mcp_tools]
+
             tools = [
                 *tools,
                 build_delegate_subtask_tool(
@@ -1770,6 +1841,7 @@ async def _handle_user_message(
                         lambda m: _build_session_adapter(cfg, m)
                     ),
                     compress_adapter=_build_compress_adapter(cfg),
+                    role_tools_resolver=_resolve_role_tools,
                 ),
             ]
             # 0.6.0 D-1(W1/W2/W3): Mission 层工具装配 —— mission_create/status/control
@@ -1799,6 +1871,9 @@ async def _handle_user_message(
                     adapter_factory=lambda m: _build_session_adapter(cfg, m),
                     compress_adapter=_build_compress_adapter(cfg),
                     tools=tools,
+                    # 0.6.0 P3(W4 会议室): 里程碑 role → 角色工具白名单
+                    # (复用 delegate 的解析闭包, 与该角色场景会话逐项一致)。
+                    role_tools_resolver=_resolve_role_tools,
                 )
                 if not spawned:
                     # 并发满/状态不可运行: 事件已由 spawn 日志记录, mission 停留
@@ -1815,6 +1890,9 @@ async def _handle_user_message(
                     cfg=cfg,
                     session_id=session_id,
                     runner_factory=_mission_spawn,
+                    # 0.6.0 P3(W4 会议室): role 仅会议室会话可用 —— 创建时
+                    # 即拒绝, 不留半成品 mission 行。
+                    room_scope=session_kind == "room",
                 ),
                 build_install_preflight_tool(cfg),
             ]

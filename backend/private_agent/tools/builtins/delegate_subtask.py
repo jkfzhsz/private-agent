@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable
 
+from private_agent.core import room as room_core
 from private_agent.core.subagent import (
     SubagentRunner,
     grace_expired_ids,
@@ -68,6 +69,20 @@ DELEGATE_SCHEMA: dict = {
                             "注意: 同一轮同一类型最多 1 个子任务, 同类任务请合并。"
                         ),
                     },
+                    "role": {
+                        "type": "string",
+                        "enum": ["office", "data_analysis", "frontend_design"],
+                        "description": (
+                            "0.6.0 P1(会议室, 可选): 以指定场景智能体的身份执行本子任务 ——"
+                            "该角色的**人格、知识库与工具白名单**一并生效"
+                            "(office=子瞻/文档汇报, data_analysis=白圭/投资分析, "
+                            "frontend_design=清和/商务 PPT 与 HTML)。"
+                            "缺省时继承主持人的角色。"
+                            "典型用途: 把上游产物交给另一角色的专长环节"
+                            "(如主持子瞻出汇报稿后, 以 frontend_design 转商务 PPT)。"
+                            "仅会议室会话(kind='room')可用。"
+                        ),
+                    },
                 },
                 "required": ["id", "prompt"],
             },
@@ -87,6 +102,7 @@ def build_delegate_subtask_tool(
     system_prompt_factory: Callable[..., Awaitable[str]],
     adapter_factory: Callable[[str | None], Any],
     compress_adapter: Any | None = None,
+    role_tools_resolver: Callable[[str], Awaitable[list[Any]]] | None = None,
 ) -> ToolDef:
     """构建绑定当轮上下文的 delegate_subtask 工具(ADR-012 §3.5)。
 
@@ -99,6 +115,10 @@ def build_delegate_subtask_tool(
         system_prompt_factory: async (conn, sub_session_id) -> str。
         adapter_factory: (model_id) -> ModelAdapter。
         compress_adapter: 上下文压缩适配器(可 None)。
+        role_tools_resolver: 0.6.0 P1(会议室) —— async (role) -> list[ToolDef],
+            按房间角色解析该角色的工具白名单(与场景会话同源)。由 main.py
+            闭包注入(与 system_prompt_factory 同模式), 避免本模块反向依赖
+            main 的白名单常量与 MCP 装配。None 时任何 role 请求都会被拒绝。
     """
     sc = subagent_cfg(cfg)
 
@@ -114,6 +134,7 @@ def build_delegate_subtask_tool(
             system_prompt_factory=system_prompt_factory,
             adapter_factory=adapter_factory,
             compress_adapter=compress_adapter,
+            role_tools_resolver=role_tools_resolver,
         )
 
     return ToolDef(
@@ -148,8 +169,9 @@ async def _delegate_handler(
     system_prompt_factory,
     adapter_factory,
     compress_adapter,
+    role_tools_resolver=None,
 ) -> ToolResult:
-    """委派 handler: 校验 → 建行 → 并行 spawn → 轮询等待 + watchdog → 聚合。"""
+    """委派 handler: 校验 → 角色装配 → 建行 → 并行 spawn → 轮询等待 + watchdog → 聚合。"""
     subtasks = args.get("subtasks", [])
     if not isinstance(subtasks, list) or not subtasks:
         return ToolResult(output="", error="delegate_subtask: subtasks 不能为空")
@@ -172,6 +194,11 @@ async def _delegate_handler(
                 output="",
                 error=f"delegate_subtask: subtasks[{i}].id/prompt 必须为字符串",
             )
+        if st.get("role") is not None and not isinstance(st["role"], str):
+            return ToolResult(
+                output="",
+                error=f"delegate_subtask: subtasks[{i}].role 必须为字符串",
+            )
     # 防御性嵌套校验(子代理工具列表不含本工具, 深度恒 1; 保底防异常注入)
     kind = await conn.fetchval("SELECT kind FROM sessions WHERE id=$1", session_id)
     if kind == "sub":
@@ -179,6 +206,58 @@ async def _delegate_handler(
             output="",
             error="delegate_subtask: 子代理不支持嵌套委派(嵌套深度上限)",
         )
+
+    # ── 0.6.0 P1(会议室): 角色维度的准入与工具装配 ──────────────────────
+    # 角色切换 = 人格 + 知识库 + **工具白名单**的原子替换。若只换人格不换工具,
+    # 会造成「清和的脑子配子瞻的手」—— 可能越权或触发 skill 权限规则。
+    # 非会议室会话不接受 role: 防止普通会话借该参数越权到其他技能的工具体系。
+    # 设计文档 §4.4。
+    roles: list[str | None] = [st.get("role") or None for st in subtasks]
+    if any(roles):
+        if kind != room_core.ROOM_KIND:
+            return ToolResult(
+                output="",
+                error=(
+                    "delegate_subtask: role 仅会议室会话可用"
+                    f"(当前会话 kind={kind!r})。"
+                ),
+            )
+        for i, r in enumerate(roles):
+            if r is not None and not room_core.is_room_role(r):
+                return ToolResult(
+                    output="",
+                    error=(
+                        f"delegate_subtask: subtasks[{i}].role={r!r} 非法; "
+                        f"允许值: {', '.join(room_core.ROOM_ROLES)}"
+                    ),
+                )
+    # 角色工具白名单解析: 必须在**任何副作用之前**完成(建行 / 类型配额 acquire
+    # 之前) —— 解析失败直接返回, 不留 pending 行、无需回滚已获取配额。
+    # 同一角色只解析一次(多子任务复用同一 list)。
+    tools_by_role: dict[str, list[Any]] = {}
+    runner_tools: list[list[Any]] = []
+    for r in roles:
+        if r is None:
+            runner_tools.append(tools)
+            continue
+        if r not in tools_by_role:
+            if role_tools_resolver is None:
+                return ToolResult(
+                    output="",
+                    error=(
+                        "delegate_subtask: 未装配角色工具解析器"
+                        "(role_tools_resolver)"
+                    ),
+                )
+            try:
+                tools_by_role[r] = await role_tools_resolver(r)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("role tools resolve failed: role=%s", r)
+                return ToolResult(
+                    output="",
+                    error=f"delegate_subtask: 角色 {r} 工具装配失败: {e}",
+                )
+        runner_tools.append(tools_by_role[r])
 
     # 2026-08-13 类型感知限流(方案 §4.2): 类型判定 + 同轮去重。
     # 蒋先生设计意图: 同一类型的任务不要分派多个子任务(搜索的就搜索、分析的就分析),
@@ -258,6 +337,7 @@ async def _delegate_handler(
         })
 
     # 2) 并行 spawn runner(数量已 ≤ max_parallel, 无需再 Semaphore 限流)
+    #    工具集与角色按子任务逐项对齐(role 缺省时 = 父会话 tools, 零回归)
     runners = [
         SubagentRunner(
             cfg=cfg,
@@ -266,13 +346,16 @@ async def _delegate_handler(
             prompt=st["prompt"],
             parent_session_id=session_id,
             parent_turn=parent_turn,
-            tools=tools,
+            tools=sub_tools,
             event_sink=event_sink,
             system_prompt_factory=system_prompt_factory,
             adapter_factory=adapter_factory,
             compress_adapter=compress_adapter,
+            role_skill=role,
         )
-        for sid, st in zip(subagent_ids, subtasks)
+        for sid, st, sub_tools, role in zip(
+            subagent_ids, subtasks, runner_tools, roles
+        )
     ]
     tasks = {sid: asyncio.create_task(r.run()) for sid, r in zip(subagent_ids, runners)}
     tasks_by_id: dict[int, "asyncio.Task"] = dict(tasks)

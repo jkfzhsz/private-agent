@@ -45,8 +45,15 @@ CREATE TABLE sessions (
     -- main=普通对话会话; sub=子代理独立会话(委派产生, 复用 ReactLoop 全部
     -- 上下文/压缩/checkpoint 机制, list_sessions 过滤 sub 防污染历史列表 R9)
     -- 0.5.0 P3: monitor=主智能体监控会话(系统指标感知 + 优化闭环工具)
+    -- 0.6.0 P1(2026-09-11): room=会议室会话(多智能体协作)。
+    --   locked_skill_name=主持人角色(子瞻/白圭/清和之一, 无涯不参与);
+    --   workspace=房间共享目录(全体成员写权限经继承链自动落在该目录);
+    --   room_meta 记 {host_role, members[], goal}。
+    --   设计文档: docs/next-phase-plan-2026-09-11-meeting-room.md
     kind                    VARCHAR(10) NOT NULL DEFAULT 'main'
-                            CHECK (kind IN ('main', 'sub', 'monitor'))
+                            CHECK (kind IN ('main', 'sub', 'monitor', 'room')),
+    -- 0.6.0 P1: 会议室元数据(仅 kind='room' 使用; 其他会话为 NULL)
+    room_meta               JSONB
 );
 
 CREATE INDEX idx_sessions_status ON sessions(status) WHERE archived_at IS NULL;

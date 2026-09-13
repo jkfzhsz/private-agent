@@ -192,8 +192,11 @@ async def migrate_all(conn: asyncpg.Connection) -> None:
     await _migrate_memory_scope(conn)
     # 0.5.0 P1(2026-08-08): 四窗口架构 —— system_metrics / optim_log 表
     await _migrate_monitor_tables(conn)
-    # 0.5.0 P3: sessions.kind 扩容(monitor 主智能体会话)
-    await _migrate_sessions_kind_monitor(conn)
+    # 0.5.0 P3 → 0.6.0 P1: sessions.kind 累积式扩容
+    # (monitor 主智能体会话 → room 会议室会话; SESSION_KINDS 为单一事实源)
+    await _migrate_sessions_kind_check(conn)
+    # 0.6.0 P1: sessions.room_meta 列(会议室元数据 host_role/members/goal)
+    await _migrate_sessions_room_meta(conn)
     # 2026-08-11 Phase 1: skill_lessons 经验沉淀表(双轨进化, 幂等)
     await _migrate_add_skill_lessons(conn)
     # 2026-08-12 Phase 2: 会话附加技能表(多技能调用 —— 主技能 locked_skill_name
@@ -408,10 +411,21 @@ async def _migrate_add_skill_lessons(conn: asyncpg.Connection) -> None:
     """)
 
 
-async def _migrate_sessions_kind_monitor(conn: asyncpg.Connection) -> None:
-    """0.5.0 P3: sessions.kind 枚举扩容, 支持 monitor(主智能体监控会话)。
+#: sessions.kind 的规范取值集(单一事实源)。
+#: main=普通对话会话; sub=子代理独立会话; monitor=主智能体监控会话;
+#: room=会议室会话(0.6.0 P1, 设计文档 next-phase-plan-2026-09-11-meeting-room.md)。
+SESSION_KINDS: tuple[str, ...] = ("main", "sub", "monitor", "room")
 
-    老部署 CHECK 约束仅含 ('main','sub'), 需重建约束加入 'monitor'。
+
+async def _migrate_sessions_kind_check(conn: asyncpg.Connection) -> None:
+    """sessions.kind CHECK 约束扩容(累积式, 幂等)。
+
+    历史: 0.5.0 P3 引入 'monitor' 时此函数每次启动**无条件** DROP + ADD
+    重建为 ('main','sub','monitor')。0.6.0 P1 引入 'room' 后该实现成为隐患:
+    库里一旦存在 kind='room' 的行, 重建出的旧集合会违反约束 → ADD CONSTRAINT
+    失败 → 阻断启动。故改为:
+    1. 以 ``SESSION_KINDS`` 为单一事实源, 约束已含全部取值 → 幂等跳过;
+    2. 需要重建时始终使用完整集合。
     """
     constraint = await conn.fetchval(
         "SELECT conname FROM pg_constraint "
@@ -419,10 +433,29 @@ async def _migrate_sessions_kind_monitor(conn: asyncpg.Connection) -> None:
         "AND contype = 'c' AND pg_get_constraintdef(oid) ILIKE '%kind%'"
     )
     if constraint:
+        current = await conn.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'sessions'::regclass AND conname = $1",
+            constraint,
+        )
+        current = current or ""
+        if all(f"'{k}'" in current for k in SESSION_KINDS):
+            return  # 已是最新: 幂等跳过(避免无谓重建)
         await conn.execute(f"ALTER TABLE sessions DROP CONSTRAINT {constraint}")
+    kinds = ", ".join(f"'{k}'" for k in SESSION_KINDS)
     await conn.execute(
-        "ALTER TABLE sessions ADD CONSTRAINT sessions_kind_check "
-        "CHECK (kind IN ('main', 'sub', 'monitor'))"
+        f"ALTER TABLE sessions ADD CONSTRAINT sessions_kind_check "
+        f"CHECK (kind IN ({kinds}))"
+    )
+
+
+async def _migrate_sessions_room_meta(conn: asyncpg.Connection) -> None:
+    """0.6.0 P1: sessions.room_meta 列(会议室元数据, 幂等)。
+
+    仅 kind='room' 的会话使用, 记 {host_role, members[], goal}。
+    """
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS room_meta JSONB"
     )
 
 

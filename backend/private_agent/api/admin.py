@@ -3514,7 +3514,7 @@ async def list_sessions(
                 """
                 SELECT s.id, s.title, s.status, s.model_id, s.summary, s.folder,
                        s.locked_skill_name, s.locked_skill_version,
-                       s.kind, s.created_at, s.updated_at,
+                       s.kind, s.room_meta, s.created_at, s.updated_at,
                        COALESCE(
                            (SELECT MAX(turn) FROM messages WHERE session_id = s.id),
                            0
@@ -3584,6 +3584,9 @@ async def list_sessions(
                     "locked_skill_name": r["locked_skill_name"],
                     "locked_skill_version": r["locked_skill_version"],
                     "kind": r["kind"],
+                    # 0.6.0 P1(会议室): 供历史树"会议室"分组直接渲染
+                    # 主持人/成员, 免去逐条二次请求(需求 6)。
+                    "room_meta": _parse_room_meta(r["room_meta"]),
                     "user_msg_count": r["user_msg_count"],
                     "created_at": (
                         r["created_at"].isoformat() if r["created_at"] else None
@@ -3962,6 +3965,9 @@ async def create_session(body: SessionCreateRequest | None = None):
     folder = (body.folder or "").strip() or None
     skill_name = (body.skill_name or "").strip() or None
     kind = (body.kind or "main").strip() or "main"
+    # 注意: 'room'(会议室)刻意不在此白名单内 —— 房间必须同时创建共享目录与
+    # room_meta, 只能走 POST /admin/rooms; 否则会得到一个 workspace 为空、
+    # 成员写不进去的残缺房间。此处静默降级为 'main' 是防御性设计。
     if kind not in ("main", "sub", "monitor"):
         kind = "main"
     if kind == "monitor":
@@ -4019,6 +4025,213 @@ async def create_session(body: SessionCreateRequest | None = None):
             status_code=500,
             content={"error": "session_create_failed"},
         )
+
+
+class RoomCreateRequest(BaseModel):
+    """POST /admin/rooms 请求体(0.6.0 P1 会议室)。
+
+    members: 参会成员(office/data_analysis/frontend_design 的子集, 去重保序)。
+    host_role: 本次主持人, **必须是 members 之一**(UI 语义: 从已选成员中指定)。
+    goal: 任务目标(写入房间 README.md 的任务契约)。
+    title: 可选会话标题; 缺省用 goal 截断。
+    """
+
+    goal: str = ""
+    members: list[str] = []
+    host_role: str = ""
+    title: str | None = None
+
+
+def _parse_room_meta(raw) -> dict:
+    """sessions.room_meta(JSONB → str/dict/None) 规整为 dict。
+
+    读路径不抛异常(脏数据降级为 {}), 与 core.room.parse_room_meta 同语义。
+    """
+    from private_agent.core import room as room_core
+
+    return room_core.parse_room_meta(raw)
+
+
+def _room_file_list(base, sub: str) -> list[dict]:
+    """列出房间子目录下的文件(供房间信息条/产物清单展示)。"""
+    from pathlib import Path
+
+    d = Path(base) / sub
+    if not d.is_dir():
+        return []
+    out: list[dict] = []
+    try:
+        for p in sorted(d.iterdir()):
+            if p.is_file():
+                st = p.stat()
+                out.append(
+                    {"name": p.name, "size": st.st_size,
+                     "mtime": int(st.st_mtime)}
+                )
+    except OSError:
+        return out
+    return out
+
+
+@router.post("/rooms", response_model=None)
+async def create_room(body: RoomCreateRequest):
+    """创建会议室(0.6.0 P1)。
+
+    设计文档: docs/next-phase-plan-2026-09-11-meeting-room.md
+
+    一间会议室 = 一条 ``kind='room'`` 会话 + 一个房间共享目录:
+    - ``locked_skill_name`` = 主持人角色 → 该会话即**主持人**(ReactLoop 主循环),
+      人格/知识库/工具白名单随该角色装配;
+    - ``workspace`` = 房间共享目录 → **全体成员**的写权限经既有继承链
+      (父会话 workspace → 子代理 self._cfg → ReactLoop → file_write.data_dir)
+      自动落在同一目录, 这是"产物交接"的机制基础, **无需改动写入校验**;
+    - ``room_meta`` = {host_role, members[], goal, room_key};
+    - 目录骨架: README.md(任务契约) / artifacts/(产物) / notes/(交接说明)。
+
+    顺序注意: **先建目录再插会话行** —— 目录残留是无害空壳, 而指向不存在
+    目录的会话行会让成员写不进去。故目录创建失败即放弃(不插行)。
+
+    返回: ``{ok, id, kind, host_role, members, room_dir, room_meta}``。
+    """
+    from private_agent.core import room as room_core
+
+    try:
+        members, host = room_core.normalize_roles(body.members, body.host_role)
+    except room_core.RoomRoleError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_roles", "message": str(exc)},
+        )
+
+    goal = (body.goal or "").strip()
+    cfg = loader.load_config()
+    try:
+        conn = await db.connect()
+        try:
+            # 主持人技能的 workspace: 房间根目录按"同级的 rooms/"派生
+            # (如 D:\PA\zizhan → D:\PA\rooms), 与各成员工作区同级。
+            # 2026-09-12 缺陷修复(蒋先生实测: 房间落到了 backend/rooms):
+            # 原实现**直查 PG skills 表**取 manifest.workspace —— 而生产库该表
+            # 为空(技能实际走文件系统 skill.yaml, PG 表仅在技能库编辑时写入),
+            # host_workspace 恒 None → rooms_root 走第 3 兜底
+            # `workspace_root/rooms` = backend/rooms。现改经 **SkillLoader**
+            # (PG 优先 + 文件回退)取 manifest.workspace —— 与场景会话注入
+            # workspace 完全同源(skills/manager.py:105), 房间根必然派生自
+            # 主持人真实工作区(D:\PA\zizhan → D:\PA\rooms)。
+            host_workspace: str | None = None
+            try:
+                from private_agent.skills.loader import SkillLoader
+
+                skill = await SkillLoader.from_cfg(cfg).load(host, conn)
+                host_workspace = (skill.manifest.workspace or "").strip() or None
+            except Exception:  # noqa: BLE001 - 派生失败回退全局根, 不阻断建房
+                host_workspace = None
+
+            key = room_core.room_key()
+            base = room_core.room_dir(
+                cfg, key, host_workspace=host_workspace
+            )
+            room_core.ensure_room_layout(
+                base,
+                goal=goal,
+                host_role=host,
+                members=members,
+                room_key_=key,
+            )
+
+            meta = {
+                "host_role": host,
+                "members": members,
+                "goal": goal,
+                "room_key": key,
+            }
+            title = (body.title or "").strip() or (goal[:40] or "会议室")
+            sid = await conn.fetchval(
+                """
+                INSERT INTO sessions (title, status, kind, locked_skill_name,
+                                      workspace, room_meta)
+                VALUES ($1, 'active', 'room', $2, $3, $4::jsonb)
+                RETURNING id
+                """,
+                title,
+                host,
+                str(base),
+                json.dumps(meta, ensure_ascii=False),
+            )
+            return {
+                "ok": True,
+                "id": int(sid),
+                "kind": "room",
+                "host_role": host,
+                "members": members,
+                "room_dir": str(base),
+                "room_meta": meta,
+            }
+        finally:
+            await conn.close()
+    except Exception:
+        import logging
+
+        logging.getLogger("private_agent.admin").exception(
+            "room create failed: members=%s host=%s", members, host
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "room_create_failed"},
+        )
+
+
+@router.get("/rooms/{session_id}", response_model=None)
+async def get_room(session_id: int):
+    """读取会议室: 元数据 + 房间目录下的产物/交接清单(0.6.0 P1)。
+
+    非 kind='room' 会话 → 404(避免把普通场景会话误当房间读出空 meta)。
+
+    返回: ``{ok, session_id, title, status, host_role, members, goal,
+    room_dir, exists, artifacts[], notes[]}``。
+    """
+    from private_agent.core import room as room_core
+
+    try:
+        conn = await db.connect()
+        try:
+            row = await conn.fetchrow(
+                "SELECT id, title, status, kind, workspace, room_meta "
+                "FROM sessions WHERE id = $1",
+                session_id,
+            )
+        finally:
+            await conn.close()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"error": "room_read_failed"}
+        )
+    if row is None or (row["kind"] or "") != room_core.ROOM_KIND:
+        return JSONResponse(status_code=404, content={"error": "room_not_found"})
+
+    from pathlib import Path
+
+    meta = _parse_room_meta(row["room_meta"])
+    room_dir = row["workspace"] or ""
+    base = Path(room_dir) if room_dir else None
+    exists = bool(base and base.is_dir())
+    return {
+        "ok": True,
+        "session_id": int(row["id"]),
+        "title": row["title"],
+        "status": row["status"],
+        "host_role": meta.get("host_role") or "",
+        "members": meta.get("members") or [],
+        "goal": meta.get("goal") or "",
+        "room_dir": room_dir,
+        "exists": exists,
+        "artifacts": (
+            _room_file_list(base, room_core.ARTIFACTS_DIR) if exists else []
+        ),
+        "notes": (
+            _room_file_list(base, room_core.NOTES_DIR) if exists else []
+        ),
+    }
 
 
 @router.put("/sessions/{session_id}", response_model=None)

@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Awaitable, Callable
 
 import asyncpg
@@ -217,6 +218,7 @@ class SubagentRunner:
         system_prompt_factory: Callable[..., Awaitable[str]],
         adapter_factory: Callable[[str | None], Any],
         compress_adapter: Any | None = None,
+        role_skill: str | None = None,
     ) -> None:
         self._cfg = cfg
         self._subagent_id = subagent_id
@@ -229,6 +231,12 @@ class SubagentRunner:
         self._system_prompt_factory = system_prompt_factory
         self._adapter_factory = adapter_factory
         self._compress_adapter = compress_adapter
+        # 0.6.0 P1(会议室, 2026-09-11): 以指定**角色技能**执行, 而非继承父会话角色。
+        # None = 继承父会话(既有行为, 零回归); 非 None 时子会话的
+        # locked_skill_name 取该值 → 人格/知识库随之切换(见 _create_sub_session),
+        # 工具白名单由调用方按同一角色解析后经 tools= 传入(避免
+        # 「清和的脑子配子瞻的手」)。设计文档 §4.4。
+        self._role_skill = role_skill
         self._sub_cfg = subagent_cfg(cfg)
         # 运行时状态
         self._conn: asyncpg.Connection | None = None
@@ -372,16 +380,41 @@ class SubagentRunner:
     # ── 子会话构建 + ReactLoop 复用 ─────────────────────────────────────────
 
     async def _create_sub_session(self) -> int:
-        """创建独立子 session(kind='sub'), 继承父会话 model/skill/workspace/
-        permission_mode/memory_enabled(ADR §3.2 决策 A + 打开问题 1/4)。"""
+        """创建独立子 session(kind='sub'), 继承父会话 model/workspace/
+        permission_mode/memory_enabled, 角色(locked_skill_name)可被 override。
+
+        ADR §3.2 决策 A + 打开问题 1/4。角色覆盖为 0.6.0 P1(会议室)新增:
+        `role_skill` 为空时行为与既有完全一致(零回归); 非空时以该角色技能写入
+        `locked_skill_name`, 使子会话的**人格与知识库**随之切换。
+
+        工作区语义(会议室产物交接的关键, 设计文档 §4.3): 此处**无条件**继承
+        父会话 workspace —— 父会话为房间会话时其 workspace 即房间共享目录,
+        于是全体成员的 file_write 自动落在同一目录(经 self._cfg →
+        ReactLoop → file_write.data_dir 继承链), 无需改动写入校验。
+
+        房间上下文继承(0.6.0 P1 W3): 父会话为房间时, 一并把 `room_meta`
+        复制到子会话 —— 成员子代理的 system prompt 据此注入「会议室约定」
+        (写 artifacts/ 而非房间根), 否则"产物交接"目录分工对成员不可见。
+        非房间父会话 room_meta 为 None → 写入 NULL(零回归)。
+        """
         row = await self._conn.fetchrow(
             "SELECT model_id, locked_skill_name, locked_skill_version, "
-            "workspace, permission_mode, memory_enabled "
+            "workspace, permission_mode, memory_enabled, room_meta "
             "FROM sessions WHERE id=$1",
             self._parent_session_id,
         )
         row = row or {}
         parent_workspace = row.get("workspace")
+        # 房间上下文继承: 仅当父会话确有 room_meta(即父会话是房间)时才写。
+        parent_room_meta: str | None = None
+        try:
+            from private_agent.core import room as room_core
+
+            meta = room_core.parse_room_meta(row.get("room_meta"))
+            if meta:
+                parent_room_meta = json.dumps(meta, ensure_ascii=False)
+        except Exception:  # noqa: BLE001 - 继承失败降级为无房间上下文
+            parent_room_meta = None
         # 继承父会话工作区(画地为牢): 覆盖 cfg.system.workspace_root
         if parent_workspace:
             self._cfg = {
@@ -391,21 +424,37 @@ class SubagentRunner:
                     "workspace_root": parent_workspace,
                 },
             }
+        # 0.6.0 P1: 角色 override(缺省继承父会话, 零回归)。
+        # 版本置 None 的原因: 子代理是一次性会话, 不参与 eval/rollback 的
+        # "运行中会话维持 locked_skill_version" 语义; 且被指定角色的版本解析
+        # 属调用方职责(它与工具白名单解析同源, 不应在此重复查询)。
+        if self._role_skill:
+            eff_skill: str | None = self._role_skill
+            eff_version: str | None = None
+            title = (
+                f"[subagent {self._subagent_id}][{self._role_skill}] "
+                f"{self._task_id or ''}"
+            ).strip()
+        else:
+            eff_skill = row.get("locked_skill_name")
+            eff_version = row.get("locked_skill_version")
+            title = f"[subagent {self._subagent_id}] {self._task_id or ''}".strip()
         sid = await self._conn.fetchval(
             """
             INSERT INTO sessions (
                 kind, title, model_id, locked_skill_name, locked_skill_version,
-                workspace, permission_mode, memory_enabled
-            ) VALUES ('sub', $1, $2, $3, $4, $5, $6, $7)
+                workspace, permission_mode, memory_enabled, room_meta
+            ) VALUES ('sub', $1, $2, $3, $4, $5, $6, $7, $8::jsonb)
             RETURNING id
             """,
-            f"[subagent {self._subagent_id}] {self._task_id or ''}".strip(),
+            title,
             row.get("model_id"),
-            row.get("locked_skill_name"),
-            row.get("locked_skill_version"),
+            eff_skill,
+            eff_version,
             parent_workspace,
             row.get("permission_mode", "default"),
             row.get("memory_enabled", True),
+            parent_room_meta,
         )
         self._sub_session_id = int(sid)
         return self._sub_session_id
