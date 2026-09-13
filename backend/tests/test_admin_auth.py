@@ -18,8 +18,19 @@ TEST_ADMIN_TOKEN = "test-admin-token"
 AUTH_HEADERS = {"X-Admin-Token": TEST_ADMIN_TOKEN}
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def client():
+    """每个用例独立的 TestClient(2026-09-13 收窄作用域)。
+
+    原先为 ``scope="module"``: 15 个用例共用一个 TestClient(app) 及其 anyio
+    portal —— portal 一旦在 ``__enter__``(app lifespan 握手)阶段死亡, **整组
+    15 例同时全败**, 报 ``RuntimeError: This portal is not running``。该失败
+    在单文件运行时不可复现, 曾以"仅全量出现的假回归"形式误导排查(根因是沙箱
+    删除阈值掐断 pytest 临时目录清理, 见 tests/conftest.py 同类记录)。
+
+    改为 function 作用域后, 单点故障的爆炸半径从 15 例降到 1 例; 代价是每个
+    用例各跑一次 lifespan(DB 迁移幂等 + KB 一致性校验, 实测单次约 0.1s 量级)。
+    """
     with TestClient(app) as c:
         yield c
 
