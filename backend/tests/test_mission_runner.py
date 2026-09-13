@@ -513,3 +513,168 @@ def test_build_delegation_prompt_anchored_to_charter():
     assert "[当前阶段] 扫描页面" in prompt
     assert "逐页验证" in prompt
     assert "不得自行更换" in prompt  # 防漂移指令内嵌
+
+
+# ── 0.6.0 P3: V1/G5 payload 补齐 + W4 里程碑 role ──────────────────────────
+
+def test_mission_created_payload_carries_goal_and_plan():
+    """V1(G5 修复): mission_created 必须带 goal + plan(含 role/status),
+    否则前端里程碑列表只能靠 REST 兜底补, 首帧恒空。"""
+    _setup_schema()
+    events: list = []
+
+    async def _flow():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            sid = await _create_session(conn)
+            plan = [
+                {"id": "m1", "milestone": "调研", "executor_type": "subagent",
+                 "task_type": "search", "role": "data_analysis"},
+                {"id": "m2", "milestone": "间隔", "executor_type": "wait",
+                 "wait_sec": 0.05},
+            ]
+            mid = await _create_mission(conn, sid, plan)
+        finally:
+            await conn.close()
+        kw = _spawn_kwargs(session_id=sid, events=events)
+        kw["role_tools_resolver"] = _role_resolver
+        assert await MissionRunner.spawn(cfg=_test_cfg(), mission_id=mid, **kw)
+        await _wait_mission_done_async(mid)
+        return mid
+
+    asyncio.run(_flow())
+    created = [e for e in events if e["type"] == "mission_created"]
+    assert created, "缺少 mission_created 事件"
+    ev = created[0]
+    assert ev["goal"] == "验证长任务编排"
+    plan = ev["plan"]
+    assert isinstance(plan, list) and len(plan) == 2
+    assert plan[0]["id"] == "m1"
+    assert plan[0]["role"] == "data_analysis"
+    assert plan[0]["executor_type"] == "subagent"
+    assert plan[0]["status"] in ("pending", "done")  # 事件发出时为 pending
+    assert plan[1]["role"] is None
+
+
+async def _role_resolver(role: str):
+    assert role in ("office", "data_analysis", "frontend_design")
+    return [_tool("file_read"), _tool("file_write")]
+
+
+def test_role_milestone_assembles_role_skill_and_tools(monkeypatch):
+    """W4: role 里程碑 → SubagentRunner(role_skill=角色, tools=角色白名单);
+    子会话 locked_skill_name 切到该角色。"""
+    _setup_schema()
+    events: list = []
+
+    async def _flow():
+        recorded: list[dict] = []
+        real_runner = mr_mod.SubagentRunner
+
+        class _Recording(real_runner):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                recorded.append(
+                    {
+                        "role_skill": kw.get("role_skill"),
+                        "tools": [t.name for t in (kw.get("tools") or [])],
+                    }
+                )
+
+        monkeypatch.setattr(mr_mod, "SubagentRunner", _Recording)
+
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            sid = await _create_session(conn)
+            plan = [
+                {"id": "m1", "milestone": "转制商务 PPT",
+                 "executor_type": "subagent", "role": "frontend_design"},
+            ]
+            mid = await _create_mission(conn, sid, plan)
+            parent_ws = "D:/PA/rooms/20260912-090000-aabb"
+            await conn.execute(
+                "UPDATE sessions SET workspace=$2, kind='room' WHERE id=$1",
+                sid, parent_ws,
+            )
+        finally:
+            await conn.close()
+        kw = _spawn_kwargs(session_id=sid, events=events)
+        kw["role_tools_resolver"] = _role_resolver
+        assert await MissionRunner.spawn(cfg=_test_cfg(), mission_id=mid, **kw)
+        state = await _wait_mission_done_async(mid)
+        return sid, state, recorded
+
+    sid, state, recorded = asyncio.run(_flow())
+    assert state == "done"
+    assert len(recorded) == 1
+    assert recorded[0]["role_skill"] == "frontend_design"
+    # 工具集按角色解析(非父会话工具), 且解析先于建行
+    assert sorted(recorded[0]["tools"]) == ["file_read", "file_write"]
+    # 子会话行: locked_skill_name 切到角色, workspace 继承房间目录
+    async def _check():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            sub_sid = await conn.fetchval(
+                "SELECT session_id FROM subagents ORDER BY id DESC LIMIT 1"
+            )
+            return await conn.fetchrow(
+                "SELECT kind, locked_skill_name, workspace "
+                "FROM sessions WHERE id=$1",
+                sub_sid,
+            )
+        finally:
+            await conn.close()
+
+    row = asyncio.run(_check())
+    assert row["locked_skill_name"] == "frontend_design"
+    assert row["workspace"] == "D:/PA/rooms/20260912-090000-aabb"
+
+
+def test_role_milestone_without_resolver_fails_without_side_effects():
+    """role 里程碑但未装配解析器 → 里程碑快速失败, **不建子代理行**
+    (解析先于副作用), 预算耗尽后 escalate。"""
+    _setup_schema()
+    events: list = []
+
+    async def _flow():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            sid = await _create_session(conn)
+            plan = [
+                {"id": "m1", "milestone": "转 PPT",
+                 "executor_type": "subagent", "role": "frontend_design"},
+            ]
+            mid = await _create_mission(conn, sid, plan)
+        finally:
+            await conn.close()
+        kw = _spawn_kwargs(session_id=sid, events=events)
+        # 不注入 role_tools_resolver
+        assert await MissionRunner.spawn(cfg=_test_cfg(), mission_id=mid, **kw)
+        # 注意: 等待必须在**同一事件循环**内 —— asyncio.run 返回会取消后台
+        # runner task(否则 runner 尚未执行任何一步, 测的是空转)。
+        state = await _wait_mission_done_async(mid, timeout=30.0)
+        return mid, state
+
+    mid, state = asyncio.run(_flow())
+    assert state == "escalated"
+
+    async def _no_rows():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            return await conn.fetchval("SELECT COUNT(*) FROM subagents")
+        finally:
+            await conn.close()
+
+    assert asyncio.run(_no_rows()) == 0
+    # 失败原因可读(含角色名) —— 落在 journal 的 escalated 条目, 供主持人/用户判断
+    async def _reason():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            raw = await conn.fetchval("SELECT journal FROM missions WHERE id=$1", mid)
+            journal = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            return [e.get("detail", "") for e in journal if e.get("kind") == "escalated"]
+        finally:
+            await conn.close()
+
+    reasons = asyncio.run(_reason())
+    assert any("frontend_design" in r for r in reasons), reasons

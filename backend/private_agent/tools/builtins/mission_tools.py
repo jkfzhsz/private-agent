@@ -102,10 +102,18 @@ def _validate_charter(charter: Any) -> str | None:
     return None
 
 
-def _validate_plan(plan: Any) -> str | None:
-    """校验 plan(milestones); 返回错误信息或 None。"""
+def _validate_plan(plan: Any, *, room_scope: bool = False) -> str | None:
+    """校验 plan(milestones); 返回错误信息或 None。
+
+    0.6.0 P3(W4 会议室): ``plan[].role`` 为可选会议室角色 —— 只允许
+    ``core.room.ROOM_ROLES`` 三个场景技能, 且**仅会议室会话**可用
+    (与 delegate_subtask 的 role 准入同一原则: 非房间会话显式拒绝而非
+    静默降级, 否则主持人以为派给了清和、实际是子瞻在干)。
+    """
     if not isinstance(plan, list) or not plan:
         return "plan 必须为非空数组(milestones)"
+    from private_agent.core import room as room_core
+
     seen_ids: set[str] = set()
     for i, ms in enumerate(plan):
         if not isinstance(ms, dict):
@@ -124,6 +132,18 @@ def _validate_plan(plan: Any) -> str | None:
                 f"plan[{i}].executor_type 必须为 "
                 f"{'/'.join(MISSION_EXECUTOR_TYPES)} 之一, 收到 {et!r}"
             )
+        role = ms.get("role")
+        if role is not None and role != "":
+            if not room_scope:
+                return (
+                    f"plan[{i}].role 仅会议室会话可用 —— 当前会话非房间,"
+                    " 请去掉 role 或先创建会议室"
+                )
+            if not room_core.is_room_role(role):
+                return (
+                    f"plan[{i}].role 非法 {role!r}; "
+                    f"允许值: {', '.join(room_core.ROOM_ROLES)}"
+                )
     return None
 
 
@@ -133,6 +153,7 @@ def build_mission_tools(
     cfg: dict,
     session_id: int,
     runner_factory: Callable[[int], Awaitable[None]] | None = None,
+    room_scope: bool = False,
 ) -> list[ToolDef]:
     """构建 mission 工具集(闭包注入模式, 同 delegate_subtask —— 多会话无串扰)。
 
@@ -142,6 +163,9 @@ def build_mission_tools(
         session_id: 父会话 id(mission 归属会话)。
         runner_factory: async (mission_id) -> None —— **D-1 接线点**:
             MissionRunner.spawn(mission_id); F1 批 main.py 传 None。
+        room_scope: 会话是否为会议室(kind='room')。0.6.0 P3(W4)起控制
+            ``plan[].role`` 的准入 —— 非房间会话携带 role 的 plan 在创建时
+            即被拒绝(校验先行, 不留半成品 mission 行)。
     """
     mc = mission_cfg(cfg)
 
@@ -152,7 +176,7 @@ def build_mission_tools(
         if err:
             return ToolResult(output="", error=f"mission_create: {err}")
         plan = args.get("plan")
-        err = _validate_plan(plan)
+        err = _validate_plan(plan, room_scope=room_scope)
         if err:
             return ToolResult(output="", error=f"mission_create: {err}")
         budget_in = args.get("budget") or {}
@@ -419,6 +443,19 @@ def build_mission_tools(
                                 "estimated_steps": {
                                     "type": "integer",
                                     "description": "预计步骤数(>10 视为复杂任务)",
+                                },
+                                "role": {
+                                    "type": "string",
+                                    "description": (
+                                        "会议室角色(可选, 仅会议室会话可用): "
+                                        "把本里程碑派给指定成员执行, 工具/人格"
+                                        "随该角色装配"
+                                    ),
+                                    "enum": [
+                                        "office",
+                                        "data_analysis",
+                                        "frontend_design",
+                                    ],
                                 },
                             },
                             "required": ["id", "milestone", "executor_type"],

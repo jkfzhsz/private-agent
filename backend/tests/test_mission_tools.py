@@ -99,10 +99,11 @@ class FakeConn:
         return "UPDATE 0"
 
 
-def _tools(running: int = 0, runner_factory=None):
+def _tools(running: int = 0, runner_factory=None, room_scope: bool = False):
     conn = FakeConn(running_missions=running)
     tools = build_mission_tools(
-        conn=conn, cfg={}, session_id=1, runner_factory=runner_factory
+        conn=conn, cfg={}, session_id=1, runner_factory=runner_factory,
+        room_scope=room_scope,
     )
     by_name = {t.name: t for t in tools}
     return conn, by_name
@@ -177,6 +178,80 @@ def test_create_duplicate_plan_id():
     ]}
     res = asyncio.run(by_name["mission_create"].handler(bad))
     assert res.error and "重复" in res.error
+
+
+# ── 0.6.0 P3(W4): plan[].role 会议室准入 ─────────────────────────────────
+
+def test_create_role_accepted_in_room_scope():
+    """会议室会话: 合法角色放行, 建行成功。"""
+    conn, by_name = _tools(room_scope=True)
+    args = {
+        "charter": {"goal": "做一份 Q3 经营分析汇报 PPT"},
+        "plan": [
+            {"id": "m1", "milestone": "转制商务 PPT",
+             "executor_type": "subagent", "role": "frontend_design"},
+        ],
+    }
+    res = asyncio.run(by_name["mission_create"].handler(args))
+    assert not res.error
+    assert len(conn.inserted) == 1
+
+
+@pytest.mark.parametrize("bad_role", ["monitor", "无涯", "ghost", 123, ["office"]])
+def test_create_role_rejected_illegal_value(bad_role):
+    """非法角色(含 monitor/非字符串)一律拒绝, 不留 mission 行。
+
+    注意 ``""`` 不在此列: role="" 与 None 同义(未指定), 与 runner 侧
+    ``if role:`` 的真值判定一致 —— schema enum 已约束模型不会传空串。
+    """
+    conn, by_name = _tools(room_scope=True)
+    args = {
+        "charter": {"goal": "g"},
+        "plan": [
+            {"id": "m1", "milestone": "x", "executor_type": "subagent",
+             "role": bad_role},
+        ],
+    }
+    res = asyncio.run(by_name["mission_create"].handler(args))
+    assert res.error and "非法" in res.error
+    assert conn.inserted == []
+
+
+def test_create_role_rejected_outside_room():
+    """非会议室会话: 携带 role 的 plan 创建时即拒绝(而非运行期静默降级)。"""
+    conn, by_name = _tools(room_scope=False)
+    args = {
+        "charter": {"goal": "g"},
+        "plan": [
+            {"id": "m1", "milestone": "x", "executor_type": "subagent",
+             "role": "frontend_design"},
+        ],
+    }
+    res = asyncio.run(by_name["mission_create"].handler(args))
+    assert res.error and "仅会议室会话可用" in res.error
+    assert conn.inserted == []
+
+
+def test_create_role_absent_or_null_ok_outside_room():
+    """非会议室会话不带 role(或显式 None/空串) → 完全兼容既有行为(零回归)。"""
+    for extra in (None, {}, {"role": None}, {"role": ""}):
+        conn, by_name = _tools(room_scope=False)
+        item = {"id": "m1", "milestone": "x", "executor_type": "wait",
+                "wait_sec": 0.1}
+        item.update(extra or {})
+        res = asyncio.run(by_name["mission_create"].handler(
+            {"charter": {"goal": "g"}, "plan": [item]}
+        ))
+        assert not res.error, extra
+
+
+def test_role_enum_exposed_in_schema():
+    """role 出现在 mission_create 的 plan items schema(模型可见性)。"""
+    _, by_name = _tools()
+    schema = by_name["mission_create"].parameters_schema
+    props = schema["properties"]["plan"]["items"]["properties"]
+    assert props["role"]["enum"] == ["office", "data_analysis", "frontend_design"]
+    assert "role" not in schema["properties"]["plan"]["items"]["required"]
 
 
 def test_create_rejects_when_running_at_cap():

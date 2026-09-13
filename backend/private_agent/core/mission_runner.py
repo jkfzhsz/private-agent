@@ -94,6 +94,41 @@ def _now_journal(kind: str, detail: str) -> dict:
     }
 
 
+def _json_value(raw: object, default):
+    """JSONB 列(asyncpg 返回 str/dict/list/None) 规整为 Python 值。
+
+    与 core.room.parse_room_meta 同原则: 读路径不因脏数据抛异常。
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        try:
+            v = json.loads(raw)
+        except (ValueError, TypeError):
+            return default
+        return v if v is not None else default
+    return raw
+
+
+def _mission_plan_view(plan: object) -> list[dict]:
+    """plan → 供 WS 事件/前端渲染的里程碑视图(只保留必要字段)。"""
+    items = plan if isinstance(plan, list) else []
+    out: list[dict] = []
+    for ms in items:
+        if not isinstance(ms, dict):
+            continue
+        out.append(
+            {
+                "id": str(ms.get("id") or ""),
+                "milestone": str(ms.get("milestone") or ""),
+                "executor_type": str(ms.get("executor_type") or "subagent"),
+                "role": ms.get("role") or None,
+                "status": str(ms.get("status") or "pending"),
+            }
+        )
+    return out
+
+
 class MissionRunner:
     """单个 mission 的后台编排器(一个 mission 一个 run() 协程)。"""
 
@@ -108,6 +143,7 @@ class MissionRunner:
         adapter_factory: Callable[[str | None], Any],
         compress_adapter: Any | None = None,
         tools: list[Any] | None = None,
+        role_tools_resolver: Callable[[str], Awaitable[list[Any]]] | None = None,
     ) -> None:
         self._cfg = cfg
         self._mission_id = mission_id
@@ -117,6 +153,9 @@ class MissionRunner:
         self._adapter_factory = adapter_factory
         self._compress_adapter = compress_adapter
         self._tools = list(tools or [])
+        # 0.6.0 P3(W4 会议室): 里程碑 role → 角色工具白名单解析器(closure 注入,
+        # 同 delegate_subtask 的 role_tools_resolver; None = 未装配)。
+        self._role_tools_resolver = role_tools_resolver
         self._sub_tasks: dict[int, asyncio.Task] = {}  # subagent_id → task(watchdog kill 用)
         self._aborted = False
 
@@ -134,6 +173,7 @@ class MissionRunner:
         adapter_factory: Callable[[str | None], Any],
         compress_adapter: Any | None = None,
         tools: list[Any] | None = None,
+        role_tools_resolver: Callable[[str], Awaitable[list[Any]]] | None = None,
     ) -> bool:
         """启动后台编排(planning/escalated → executing)。
 
@@ -147,17 +187,23 @@ class MissionRunner:
             return False
         conn = await db.connect(cfg)
         try:
-            st = await conn.execute(
+            # RETURNING charter/plan: 同一连接同一语句取齐, 供 mission_created
+            # 事件携带 goal+plan —— 修复 G5(此前 payload 只有 id/state, 前端
+            # 里程碑列表恒为空, 只能靠 REST 兜底补)。
+            row = await conn.fetchrow(
                 "UPDATE missions SET state='executing', updated_at=now() "
-                "WHERE id=$1 AND state IN ('planning','escalated')",
+                "WHERE id=$1 AND state IN ('planning','escalated') "
+                "RETURNING charter, plan",
                 mission_id,
             )
-            if _rowcount(st) == 0:
+            if row is None:
                 mission_registry.release()
                 logger.warning(
                     "mission spawn skipped: state not runnable (id=%s)", mission_id
                 )
                 return False
+            charter = _json_value(row["charter"], {})
+            plan = _json_value(row["plan"], [])
         finally:
             await conn.close()
 
@@ -170,6 +216,7 @@ class MissionRunner:
             adapter_factory=adapter_factory,
             compress_adapter=compress_adapter,
             tools=tools,
+            role_tools_resolver=role_tools_resolver,
         )
 
         def _on_task_done(t: asyncio.Task) -> None:
@@ -183,11 +230,15 @@ class MissionRunner:
         task = asyncio.create_task(runner.run())
         task.add_done_callback(_on_task_done)
         mission_tasks[mission_id] = task
+        # 0.6.0 P3(V1/G5): payload 补 goal + plan(含每里程碑 role/status),
+        # 前端据此直接渲染里程碑列表, 不再依赖 REST 兜底首次拉取。
         await cls._safe_push(event_sink, {
             "type": "mission_created",
             "mission_id": mission_id,
             "session_id": session_id,
             "state": "executing",
+            "goal": str((charter or {}).get("goal") or ""),
+            "plan": _mission_plan_view(plan),
         })
         return True
 
@@ -232,6 +283,12 @@ class MissionRunner:
                         conn,
                         "milestone_done" if ok else "milestone_failed",
                         f"[{ms.get('id')}] {ms.get('milestone', '')}: {detail}",
+                    )
+                    # 0.6.0 P3(V2): 里程碑状态实时下发(plan 含 role/status)
+                    await self._push_update(
+                        "executing",
+                        f"[{ms.get('id')}] {'完成' if ok else '失败'}: {detail}",
+                        plan=plan,
                     )
                     if ok:
                         break
@@ -288,11 +345,35 @@ class MissionRunner:
     async def _run_subagent_milestone(
         self, conn, charter: dict, ms: dict
     ) -> tuple[bool, str]:
-        """派发 subagent 执行体: 建行(宪章锚定 prompt + 类型白名单工具) + 轮询终态。"""
+        """派发 subagent 执行体: 建行(宪章锚定 prompt + 类型白名单工具) + 轮询终态。
+
+        0.6.0 P3(W4 会议室): ``ms.role`` 非空时按**角色**装配 —— role_skill +
+        角色工具白名单(经 resolver 解析), 与 delegate_subtask 同一原则:
+        **解析先于任何副作用**(建行/配额都发生在解析成功之后), 解析失败
+        里程碑直接失败并返回可读原因, 不留下"以父会话工具冒充他角色"的子代理。
+        """
         task_type = ms.get("task_type") or "other"
         prompt = ms.get("prompt_template") or build_delegation_prompt(charter, ms)
-        # W4: 白名单装配 —— 工具集按任务类型收紧(编排/监控工具禁区恒剔除)
-        sub_tools = filter_tools_for_task_type(self._tools, task_type)
+        role = ms.get("role")
+        role_skill: str | None = None
+        sub_tools: list[Any] = filter_tools_for_task_type(self._tools, task_type)
+        if role:
+            if not self._role_tools_resolver:
+                return False, (
+                    f"[{ms.get('id')}] role={role} 需要角色工具解析器, "
+                    "但当前会话未装配(非会议室会话?)"
+                )
+            from private_agent.core import room as room_core
+
+            if not room_core.is_room_role(role):
+                return False, f"[{ms.get('id')}] 非法角色 {role!r}"
+            try:
+                sub_tools = list(await self._role_tools_resolver(str(role)))
+            except Exception as e:  # noqa: BLE001
+                return False, (
+                    f"[{ms.get('id')}] 角色 {role} 工具装配失败: {e}"
+                )
+            role_skill = str(role)
         parent_turn = await conn.fetchval(
             "SELECT COALESCE(MAX(turn), 0) FROM messages WHERE session_id=$1",
             self._session_id,
@@ -323,6 +404,7 @@ class MissionRunner:
             system_prompt_factory=self._system_prompt_factory,
             adapter_factory=self._adapter_factory,
             compress_adapter=self._compress_adapter,
+            role_skill=role_skill,
         )
         task = asyncio.create_task(runner.run())
         self._sub_tasks[subagent_id] = task
@@ -560,14 +642,21 @@ class MissionRunner:
             "entry": entry,
         })
 
-    async def _push_update(self, state: str, detail: str) -> None:
-        await self._safe_push(self._event_sink, {
+    async def _push_update(
+        self, state: str, detail: str, plan: object | None = None
+    ) -> None:
+        ev: dict = {
             "type": "mission_update",
             "mission_id": self._mission_id,
             "session_id": self._session_id,
             "state": state,
             "detail": detail,
-        })
+        }
+        # 0.6.0 P3(V2): 里程碑状态变化随事件下发 —— 否则前端 doneCount 只能
+        # 等 mission_done, 进度条在长任务中段恒为 0/N。
+        if plan is not None:
+            ev["plan"] = _mission_plan_view(plan)
+        await self._safe_push(self._event_sink, ev)
 
     async def _record_lessons(
         self, conn, *, state: str, charter: dict, journal: list | None, plan: list
