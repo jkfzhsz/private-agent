@@ -9,12 +9,15 @@ Source: plan/m3-skills-office step 9
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import yaml
 
 from private_agent.skills.errors import SkillNotFoundError
 from private_agent.skills.models import Skill, SkillManifest
+
+logger = logging.getLogger(__name__)
 
 
 class SkillLoader:
@@ -61,9 +64,23 @@ class SkillLoader:
             SkillNotFoundError: PG + 文件系统均未找到。
         """
         if self.runtime_source == "db_first" and conn is not None:
-            skill = await self._load_from_pg(skill_name, conn)
-            if skill is not None:
-                return skill
+            # 2026-09-13 加固(蒋先生批准): PG 分支的**任何异常都不得中断文件回退**
+            # —— 此前 PG 行 manifest 残缺(如 jsonb 缺 version/scenario)会在
+            # SkillManifest(**dict) 抛 TypeError 并直接冒泡出 load(), 使磁盘上
+            # 完全合法的 skill.yaml 永远读不到。语义与"PG 无该行"保持一致:
+            # 记录告警 → 继续走文件系统(不静默, 便于排查 PG 数据问题)。
+            try:
+                skill = await self._load_from_pg(skill_name, conn)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Skill '%s' 从 PG 加载失败, 回退文件系统: %s: %s",
+                    skill_name,
+                    type(e).__name__,
+                    e,
+                )
+            else:
+                if skill is not None:
+                    return skill
         skill = await self._load_from_filesystem(skill_name)
         if skill is not None:
             return skill
@@ -140,26 +157,50 @@ class SkillLoader:
             Skill 列表(name 降序排列)。
         """
         if self.runtime_source == "db_first" and conn is not None:
-            skills = await self._list_from_pg(conn)
-            if skills:
-                return skills
+            # 2026-09-13 加固(同 load): PG 列出失败的兜底 —— 外层保险丝。
+            try:
+                skills = await self._list_from_pg(conn)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "skills 从 PG 列出失败, 回退文件系统: %s: %s",
+                    type(e).__name__,
+                    e,
+                )
+            else:
+                if skills:
+                    return skills
         return await self._list_from_filesystem()
 
     async def _list_from_pg(self, conn) -> list[Skill]:
-        """从 PG skills 表列出所有 enabled(按 name 升序)。"""
+        """从 PG skills 表列出所有 enabled(按 name 升序)。
+
+        逐行容错(2026-09-13 加固): 单行 manifest 残缺只跳过该行并告警,
+        不得让整表列表失败 —— 与 _list_from_filesystem 的逐项容错对称。
+        此前一行坏数据会导致"整批 PG 技能不可用"(外层再兜底到文件系统,
+        但那样会连带丢弃其余健康的 PG 行)。
+        """
         rows = await conn.fetch(
             "SELECT name, version, description, manifest, system_prompt, tools, is_enabled "
             "FROM skills WHERE is_enabled = TRUE ORDER BY name ASC"
         )
         skills = []
         for row in rows:
-            manifest_dict = row["manifest"] if isinstance(row["manifest"], dict) else json.loads(row["manifest"])
-            manifest = SkillManifest(**manifest_dict)
-            skills.append(Skill(
-                manifest=manifest,
-                system_prompt=row["system_prompt"] or "",
-                tools_yaml=row["tools"] if isinstance(row["tools"], list) else json.loads(row["tools"] or "[]"),
-            ))
+            try:
+                manifest_dict = row["manifest"] if isinstance(row["manifest"], dict) else json.loads(row["manifest"])
+                manifest = SkillManifest(**manifest_dict)
+                skills.append(Skill(
+                    manifest=manifest,
+                    system_prompt=row["system_prompt"] or "",
+                    tools_yaml=row["tools"] if isinstance(row["tools"], list) else json.loads(row["tools"] or "[]"),
+                ))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "跳过 PG 中 manifest 非法的 skill 行(name=%r): %s: %s",
+                    row["name"],
+                    type(e).__name__,
+                    e,
+                )
+                continue
         return skills
 
     async def _list_from_filesystem(self) -> list[Skill]:
