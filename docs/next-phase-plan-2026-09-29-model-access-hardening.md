@@ -289,4 +289,61 @@ vision_capable = len(vision_chain._adapters) > 0   # 已有 has_vision 属性可
 
 **取证方式**：源码静态阅读（`registry.py` / `adapters/__init__.py` / `admin.py` /
 `loader.py` / `main.py` / `eval_runner.py`）+ 前端 grep + config_runtime 只读查询。
-本文档为设计稿，**未改动任何代码**。
+本文档初稿为设计稿；实施结果见 §九。
+
+---
+
+## 九、实施记录
+
+| 批次 | 状态 | commit |
+|---|---|---|
+| 方案 A（事故止血：空链判定 + 能力声明） | ✅ 已实施 | `e27590e` |
+| 批次 1（P1-1 链统一维护 / P1-2 启动自愈 / P1-4 自愈条件） | ✅ 已实施 | `edfc4aa` |
+| 附带修复（`chat_stream` 重复调用） | ✅ 已实施 | `a0cba4f` |
+| D1 修正（text_chain 按需容纳多模态） | ✅ 已实施 | `27fd702` |
+| 批次 2+3 后端（P1-3 端点 / P2 / P3 / P4 / P5-1） | ✅ 已实施 | `ae76a8f` |
+| 批次 2+3 前端（P1-3 链管理面板） | ✅ 已实施 | `cecf1ec` |
+| P3/P4 前端表单入口 | ⏳ 待实施 | — |
+
+### 9.1 新增端点一览
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/admin/settings/chains` | 三链视图（`dangling` 标注 + `vision_capable`） |
+| PUT | `/admin/settings/chains/{chain_name}` | 设置链顺序（自愈剔除 + `dropped` 回报） |
+| POST | `/admin/settings/chains/repair` | 一键修复悬空引用 |
+| POST | `/admin/settings/providers/{name}/rotate-key` | 密钥轮换（加密落库 + 热更新 + 验证 + 审计） |
+
+### 9.2 新增 provider 配置字段（全部可选，缺省零回归）
+
+| 字段 | 默认 | 用途 |
+|---|---|---|
+| `chat_path` | `/chat/completions` | 非标准路径的兼容网关（私有部署/中转） |
+| `extra_headers` | `{}` | 额外鉴权头 |
+| `extra_body` | `{}` | 厂商特有请求参数 |
+
+### 9.3 关键实现约定（勿破坏）
+
+1. `text_chain` / `vision_chain` **未配置则不创建**（保持"回退 fallback_chain"
+   语义）；`fallback_chain` 作为 `build_fallback_chain` 的默认链**必须有基线**。
+2. `audit_chains` 只剔无效项、**不做语义归位**（语义归位仅由 `sync` 在 provider
+   状态变更时触发），避免启动时擅自改写用户既定链路。
+3. 链管理端点的 PUT **不自动追加成员**（text/vision），仅 `fallback_chain` 保留
+   既有"补齐到尾部"语义 —— 否则多模态 provider 会占据 text_chain 链首（违背 D1）。
+4. `vision_capable` / 系统提示的能力声明 / 发图轮的实际筛选**三者同源**，都走
+   `build_fallback_chain(cfg, "vision_chain").has_vision`。
+
+### 9.4 验证基线
+
+- 后端：21 个测试文件 **169 passed / 0 failed**（239.12s）
+- 前端：`tsc -p tsconfig.json --noEmit` **0 错**；`vitest run` **14 files / 96 tests passed**
+- 全量 pytest 未跑（需 PA 停机）
+- 零硬编码守护：`tests/test_no_hardcoded_models.py`（AST 扫描运行期字符串常量 +
+  扫描器自证用例，防假绿）
+
+### 9.5 遗留
+
+- **P3/P4 前端表单入口**：`chat_path` / `extra_headers` / `extra_body` 与密钥轮换
+  目前**仅有后端端点**，设置页 `ProviderRow` 尚未提供输入控件。
+- **`step-3.7-flash` 凭据失效**（非代码问题）：它是当前唯一多模态 provider，
+  故发图轮必然 401 —— 需更新其 key 或接入新的视觉 provider。
