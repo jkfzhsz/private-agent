@@ -2284,6 +2284,37 @@ async def _on_startup() -> None:
                 _logger.exception("KB embedding consistency check failed")
             # 从 config_runtime 恢复 AES 加密的 API key → 环境变量(设置页录入后重启仍生效)
             await _restore_keys_from_runtime()
+            # 2026-09-29(P1-2 链一致性自愈): 校验三条模型链(text_chain /
+            # vision_chain / fallback_chain)的引用有效性, 剔除指向"不存在 /
+            # 已删除 / 已禁用" provider 的悬空项并写回 runtime。
+            # 背景: 09-17/09-23/09-29 发图轮抛 "all 0 providers failed: []"
+            # (静默 3 周), 根因是 vision_chain 指向已禁用 provider 且无任何
+            # 入口可清理 —— 此处的启动自愈是该类缺陷的**制度性闭环**:
+            # 即使将来遗漏清理, 重启即自动修复并告警。
+            try:
+                from private_agent.config.loader import load_config_with_overrides
+                from private_agent.models.chain_guard import audit_chains
+
+                async with db._pool.acquire() as conn:
+                    runtime_cfg = await load_config_with_overrides(conn)
+                    chain_report = await audit_chains(conn, runtime_cfg)
+                if chain_report["dropped"]:
+                    _logger.warning(
+                        "model chain self-heal: dropped=%s emptied=%s",
+                        chain_report["dropped"], chain_report["emptied"],
+                    )
+                    if chain_report["emptied"]:
+                        _logger.error(
+                            "model chain emptied — 相关能力(如发图)将降级: %s",
+                            chain_report["emptied"],
+                        )
+                else:
+                    _logger.info(
+                        "model chains consistent (checked=%s, unconfigured=%s)",
+                        chain_report["checked"], chain_report["unconfigured"],
+                    )
+            except Exception:
+                _logger.exception("model chain consistency check failed")
             # 2026-08-06: 启动即确保 AES 主密钥持久化到用户配置
             # (%APPDATA%/Private Agent/backend.env, 打包版与 dev 统一)——
             # 不依赖任何用户操作; 升级/重装(Electron userData 不随安装覆盖)

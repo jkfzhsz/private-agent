@@ -27,16 +27,25 @@ from private_agent.api.files import _get_outputs_dir
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-async def _load_cfg() -> dict:
+async def _load_cfg(conn=None) -> dict:
     """加载 config.yaml 并合并 config_runtime 运行时覆盖(runtime > yaml)。
 
     设置页修改 provider/MCP 后, 此处读到的即为最新生效配置。
+
+    Args:
+        conn: 可选的已有连接。设置页**写操作**在同一连接内完成写入后立即需要
+            最新配置(如 provider 增删启停 → 链维护), 复用该连接可省去一次
+            额外建连。2026-09-29: 此前写路径各自新建连接, 在 Windows
+            asyncio proactor 下出现 ConnectionResetError(WinError 64)隐患。
+            省略时自建连接并负责关闭。
     """
-    conn = await db.connect()
-    try:
+    if conn is not None:
         return await loader.load_config_with_overrides(conn)
+    own = await db.connect()
+    try:
+        return await loader.load_config_with_overrides(own)
     finally:
-        await conn.close()
+        await own.close()
 
 
 def _build_compress_adapter(cfg):
@@ -2734,6 +2743,25 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
             await _set_runtime(conn, f"{prefix}.api_key_encrypted", encrypted)
             # 热生效: 本进程适配器直接读环境变量
             os.environ[f"PA_{name.upper()}_API_KEY"] = body.api_key.strip()
+
+        # 2026-09-29(P1-1 链一致性治理): enabled / multimodal 变更会影响该
+        # provider 应属哪条链(多模态 → vision_chain; 非多模态 → text_chain),
+        # 统一维护三条链并剔除语义不符的历史残留。
+        if body.enabled is not None or body.multimodal is not None:
+            from private_agent.models.chain_guard import (
+                sync_chains_on_provider_change,
+            )
+
+            cfg_after = await _load_cfg(conn)
+            prov_after = (
+                (cfg_after.get("models") or {}).get("providers", {}).get(name, {})
+            )
+            await sync_chains_on_provider_change(
+                conn,
+                cfg_after,
+                name,
+                "add" if prov_after.get("enabled", True) else "disable",
+            )
     finally:
         await conn.close()
     return {"ok": True, "name": name}
@@ -2777,7 +2805,8 @@ async def create_provider(body: ProviderCreateRequest):
     """新增模型 provider(任意 OpenAI 兼容服务, 动态注册)。
 
     - 配置写 config_runtime(models.providers.{name}.*), 与 yaml provider 同等对待
-    - enabled 时自动加入 fallback_chain 尾部(整体列表写 runtime)
+    - 2026-09-29(P1-1): 三条链(fallback/text/vision)统一维护, 不再只追加
+      fallback_chain —— 非多模态 → 入 text_chain; 多模态 → 入 vision_chain
     - api_key 可选, 提供则 AES 加密存储 + 热生效
     """
     import os
@@ -2786,7 +2815,6 @@ async def create_provider(body: ProviderCreateRequest):
     if not name or not body.base_url.strip():
         raise HTTPException(status_code=400, detail="name 与 base_url 必填")
     _validate_provider_name(name)
-    import json as _json
 
     # 存在性/删除标记判定必须走 loader 解析后的 cfg:
     # asyncpg 对 JSONB 列返回 JSON 字符串("true"/"false"), 直接 `is True/is False`
@@ -2835,20 +2863,20 @@ async def create_provider(body: ProviderCreateRequest):
                 f"{prefix}.multimodal",
             )
 
-        # 加入 fallback_chain(整体列表存 runtime, 避免写 yaml)
-        if body.enabled:
-            row = await conn.fetchval(
-                "SELECT value FROM config_runtime WHERE key = 'models.router.fallback_chain'"
-            )
-            if row:
-                chain = _json.loads(row) if isinstance(row, str) else row
-            else:
-                chain = list(
-                    cfg.get("models", {}).get("router", {}).get("fallback_chain", [])
-                )
-            if name not in chain:
-                chain.append(name)
-                await _set_runtime(conn, "models.router.fallback_chain", chain)
+        # 2026-09-29(P1-1 链一致性治理): provider 状态变更后**统一维护三条链**
+        # (fallback_chain / text_chain / vision_chain)。原实现只把新 provider
+        # 追加到 fallback_chain, text_chain 与 vision_chain 从不维护 →
+        # 禁用/删除后残留悬空引用 → build_fallback_chain 过滤后返回空链 →
+        # 消费端抛 "all 0 providers failed: []"(09-29 发图轮事故根因)。
+        from private_agent.models.chain_guard import sync_chains_on_provider_change
+
+        cfg_after = await _load_cfg(conn)
+        await sync_chains_on_provider_change(
+            conn,
+            cfg_after,
+            name,
+            "add" if body.enabled else "disable",
+        )
     finally:
         await conn.close()
     return {"ok": True, "name": name}
@@ -2856,13 +2884,11 @@ async def create_provider(body: ProviderCreateRequest):
 
 @router.delete("/settings/providers/{name}", response_model=None)
 async def delete_provider(name: str):
-    """删除模型 provider(软删: deleted 标记 + 禁用 + 移出 fallback_chain)。
+    """删除模型 provider(软删: deleted 标记 + 禁用 + 移出全部三条链)。
 
     config.yaml 的静态 provider 不可物理删除, 用 runtime 标记屏蔽;
     已删除的可通过 POST /settings/providers 同名重新创建。
     """
-    import json as _json
-
     conn = await db.connect()
     try:
         await _set_runtime(conn, f"models.providers.{name}.deleted", True)
@@ -2872,20 +2898,12 @@ async def delete_provider(name: str):
             "DELETE FROM config_runtime WHERE key = $1",
             f"models.providers.{name}.api_key_encrypted",
         )
-        # 移出 fallback_chain
-        row = await conn.fetchval(
-            "SELECT value FROM config_runtime WHERE key = 'models.router.fallback_chain'"
-        )
-        if row:
-            chain = _json.loads(row) if isinstance(row, str) else row
-        else:
-            cfg = await _load_cfg()
-            chain = list(
-                cfg.get("models", {}).get("router", {}).get("fallback_chain", [])
-            )
-        if name in chain:
-            chain = [c for c in chain if c != name]
-            await _set_runtime(conn, "models.router.fallback_chain", chain)
+        # 2026-09-29(P1-1): 三条链统一剔除。原实现只清理 fallback_chain
+        # → text_chain / vision_chain 残留已删除 provider 的悬空引用。
+        from private_agent.models.chain_guard import sync_chains_on_provider_change
+
+        cfg_after = await _load_cfg(conn)
+        await sync_chains_on_provider_change(conn, cfg_after, name, "delete")
     finally:
         await conn.close()
     return {"ok": True, "name": name}
@@ -2900,7 +2918,7 @@ class FallbackChainUpdateRequest(BaseModel):
 async def update_fallback_chain(body: FallbackChainUpdateRequest):
     """更新模型降级链顺序(蓝图 §2.7, config_runtime 整体列表存储)。
 
-    - 不存在/已删除的 name 静默剔除(自愈), 通过响应 dropped 字段回报
+    - 不存在/已删除/已禁用的 name 静默剔除(自愈), 通过响应 dropped 字段回报
     - 已存在但不在 chain 中的 enabled provider 会被追加到尾部
     - 重复项自动去重(保留首次出现)
     """
@@ -2908,9 +2926,13 @@ async def update_fallback_chain(body: FallbackChainUpdateRequest):
 
     cfg = await _load_cfg()
     providers = cfg.get("models", {}).get("providers", {})
+    # 2026-09-29(P1-4): 判定补 enabled —— 原条件只判 deleted, 导致
+    # enabled=false 的 provider 也能被写进链, 随后被 build_fallback_chain
+    # 过滤掉 → 可能得到**空链**(与 09-29 发图轮事故同类的隐患)。
+    # 已禁用的 provider 入链毫无意义, 故一律剔除(经响应 dropped 回报)。
     valid_names = {
         n for n, p in providers.items()
-        if not p.get("deleted")
+        if not p.get("deleted") and p.get("enabled", True)
     }
 
     # 幽灵项自愈: 历史脏数据(如软删残留)可能让链中出现已不存在的 provider。

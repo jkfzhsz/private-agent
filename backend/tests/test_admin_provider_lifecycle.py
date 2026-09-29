@@ -59,8 +59,14 @@ def client(monkeypatch, schema):
 
     monkeypatch.setattr(admin.db, "connect", _fake_connect)
 
-    async def _fake_load_cfg():
+    async def _fake_load_cfg(conn=None):
+        """签名与 admin._load_cfg(conn=None) 对齐(2026-09-29: 写路径复用调用方
+        连接加载最新配置, 不再自建连接)。"""
         cfg = {"models": {"providers": {}, "router": {"fallback_chain": []}}}
+        if conn is not None:
+            overrides = await cfg_loader._get_runtime_overrides(conn)
+            cfg_loader._deep_merge(cfg, overrides)
+            return cfg
         conn = await asyncpg.connect(TEST_DSN)
         try:
             overrides = await cfg_loader._get_runtime_overrides(conn)
@@ -179,3 +185,80 @@ async def test_fallback_chain_appends_missing_enabled(client, schema):
     )
     assert resp.status_code == 200
     assert resp.json()["chain"] == ["beta", "alpha"]
+
+
+@pytest.mark.asyncio
+async def test_disable_provider_syncs_all_three_chains(client, schema):
+    """2026-09-29(P1-1): 设置页禁用 provider → 三条链同步剔除(端点级)。
+
+    原实现 update_provider 的 enabled 分支**完全不碰链** → text_chain /
+    vision_chain 残留悬空引用 → build_fallback_chain 过滤后可能得到空链
+    → 消费端抛 "all 0 providers failed: []"(09-29 发图轮事故根因)。
+    """
+    import json as _json
+
+    assert (await _create(client, "alpha")).status_code == 200
+    assert (await _create(client, "beta")).status_code == 200
+
+    conn = await asyncpg.connect(TEST_DSN)
+    try:
+        for key in (
+            "models.router.text_chain",
+            "models.router.vision_chain",
+            "models.router.fallback_chain",
+        ):
+            await conn.execute(
+                "INSERT INTO config_runtime (key, value) VALUES ($1, $2::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                key,
+                '["alpha", "beta"]',
+            )
+    finally:
+        await conn.close()
+
+    resp = await client.put(
+        "/admin/settings/providers/beta", json={"enabled": False}
+    )
+    assert resp.status_code == 200, resp.text
+
+    conn = await asyncpg.connect(TEST_DSN)
+    try:
+        rows = await conn.fetch(
+            "SELECT key, value FROM config_runtime "
+            "WHERE key LIKE 'models.router.%chain'"
+        )
+    finally:
+        await conn.close()
+
+    chains = {
+        r["key"]: (
+            _json.loads(r["value"]) if isinstance(r["value"], str) else r["value"]
+        )
+        for r in rows
+    }
+    assert chains, "应能读到三条链"
+    for key, chain in chains.items():
+        assert "beta" not in chain, f"{key} 应剔除已禁用 provider, 实际 {chain}"
+        assert chain == ["alpha"], key
+
+
+@pytest.mark.asyncio
+async def test_fallback_chain_drops_disabled_provider(client, schema):
+    """2026-09-29(P1-4): 降级链不得保留 enabled=false 的 provider。
+
+    原 valid_names 只判 deleted → 已禁用 provider 可被写进链, 随后被
+    build_fallback_chain 过滤 → 可能得到**空链**(与 09-29 事故同类隐患)。
+    """
+    assert (await _create(client, "alpha")).status_code == 200
+    assert (await _create(client, "beta")).status_code == 200
+    assert (
+        await client.put("/admin/settings/providers/beta", json={"enabled": False})
+    ).status_code == 200
+
+    resp = await client.put(
+        "/admin/settings/fallback-chain", json={"chain": ["alpha", "beta"]}
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "beta" in data["dropped"], "已禁用 provider 应被剔除并回报 dropped"
+    assert data["chain"] == ["alpha"]
