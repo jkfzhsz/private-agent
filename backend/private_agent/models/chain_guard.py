@@ -99,14 +99,23 @@ async def save_chain(conn, chain_name: str, names: Iterable[str]) -> None:
 def _chain_should_contain(chain_name: str, multimodal: bool) -> bool:
     """该 provider 按语义是否应属于这条链。
 
-    - `vision_chain`(多模态优先): 仅多模态 provider 入链。
-    - `text_chain`(纯文本优先): 仅非多模态 provider 入链。
+    - `vision_chain`(多模态优先): **仅**多模态 provider 入链(排他)。
+    - `text_chain`(纯文本优先): **一律可入** —— 多模态 provider 追加在**尾部**,
+      作为"按需协助位"。2026-09-29 蒋先生决策(D1): 多模态 provider 按需进
+      text_chain, 协助文本模型完成特定识别任务后"退出", 主对话仍由文本模型
+      主导。
+
+      实现机制即 `FallbackChain` 既有的 `require_vision` 语义, **无需在运行时
+      增删链成员**(无状态、无并发风险):
+        · 发图轮: `_messages_contain_image` 为真 → 链上跳过纯文本模型, 从
+          多模态 provider 开始("按需进入");
+        · 下一轮纯文本: `_messages_contain_image` 为假(只看最后一条 user
+          消息) → 回到链首文本模型主导("任务完成后退出")。
+      因此多模态 provider 常驻链尾既不会抢占主对话, 也不需要动态改链。
     - `fallback_chain`(总降级链): 一律可入。
     """
     if chain_name == "vision_chain":
         return multimodal
-    if chain_name == "text_chain":
-        return not multimodal
     return True
 
 

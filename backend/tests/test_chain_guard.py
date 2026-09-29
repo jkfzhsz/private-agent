@@ -131,15 +131,23 @@ def test_enable_non_multimodal_joins_text_and_fallback_only():
     )
 
 
-def test_enable_multimodal_joins_vision_and_fallback_and_leaves_text():
-    """启用多模态 provider → 入 fallback_chain + vision_chain;
-    若曾残留在 text_chain 则被剔除(语义归位)。"""
+def test_enable_multimodal_appends_to_text_chain_tail():
+    """D1(2026-09-29 蒋先生决策): 多模态 provider 按需进 text_chain(**追加尾部**),
+    协助文本模型完成特定识别任务后退出, 主对话仍由文本模型主导。
+
+    实现机制 = `FallbackChain.require_vision`(轮次级, 无状态): 发图轮
+    `_messages_contain_image` 为真 → 链上跳过纯文本模型、从多模态开始;
+    下一轮纯文本 → require_vision 为假、回到链首文本模型。因此多模态 provider
+    常驻链尾不会抢占主对话, 也无需在运行时增删链成员。
+    """
     _setup_schema()
 
     async def _run():
         conn = await asyncpg.connect(TEST_DSN)
         try:
-            await _seed_all_chains(conn, ["deepseek-flash", "glm-vision"])
+            await save_chain(conn, "text_chain", ["deepseek-flash"])
+            await save_chain(conn, "vision_chain", [])
+            await save_chain(conn, "fallback_chain", ["deepseek-flash"])
             cfg = _cfg({"glm-vision": {"enabled": True, "multimodal": True}})
             await sync_chains_on_provider_change(conn, cfg, "glm-vision", "enable")
             return {c: await load_chain(conn, c) for c in CHAIN_KEYS}
@@ -147,11 +155,29 @@ def test_enable_multimodal_joins_vision_and_fallback_and_leaves_text():
             await conn.close()
 
     chains = asyncio.run(_run())
-    assert chains["vision_chain"] == ["deepseek-flash", "glm-vision"]
-    assert chains["fallback_chain"] == ["deepseek-flash", "glm-vision"]
-    assert "glm-vision" not in chains["text_chain"], (
-        "多模态 provider 应从 text_chain 剔除"
+    assert chains["text_chain"] == ["deepseek-flash", "glm-vision"], (
+        "多模态 provider 应按需留驻 text_chain **尾部**(文本模型仍在链首主导)"
     )
+    assert chains["vision_chain"] == ["glm-vision"]
+    assert chains["fallback_chain"] == ["deepseek-flash", "glm-vision"]
+
+
+def test_non_multimodal_not_removed_from_text_chain():
+    """非多模态 provider 在 text_chain 中是正常成员, 不被语义归位剔除。"""
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            await save_chain(conn, "text_chain", ["deepseek-flash"])
+            await save_chain(conn, "vision_chain", ["glm-vision"])
+            cfg = _cfg({"deepseek-v5": {"enabled": True, "multimodal": False}})
+            await sync_chains_on_provider_change(conn, cfg, "deepseek-v5", "add")
+            return await load_chain(conn, "text_chain")
+        finally:
+            await conn.close()
+
+    assert asyncio.run(_run()) == ["deepseek-flash", "deepseek-v5"]
 
 
 def test_sync_does_not_create_unconfigured_chain():
