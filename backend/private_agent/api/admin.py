@@ -2329,6 +2329,13 @@ async def get_providers():
             "api_key_configured": bool(key_val) and key_val != "test-key",
             # per-provider 对话参数上限(已解析: provider 级 > 全局默认)
             "limits": resolve_provider_limits(cfg, name),
+            # 2026-09-29(P3 灵活接入): 端点路径/额外请求头/额外请求体(供设置页回显)
+            "chat_path": prov.get("chat_path"),
+            "extra_headers": prov.get("extra_headers") or {},
+            "extra_body": prov.get("extra_body") or {},
+            # 2026-09-29(P4-2): 密钥轮换审计(时间与结果; 不含明文)
+            "key_rotated_at": prov.get("key_rotated_at"),
+            "last_test_ok": prov.get("last_test_ok"),
         })
     # 降级链只暴露仍存在(未删除)的 provider: 历史脏数据可能残留已删除项,
     # 若原样返回会在设置页出现"幽灵条目"且保存时被校验拒绝(400)。

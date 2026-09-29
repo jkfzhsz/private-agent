@@ -46,6 +46,13 @@ interface ProviderInfo {
   sort_order?: number;
   kind?: string; // cloud | local
   limits?: { max_input_tokens?: number; max_output_tokens?: number; max_turns?: number };
+  // 2026-09-29(P3 灵活接入): 端点路径 / 额外请求头 / 额外请求体（可选覆盖，留空用默认）
+  chat_path?: string | null;
+  extra_headers?: Record<string, string> | null;
+  extra_body?: Record<string, unknown> | null;
+  // 2026-09-29(P4-2): 密钥轮换审计（时间与结果，不含明文）
+  key_rotated_at?: string | null;
+  last_test_ok?: boolean | null;
 }
 
 interface McpServer {
@@ -2137,6 +2144,17 @@ function ProviderRow({
   const [group, setGroup] = useState(provider.group ?? "");
   const [kind, setKind] = useState(provider.kind ?? "cloud");
   const [multimodal, setMultimodal] = useState(provider.multimodal ?? false);
+  // 2026-09-29(P3): 端点路径 / 额外请求头 / 额外请求体（JSON 文本编辑；留空=用默认）
+  const [chatPath, setChatPath] = useState(provider.chat_path ?? "");
+  const [extraHeaders, setExtraHeaders] = useState(
+    JSON.stringify(provider.extra_headers ?? {}),
+  );
+  const [extraBody, setExtraBody] = useState(
+    JSON.stringify(provider.extra_body ?? {}),
+  );
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  // 2026-09-29(P4-2): 轮换密钥时是否顺带做一次连通性验证
+  const [verifyKey, setVerifyKey] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   // P0-3(2026-08-17): 删除 provider 玻璃确认弹层(本地 state)
@@ -2153,25 +2171,92 @@ function ProviderRow({
     setGroup(provider.group ?? "");
     setKind(provider.kind ?? "cloud");
     setMultimodal(provider.multimodal ?? false);
+    setChatPath(provider.chat_path ?? "");
+    setExtraHeaders(JSON.stringify(provider.extra_headers ?? {}));
+    setExtraBody(JSON.stringify(provider.extra_body ?? {}));
     setMsg(null);
     setEditing(true);
+  };
+
+  // P3: JSON 对象解析(空串视为 {}，用于"清除覆盖")
+  const parseJsonObject = (
+    text: string,
+    label: string,
+  ): Record<string, unknown> | null => {
+    const trimmed = text.trim();
+    if (!trimmed) return {};
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("必须是 JSON 对象");
+      }
+      return parsed as Record<string, unknown>;
+    } catch (e) {
+      setMsg(`${label} 不是合法 JSON 对象: ${String(e)}`);
+      return null;
+    }
   };
 
   const save = async (): Promise<void> => {
     setBusy(true);
     setMsg(null);
     try {
+      const headersObj = parseJsonObject(extraHeaders, "额外请求头");
+      if (headersObj === null) return;
+      const bodyObj = parseJsonObject(extraBody, "额外请求体");
+      if (bodyObj === null) return;
+
       const body: Record<string, unknown> = {};
       if (baseUrl.trim()) body.base_url = baseUrl.trim();
       if (modelName.trim()) body.model_name = modelName.trim();
       body.enabled = enabled;
-      if (apiKey.trim()) body.api_key = apiKey.trim();
       body.max_input_tokens = maxInput;
       body.max_output_tokens = maxOutput;
       body.max_turns = maxTurns;
       body.group = group.trim() || "";
       body.kind = kind;
       body.multimodal = multimodal;
+      // P3: 空串/空对象 = 删除覆盖(回落 adapter 默认值)
+      body.chat_path = chatPath.trim();
+      body.extra_headers = headersObj;
+      body.extra_body = bodyObj;
+
+      // P4-2: 填了新 Key → 走轮换端点(加密落库 + 进程内热生效 + 可选验证 + 审计),
+      // 其余字段仍由 PUT 落库; 这样"换 key"是一个有审计、可验证的原子操作。
+      if (apiKey.trim()) {
+        const rotResp = await adminFetch(
+          `${API_BASE}/settings/providers/${provider.name}/rotate-key`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: apiKey.trim(), verify: verifyKey }),
+          },
+        );
+        const rotData = await rotResp.json();
+        if (!rotResp.ok) throw new Error(rotData.detail ?? `HTTP ${rotResp.status}`);
+
+        const resp = await adminFetch(`${API_BASE}/settings/providers/${provider.name}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
+
+        const t = rotData.test as { ok?: boolean; sample?: string; error?: string } | undefined;
+        setMsg(
+          t
+            ? t.ok
+              ? `✅ 密钥已轮换并验证通过: ${t.sample ?? ""}`
+              : `⚠️ 密钥已轮换，但验证未通过: ${t.error ?? "未知原因"}`
+            : "✅ 密钥已轮换(未验证)",
+        );
+        setApiKey("");
+        setEditing(false);
+        onSaved();
+        return;
+      }
+
       const resp = await adminFetch(`${API_BASE}/settings/providers/${provider.name}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -2330,7 +2415,25 @@ function ProviderRow({
               placeholder={provider.api_key_configured ? "已配置(留空不修改)" : "输入新 Key"}
               style={INPUT_BASE}
             />
+            {/* P4-2: 填新 Key 保存即"轮换"—— 加密落库 + 进程内热生效 + 可选验证 + 审计 */}
+            <label
+              style={ROW_CHECK}
+              title="填写新 Key 时保存即完成轮换：AES 加密落库 + 进程内热生效，并自动验证一次连通性"
+            >
+              <input type="checkbox" checked={verifyKey} onChange={(e) => setVerifyKey(e.target.checked)} />
+              保存时验证
+            </label>
           </div>
+          {provider.key_rotated_at && (
+            <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginLeft: 72 }}>
+              上次轮换 {String(provider.key_rotated_at).slice(0, 19).replace("T", " ")}
+              {provider.last_test_ok === true
+                ? " · 验证通过"
+                : provider.last_test_ok === false
+                  ? " · 验证未通过"
+                  : ""}
+            </div>
+          )}
           <div className="flex-center gap-8">
             <span className="fs-12 text-secondary" style={LBL_W72}>参数上限</span>
             <input
@@ -2359,6 +2462,76 @@ function ProviderRow({
             />
             <span className="fs-10 text-tertiary">输入/输出/轮次</span>
           </div>
+          {/* P3: 高级配置默认收起 —— 低频项(多数 provider 用默认即可)，避免表单一屏堆满 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="fs-12 text-secondary" style={LBL_W72}>高级</span>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 11, padding: "3px 10px", borderStyle: "dashed" }}
+              onClick={() => setShowAdvanced((v) => !v)}
+            >
+              {showAdvanced ? "收起" : "端点与请求参数"}
+            </button>
+            {(provider.chat_path ||
+              Object.keys(provider.extra_headers ?? {}).length > 0 ||
+              Object.keys(provider.extra_body ?? {}).length > 0) && (
+              <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>已配置</span>
+            )}
+          </div>
+          {showAdvanced && (
+            <div
+              style={{
+                display: "flex", flexDirection: "column", gap: 8, marginLeft: 72,
+                paddingLeft: 10, borderLeft: "2px solid rgba(148,163,184,0.25)",
+              }}
+            >
+              <div className="flex-center gap-8">
+                <span className="fs-12 text-secondary" style={{ width: 88, flexShrink: 0 }}>
+                  请求路径
+                </span>
+                <input
+                  value={chatPath}
+                  onChange={(e) => setChatPath(e.target.value)}
+                  placeholder="/chat/completions（默认；留空即用默认）"
+                  style={INPUT_BASE}
+                />
+              </div>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <span className="fs-12 text-secondary" style={{ width: 88, flexShrink: 0, paddingTop: 6 }}>
+                  额外请求头
+                </span>
+                <textarea
+                  value={extraHeaders}
+                  onChange={(e) => setExtraHeaders(e.target.value)}
+                  placeholder="{}"
+                  rows={2}
+                  style={{
+                    ...INPUT_BASE, resize: "vertical",
+                    fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                  }}
+                />
+              </div>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <span className="fs-12 text-secondary" style={{ width: 88, flexShrink: 0, paddingTop: 6 }}>
+                  额外请求体
+                </span>
+                <textarea
+                  value={extraBody}
+                  onChange={(e) => setExtraBody(e.target.value)}
+                  placeholder="{}"
+                  rows={2}
+                  style={{
+                    ...INPUT_BASE, resize: "vertical",
+                    fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                用于非标准路径的兼容网关、需要额外鉴权头的服务、或厂商特有参数；留空即用默认值。
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             {/* V1.4-8.2: 分组 + 类型 */}
             <input
