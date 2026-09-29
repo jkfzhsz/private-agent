@@ -69,6 +69,8 @@ frontend/release3/
 # 测试产物
 backend/.pytest_results.xml
 backend/tests/.pytest_results.xml
+# 固定 basetemp(2026-09-29: 全量回归需固定该目录以规避 safe-delete shim 阈值)
+.pytest-tmp/
 
 # 发布凭据(本地 token, 绝不上传)
 scripts/.gh-token
