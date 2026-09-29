@@ -205,6 +205,15 @@ class FallbackChain:
                             continue
                         failed.append(adapter.provider_name)
                         break
+                # 2026-09-29 修复(同一 provider 被调用两次): 该 adapter 已判定
+                # 失败(不可重试, 或重试耗尽) → 直接进入链上**下一个** provider。
+                # 此前缺少本 continue, 控制流会落入下方"无流式能力"的非流式
+                # 兜底分支 → 同一 provider 被调用两次(chat_stream 失败 → chat
+                # 再失败), 表现为 failed_providers 重复(['x','x'])、认证类
+                # 401/403 白跑一次网络往返、且错误信息误导排查(看着像配了两个
+                # provider)。09-29 实测 ['step-3.7-flash','step-3.7-flash'],
+                # 09-08 的 ['glm-5.2','glm-5.2'] 同源。
+                continue
             # 无流式能力: 用非流式 chat 兜底(前端无逐句效果但可用)
             try:
                 result = await adapter.chat(messages, tools, max_tokens=max_tokens)

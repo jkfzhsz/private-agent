@@ -145,3 +145,107 @@ class TestFallbackRetry:
             asyncio.sleep = orig_sleep
         # 退避 0.5 → 1.0
         assert delays == [0.5, 1.0], f"delays={delays}"
+
+
+class _StreamFailAdapter:
+    """流式与非流式都失败, 各自计数 —— 验证失败后不会被重复调用。"""
+
+    def __init__(self, err_msg: str = "401 Unauthorized", name: str = "sf"):
+        self.provider_name = name
+        self._err = err_msg
+        self.stream_calls = 0
+        self.chat_calls = 0
+
+        class _Cap:
+            streaming = True
+
+        self.capability = _Cap()
+
+    async def chat_stream(
+        self, messages, tools=None, max_tokens=None,
+        on_delta=None, on_reasoning=None,
+    ):
+        self.stream_calls += 1
+        raise ProviderError(self.provider_name, self._err)
+
+    async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
+        self.chat_calls += 1
+        raise ProviderError(self.provider_name, self._err)
+
+
+class TestStreamFailureNoDoubleCall:
+    """2026-09-29: 流式失败后不得再走"非流式兜底"(同一 provider 被调用两次)。
+
+    缺陷: `chat_stream` 的 while 循环 break 后缺少 continue, 控制流落入下方
+    "无流式能力"分支 → 同一 provider 被调用两次, failed_providers 出现重复
+    (09-29 实测 ['step-3.7-flash','step-3.7-flash']; 09-08 的 ['glm-5.2',
+    'glm-5.2'] 同源)。修复 = break 后补 continue。
+    """
+
+    def test_stream_failure_does_not_fall_through_to_chat(self):
+        """401 流式失败 → 只调 chat_stream 一次, 不再调 chat。"""
+        adapter = _StreamFailAdapter("401 Unauthorized")
+
+        async def run():
+            chain = FallbackChain([adapter])
+            with pytest.raises(AllProvidersFailedError) as ei:
+                await chain.chat_stream([])
+            return str(ei.value)
+
+        msg = asyncio.run(run())
+        assert adapter.stream_calls == 1
+        assert adapter.chat_calls == 0, "流式失败后不应再走非流式兜底"
+        assert "['sf', 'sf']" not in msg, f"failed 列表不得重复: {msg}"
+        assert "all 1 providers failed: ['sf']" in msg, msg
+
+    def test_retryable_stream_failure_still_no_chat_fallback(self):
+        """503 重试耗尽后同样不得走非流式兜底。"""
+        adapter = _StreamFailAdapter("upstream 503: busy")
+
+        async def run():
+            chain = FallbackChain([adapter])
+            with pytest.raises(AllProvidersFailedError) as ei:
+                await chain.chat_stream([])
+            return str(ei.value)
+
+        msg = asyncio.run(run())
+        assert adapter.stream_calls == FallbackChain._RETRY_LIMIT
+        assert adapter.chat_calls == 0
+        assert "['sf', 'sf']" not in msg, msg
+
+    def test_stream_failure_advances_to_next_provider(self):
+        """第一个 provider 流式失败 → 继续尝试链上下一个(降级语义不回归)。"""
+        bad = _StreamFailAdapter("401 Unauthorized", name="bad")
+
+        class _Good:
+            provider_name = "good"
+
+            def __init__(self):
+                class _Cap:
+                    streaming = True
+
+                self.capability = _Cap()
+                self.calls = 0
+
+            async def chat_stream(
+                self, messages, tools=None, max_tokens=None,
+                on_delta=None, on_reasoning=None,
+            ):
+                self.calls += 1
+                return ChatResult(content="good-ok", used_provider="good")
+
+            async def chat(self, messages, tools=None, max_tokens=None, **kwargs):
+                return ChatResult(content="good-nonstream", used_provider="good")
+
+        good = _Good()
+
+        async def run():
+            chain = FallbackChain([bad, good])
+            return await chain.chat_stream([])
+
+        result = asyncio.run(run())
+        assert result.content == "good-ok"
+        assert good.calls == 1
+        assert result.failed_providers == ["bad"], (
+            f"失败 provider 只应记录一次, 实际 {result.failed_providers}"
+        )
