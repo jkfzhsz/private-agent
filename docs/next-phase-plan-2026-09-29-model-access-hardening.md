@@ -303,7 +303,7 @@ vision_capable = len(vision_chain._adapters) > 0   # 已有 has_vision 属性可
 | D1 修正（text_chain 按需容纳多模态） | ✅ 已实施 | `27fd702` |
 | 批次 2+3 后端（P1-3 端点 / P2 / P3 / P4 / P5-1） | ✅ 已实施 | `ae76a8f` |
 | 批次 2+3 前端（P1-3 链管理面板） | ✅ 已实施 | `cecf1ec` |
-| P3/P4 前端表单入口 | ⏳ 待实施 | — |
+| P3/P4 前端表单入口 | ✅ 已实施 | `9291059` |
 
 ### 9.1 新增端点一览
 
@@ -343,7 +343,15 @@ vision_capable = len(vision_chain._adapters) > 0   # 已有 has_vision 属性可
 
 ### 9.5 遗留
 
-- **P3/P4 前端表单入口**：`chat_path` / `extra_headers` / `extra_body` 与密钥轮换
-  目前**仅有后端端点**，设置页 `ProviderRow` 尚未提供输入控件。
+- ~~**P3/P4 前端表单入口**~~ ✅ **已实施**（`9291059`）：`ProviderRow` 新增
+  "高级 → 端点与请求参数"（**默认收起**）与密钥轮换入口（填新 Key 即走
+  `rotate-key`，可勾选"保存时验证"，并回显上次轮换时间与验证结果）。
 - **`step-3.7-flash` 凭据失效**（非代码问题）：它是当前唯一多模态 provider，
   故发图轮必然 401 —— 需更新其 key 或接入新的视觉 provider。
+
+### 9.6 待办（下一轮可选）
+
+- **P5-2 能力探测**：新增 provider 时调 `{base_url}{models_path}` 校验模型名是否
+  存在，降低手工填错概率（当前 `chat_path` 已可配，但无连通性预检）。
+- **P2 守护测试的白名单**：目前仅有 `# model-name-ok` 行内豁免；若将来需在代码里
+  合法写入模型名（示例/提示语），可按需扩展为模块级白名单。
