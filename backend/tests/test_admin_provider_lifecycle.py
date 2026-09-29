@@ -262,3 +262,57 @@ async def test_fallback_chain_drops_disabled_provider(client, schema):
     data = resp.json()
     assert "beta" in data["dropped"], "已禁用 provider 应被剔除并回报 dropped"
     assert data["chain"] == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_create_and_update_provider_endpoint_extras(client, schema):
+    """P3: create 落库 chat_path/extra_headers/extra_body; update 传空值即清除覆盖。"""
+    import json as _json
+
+    resp = await _create(
+        client,
+        "gw",
+        chat_path="/custom/chat",
+        extra_headers={"X-Tenant": "t1"},
+        extra_body={"top_p": 0.9},
+    )
+    assert resp.status_code == 200, resp.text
+
+    async def _runtime_fields() -> dict:
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            rows = await conn.fetch(
+                "SELECT key, value FROM config_runtime "
+                "WHERE key LIKE 'models.providers.gw.%'"
+            )
+        finally:
+            await conn.close()
+        out: dict = {}
+        for r in rows:
+            field = r["key"].rsplit(".", 1)[1]
+            v = r["value"]
+            out[field] = _json.loads(v) if isinstance(v, str) else v
+        return out
+
+    fields = await _runtime_fields()
+    assert fields["chat_path"] == "/custom/chat"
+    assert fields["extra_headers"] == {"X-Tenant": "t1"}
+    assert fields["extra_body"] == {"top_p": 0.9}
+
+    # update 传空值 → 删除覆盖(回落 adapter 默认)
+    resp2 = await client.put(
+        "/admin/settings/providers/gw",
+        json={"chat_path": "", "extra_headers": {}, "extra_body": {}},
+    )
+    assert resp2.status_code == 200, resp2.text
+    fields2 = await _runtime_fields()
+    assert "chat_path" not in fields2
+    assert "extra_headers" not in fields2
+    assert "extra_body" not in fields2
+
+    # update 不传(None) → 保留既有值
+    resp3 = await client.put(
+        "/admin/settings/providers/gw", json={"chat_path": "/kept/chat"}
+    )
+    assert resp3.status_code == 200, resp3.text
+    assert (await _runtime_fields())["chat_path"] == "/kept/chat"

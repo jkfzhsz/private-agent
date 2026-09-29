@@ -790,20 +790,17 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         )
         # 多模态能力声明(蒋先生反馈 2026-08-09): 链上存在 multimodal 模型时
         # 告知 AI 具备图片识别, 避免主动否认"没有图片识别功能"。
+        # 2026-09-29(P5-1 看链不看字典): 原判定扫描 providers 字典的
+        # `multimodal` 字段 —— 与真实装配脱钩(曾因漏判 enabled 而对已禁用的
+        # glm-vision 谎报能力, 是 AI 自我分析误判视觉能力、误导用户实测的
+        # 直接原因)。现改为**按 vision_chain 的实际解析结果**判定:
+        # build_fallback_chain 会自动过滤 disabled/deleted, 且 vision_chain
+        # 未配置/为空时回退 fallback_chain —— 与发图轮的真实行为完全一致。
         vision_note = ""
         try:
-            provs = (cfg.get("models") or {}).get("providers", {})
-            # 2026-09-29 修复(能力谎报): 原判定只看 multimodal, 不看 enabled ——
-            # 已禁用的 glm-vision(multimodal=true, enabled=false) 仍让系统提示
-            # 持续声明"你具备图片识别能力(已配置多模态模型)", 与实际装配不符,
-            # 是 AI 自我分析误判视觉能力、进而误导用户上传图片实测的直接原因。
-            # 与 registry.build_fallback_chain 的过滤语义对齐(以 enabled 为准)。
-            if any(
-                isinstance(p, dict)
-                and p.get("multimodal")
-                and p.get("enabled", True)
-                for p in provs.values()
-            ):
+            from private_agent.models.registry import build_fallback_chain
+
+            if build_fallback_chain(cfg, "vision_chain").has_vision:
                 vision_note = (
                     "\n- 你具备图片识别能力(已配置多模态模型)。用户粘贴/上传图片时"
                     "你会收到图片内容, 请直接识别并回答, 不要说'无法处理图片'。"
@@ -886,10 +883,23 @@ async def root() -> dict[str, str]:
     return {"status": "sidecar_running"}
 
 
+#: 启动期收集的配置一致性告警(P4-3: 如多处 PA_MASTER_KEY 不一致)。
+#: 经 /health 的 warnings 字段对外暴露; status 语义保持不变。
+_STARTUP_WARNINGS: list[str] = []
+
+
 @app.get("/health")
-async def health() -> dict[str, str]:
-    """健康检查端点(蓝图 §9.4 M0 Done Criteria 1)。"""
-    return {"status": "ok"}
+async def health() -> dict:
+    """健康检查端点(蓝图 §9.4 M0 Done Criteria 1)。
+
+    2026-09-29(P4-3): 附 `warnings` —— 启动期发现的配置一致性问题
+    (如多处 PA_MASTER_KEY 不一致会导致 provider 静默 401)。无问题时不含
+    该字段, 原有 `{"status": "ok"}` 语义不变。
+    """
+    payload: dict = {"status": "ok"}
+    if _STARTUP_WARNINGS:
+        payload["warnings"] = list(_STARTUP_WARNINGS)
+    return payload
 
 
 @app.websocket("/ws")
@@ -2325,6 +2335,30 @@ async def _on_startup() -> None:
                 _admin._ensure_master_key()
             except Exception:  # noqa: BLE001
                 _logger.warning("master key ensure failed at startup")
+            # 2026-09-29(P4-3 双钥匙显式告警): 多处 PA_MASTER_KEY 不一致时,
+            # 用其中一把加密的 provider key 无法用另一把解密 → 该 provider
+            # **静默 401**(历史已踩过, 排查成本极高)。此处显式 ERROR 并写入
+            # _STARTUP_WARNINGS, 经 /health 的 warnings 暴露, 不再静默。
+            try:
+                from private_agent.api import admin as _admin_mk
+
+                _mk = _admin_mk.check_master_key_consistency()
+                if not _mk["consistent"]:
+                    _STARTUP_WARNINGS.append(
+                        "PA_MASTER_KEY 多处不一致("
+                        + _mk["detail"]
+                        + ") —— 用其中一把加密的 provider key 将无法解密, "
+                        "表现为该 provider 静默 401; 请统一为同一把 key。"
+                    )
+                    _logger.error(
+                        "PA_MASTER_KEY sources inconsistent: %s", _mk["detail"]
+                    )
+                else:
+                    _logger.info(
+                        "master key sources consistent: %s", _mk["sources"]
+                    )
+            except Exception:  # noqa: BLE001
+                _logger.exception("master key consistency check failed")
             # V1.5 项-1(ADR-012 §3.3e): 进程重启后清理 running 且心跳过期的
             # 僵尸子代理(统一置 failed(heartbeat_timeout_after_restart), 幂等)
             try:

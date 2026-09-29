@@ -116,7 +116,17 @@ async def _eval_run_handler(args: dict) -> ToolResult:
             run_id = await runner.run_evaluation(
                 skill_name=meta.get("skill_name", scene),
                 skill_version="1.0.0",
-                model_id="mock-glm" if mock else "deepseek-v4-flash",
+            # 2026-09-29(P2 零硬编码): 原为硬编码 —— mock 时 "mock-glm"、
+            # 非 mock 时 "deepseek-v4-flash"。换模型/换厂商后评测记录仍指向
+            # 旧模型名, 与实际使用的 adapter 脱钩(静默走错 provider)。
+            # 改为取**实际 adapter 的 provider 名**(model_adapter 已由
+            # build_default_adapter 从链上解析; 链上无可用 provider 时上方
+            # 已提前返回明确错误)。
+            model_id=(
+                "mock"
+                if mock
+                else (getattr(model_adapter, "provider_name", "") or "unknown")
+            ),
                 eval_mode="offline",
                 mock_enabled=mock,
                 sample_subset=subset if subset == "quick" else None,

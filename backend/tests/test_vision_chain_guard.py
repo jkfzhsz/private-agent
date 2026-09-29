@@ -238,26 +238,33 @@ def test_empty_vision_chain_direct_call_reproduces_original_error():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def _system_prompt_with_providers(conn, providers: dict) -> str:
+async def _system_prompt_with_cfg(conn, cfg: dict) -> str:
     from private_agent.main import _get_system_prompt
 
     sid = await conn.fetchval(
         "INSERT INTO sessions (title, model_id, kind) "
         "VALUES ('vision-note', 'mock', 'monitor') RETURNING id"
     )
-    return await _get_system_prompt({"models": {"providers": providers}}, sid, conn)
+    return await _get_system_prompt(cfg, sid, conn)
 
 
-def test_vision_note_present_when_multimodal_enabled():
-    """有启用的多模态 provider → 系统提示声明具备图片识别能力(原行为)。"""
+def _cfg(providers: dict, **router) -> dict:
+    return {"models": {"providers": providers, "router": {"type": "manual", **router}}}
+
+
+def test_vision_note_present_when_vision_chain_has_multimodal():
+    """P5-1(看链不看字典): vision_chain 上有可用多模态 provider → 声明能力。"""
     _setup_schema()
 
     async def _run():
         conn = await asyncpg.connect(TEST_DSN)
         try:
-            return await _system_prompt_with_providers(
+            return await _system_prompt_with_cfg(
                 conn,
-                {"glm-vision": {"multimodal": True, "enabled": True}},
+                _cfg(
+                    {"glm-vision": {"multimodal": True, "enabled": True}},
+                    vision_chain=["glm-vision"],
+                ),
             )
         finally:
             await conn.close()
@@ -266,9 +273,9 @@ def test_vision_note_present_when_multimodal_enabled():
 
 
 def test_vision_note_absent_when_multimodal_disabled():
-    """2026-09-29 回归: multimodal=true 但 enabled=false → 不得声明具备图片识别能力。
+    """回归: multimodal=true 但 enabled=false → 链上被过滤 → 不得声明能力。
 
-    缺陷期: 判定只看 multimodal → 已禁用的 glm-vision 仍让系统提示谎报能力
+    缺陷期: 判定只看 multimodal → 已禁用的 glm-vision 仍让系统提示谎报
     → AI 自我分析误判视觉能力 → 误导用户上传图片实测 → 撞上空链崩溃。
     """
     _setup_schema()
@@ -276,14 +283,63 @@ def test_vision_note_absent_when_multimodal_disabled():
     async def _run():
         conn = await asyncpg.connect(TEST_DSN)
         try:
-            return await _system_prompt_with_providers(
+            return await _system_prompt_with_cfg(
                 conn,
-                {"glm-vision": {"multimodal": True, "enabled": False}},
+                _cfg(
+                    {"glm-vision": {"multimodal": True, "enabled": False}},
+                    vision_chain=["glm-vision"],
+                    fallback_chain=[],
+                ),
             )
         finally:
             await conn.close()
 
-    prompt = asyncio.run(_run())
-    assert "你具备图片识别能力" not in prompt, (
-        "已禁用的多模态 provider 不应触发能力声明(谎报)"
+    assert "你具备图片识别能力" not in asyncio.run(_run()), (
+        "已禁用/已删除的多模态 provider 不应触发能力声明(谎报)"
     )
+
+
+def test_vision_note_present_when_vision_chain_empty_but_fallback_has_multimodal():
+    """生产现状回归: vision_chain 为空 → 回退 fallback_chain, 其中有多模态
+    provider 时**仍应声明能力**(发图轮实际就会用它, 声明必须与实际行为一致)。"""
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            return await _system_prompt_with_cfg(
+                conn,
+                _cfg(
+                    {
+                        "deepseek-flash": {"enabled": True, "multimodal": False},
+                        "step-3.7-flash": {"enabled": True, "multimodal": True},
+                    },
+                    vision_chain=[],
+                    fallback_chain=["deepseek-flash", "step-3.7-flash"],
+                ),
+            )
+        finally:
+            await conn.close()
+
+    assert "你具备图片识别能力" in asyncio.run(_run())
+
+
+def test_vision_note_absent_when_no_multimodal_anywhere():
+    """全链无多模态 provider → 不得声明能力。"""
+    _setup_schema()
+
+    async def _run():
+        conn = await asyncpg.connect(TEST_DSN)
+        try:
+            return await _system_prompt_with_cfg(
+                conn,
+                _cfg(
+                    {"deepseek-flash": {"enabled": True, "multimodal": False}},
+                    vision_chain=[],
+                    fallback_chain=["deepseek-flash"],
+                ),
+            )
+        finally:
+            await conn.close()
+
+    assert "你具备图片识别能力" not in asyncio.run(_run())

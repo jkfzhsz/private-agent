@@ -199,6 +199,11 @@ def _make_factory(
             model_name=prov.get("model_name"),
             provider_name=name,
             multimodal=prov.get("multimodal", False),
+            # 2026-09-29(P3 灵活接入): 端点路径/额外请求头/额外请求体字段
+            # 由 provider 配置驱动, 缺省时 adapter 内回落到历史默认值。
+            chat_path=prov.get("chat_path") or "/chat/completions",
+            extra_headers=prov.get("extra_headers") or {},
+            extra_body=prov.get("extra_body") or {},
         )
 
     return factory

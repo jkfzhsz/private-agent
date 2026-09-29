@@ -2359,6 +2359,65 @@ async def _set_runtime(conn, key: str, value) -> None:
     )
 
 
+def check_master_key_consistency() -> dict:
+    """P4-3(2026-09-29): 检查多处 PA_MASTER_KEY 是否一致。
+
+    可能存在三处: 进程环境变量 / `%APPDATA%/Private Agent/backend.env`
+    (打包版与 dev 统一读写处) / `backend/.env`(dev 继承源)。若同时存在两把
+    不同的 key, 用 A 加密的 provider key 必然无法用 B 解密 → 该 provider
+    **静默 401**(历史已踩过, 排查成本极高)。
+
+    本函数**只检测并报告, 不自动修复** —— 自动改写 master key 会破坏既有
+    密文, 必须由人决定统一到哪一把。
+
+    Returns:
+        {"consistent": bool, "sources": {来源: 是否有值}, "detail": str}
+        (detail 只含各 key 的**前 8 位**, 不泄露完整密钥)
+    """
+    import os
+
+    def _key_of(path: str) -> str:
+        try:
+            return (_read_env_map(path).get("PA_MASTER_KEY") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    from_env = (os.environ.get("PA_MASTER_KEY") or "").strip()
+    from_user = _key_of(_user_env_path())
+
+    workspace_root = ""
+    try:
+        workspace_root = os.path.expandvars(
+            loader.load_config().get("system", {}).get("workspace_root", ".")
+        )
+    except Exception:  # noqa: BLE001
+        workspace_root = ""
+    from_workspace = (
+        _key_of(os.path.join(workspace_root, ".env")) if workspace_root else ""
+    )
+
+    sources = {
+        "process_env": bool(from_env),
+        "user_env": bool(from_user),
+        "backend_env": bool(from_workspace),
+    }
+    distinct = {k for k in (from_env, from_user, from_workspace) if k}
+    consistent = len(distinct) <= 1
+
+    detail = ""
+    if not consistent:
+        parts = []
+        if from_env:
+            parts.append(f"process_env={from_env[:8]}…")
+        if from_user:
+            parts.append(f"user_env={from_user[:8]}…")
+        if from_workspace:
+            parts.append(f"backend_env={from_workspace[:8]}…")
+        detail = " / ".join(parts)
+
+    return {"consistent": consistent, "sources": sources, "detail": detail}
+
+
 def _ensure_master_key() -> bytes:
     """确保 PA_MASTER_KEY 可用: env > user_env > backend/.env > 生成。
 
@@ -2666,6 +2725,11 @@ class ProviderUpdateRequest(BaseModel):
     sort_order: int | None = None
     kind: str | None = None  # cloud | local
     multimodal: bool | None = None  # 是否多模态(支持图片输入)
+    # 2026-09-29(P3 灵活接入): 端点路径 / 额外请求头 / 额外请求体字段。
+    # None 表示不更新; 空串/空 dict 表示清除该覆盖(回落 adapter 默认值)。
+    chat_path: str | None = None
+    extra_headers: dict | None = None
+    extra_body: dict | None = None
 
 
 @router.put("/settings/providers/{name}", response_model=None)
@@ -2712,6 +2776,31 @@ async def update_provider(name: str, body: ProviderUpdateRequest):
                 await _set_runtime(conn, f"{prefix}.kind", k)
         if body.multimodal is not None:
             await _set_runtime(conn, f"{prefix}.multimodal", bool(body.multimodal))
+
+        # 2026-09-29(P3 灵活接入): 端点路径 / 额外请求头 / 额外请求体。
+        # 语义与 group 一致 —— None 不更新; 空值则**删除覆盖**(回落默认)。
+        if body.chat_path is not None:
+            path = (body.chat_path or "").strip()
+            if path:
+                await _set_runtime(conn, f"{prefix}.chat_path", path)
+            else:
+                await conn.execute(
+                    "DELETE FROM config_runtime WHERE key = $1",
+                    f"{prefix}.chat_path",
+                )
+        for _field, _value in (
+            ("extra_headers", body.extra_headers),
+            ("extra_body", body.extra_body),
+        ):
+            if _value is None:
+                continue
+            if _value:
+                await _set_runtime(conn, f"{prefix}.{_field}", _value)
+            else:
+                await conn.execute(
+                    "DELETE FROM config_runtime WHERE key = $1",
+                    f"{prefix}.{_field}",
+                )
 
         # per-provider 对话参数上限(0 表示删除覆盖回退全局默认, 空表示不更新)
         for key, field in (
@@ -2798,6 +2887,10 @@ class ProviderCreateRequest(BaseModel):
     max_output_tokens: int | None = None
     max_turns: int | None = None
     multimodal: bool = False  # 是否多模态(支持图片输入)
+    # 2026-09-29(P3 灵活接入): 非标准端点的兼容网关 / 额外鉴权头 / 厂商特有参数
+    chat_path: str | None = None
+    extra_headers: dict | None = None
+    extra_body: dict | None = None
 
 
 @router.post("/settings/providers", response_model=None)
@@ -2862,6 +2955,13 @@ async def create_provider(body: ProviderCreateRequest):
                 "DELETE FROM config_runtime WHERE key = $1",
                 f"{prefix}.multimodal",
             )
+        # 2026-09-29(P3 灵活接入): 端点路径 / 额外请求头 / 额外请求体
+        if body.chat_path and body.chat_path.strip():
+            await _set_runtime(conn, f"{prefix}.chat_path", body.chat_path.strip())
+        if body.extra_headers:
+            await _set_runtime(conn, f"{prefix}.extra_headers", body.extra_headers)
+        if body.extra_body:
+            await _set_runtime(conn, f"{prefix}.extra_body", body.extra_body)
 
         # 2026-09-29(P1-1 链一致性治理): provider 状态变更后**统一维护三条链**
         # (fallback_chain / text_chain / vision_chain)。原实现只把新 provider
@@ -2914,6 +3014,46 @@ class FallbackChainUpdateRequest(BaseModel):
     chain: list[str]
 
 
+async def _apply_chain_order(
+    cfg: dict, chain_name: str, requested: list[str]
+) -> tuple[list[str], list[str]]:
+    """按请求顺序构建一条链: 剔除无效项 / 去重 / 按链语义补齐。
+
+    - 无效项(不存在 / 已删除 / 已禁用)静默剔除 —— 幽灵项直接 400 会让用户
+      永远无法保存顺序(历史脏数据所致), 故剔除并经 `dropped` 回报。
+    - 重复项去重(保留首次出现)。
+    - **仅 `fallback_chain`** 会把未列出的 enabled provider 追加到尾部
+      (既有语义: 降级链是总链, 新 provider 应自动纳入)。`text_chain` /
+      `vision_chain` 的顺序**完全由用户决定**、不自动追加 —— 否则多模态
+      provider 会被塞到 text_chain 链首抢占主对话(违背 D1 决策)。
+
+    Returns:
+        `(chain, dropped)`: 新链内容与被剔除的 provider 名。
+    """
+    providers = (cfg.get("models") or {}).get("providers", {})
+    valid_names = {
+        n for n, p in providers.items()
+        if not p.get("deleted") and p.get("enabled", True)
+    }
+    dropped = [n for n in requested if n not in valid_names]
+
+    seen: set[str] = set()
+    chain: list[str] = []
+    for n in requested:
+        if n not in valid_names or n in seen:
+            continue
+        seen.add(n)
+        chain.append(n)
+
+    if chain_name == "fallback_chain":
+        for n, p in providers.items():
+            if n in seen or p.get("deleted"):
+                continue
+            if p.get("enabled", True):
+                chain.append(n)
+    return chain, dropped
+
+
 @router.put("/settings/fallback-chain", response_model=None)
 async def update_fallback_chain(body: FallbackChainUpdateRequest):
     """更新模型降级链顺序(蓝图 §2.7, config_runtime 整体列表存储)。
@@ -2922,47 +3062,220 @@ async def update_fallback_chain(body: FallbackChainUpdateRequest):
     - 已存在但不在 chain 中的 enabled provider 会被追加到尾部
     - 重复项自动去重(保留首次出现)
     """
-    import json as _json
-
-    cfg = await _load_cfg()
-    providers = cfg.get("models", {}).get("providers", {})
-    # 2026-09-29(P1-4): 判定补 enabled —— 原条件只判 deleted, 导致
-    # enabled=false 的 provider 也能被写进链, 随后被 build_fallback_chain
-    # 过滤掉 → 可能得到**空链**(与 09-29 发图轮事故同类的隐患)。
-    # 已禁用的 provider 入链毫无意义, 故一律剔除(经响应 dropped 回报)。
-    valid_names = {
-        n for n, p in providers.items()
-        if not p.get("deleted") and p.get("enabled", True)
-    }
-
-    # 幽灵项自愈: 历史脏数据(如软删残留)可能让链中出现已不存在的 provider。
-    # 直接 400 会导致用户永远无法保存顺序, 因此改为剔除并回报。
-    dropped = [n for n in body.chain if n not in valid_names]
-
-    # 去重(保留首次出现)
-    seen: set[str] = set()
-    chain: list[str] = []
-    for n in body.chain:
-        if n not in valid_names or n in seen:
-            continue
-        seen.add(n)
-        chain.append(n)
-
-    # 补充已启用但未在 chain 中的 provider
-    for n, p in providers.items():
-        if n in seen:
-            continue
-        if p.get("deleted"):
-            continue
-        if p.get("enabled", True):
-            chain.append(n)
-
     conn = await db.connect()
     try:
+        cfg = await _load_cfg(conn)
+        chain, dropped = await _apply_chain_order(
+            cfg, "fallback_chain", body.chain
+        )
         await _set_runtime(conn, "models.router.fallback_chain", chain)
     finally:
         await conn.close()
     return {"ok": True, "chain": chain, "dropped": dropped}
+
+
+class ChainUpdateRequest(BaseModel):
+    """PUT /settings/chains/{chain_name} 请求体: 设置某条链的顺序。"""
+    chain: list[str]
+
+
+async def _build_chain_view(conn, cfg: dict, chain_name: str) -> dict:
+    """构造一条链的完整视图(供前端"模型链"面板)。"""
+    from private_agent.models.chain_guard import load_chain
+
+    providers = (cfg.get("models") or {}).get("providers", {})
+    order = await load_chain(conn, chain_name)
+    if order is None:
+        # 未配置 ≠ 空链: 此时 build_fallback_chain 会回退 fallback_chain
+        return {
+            "configured": False,
+            "order": [],
+            "items": [],
+            "dangling": [],
+            "applied": [],
+        }
+
+    items: list[dict] = []
+    dangling: list[str] = []
+    applied: list[str] = []
+    for ref in order:
+        exists = ref in providers
+        prov = providers.get(ref) or {}
+        valid = (
+            exists
+            and not bool(prov.get("deleted"))
+            and bool(prov.get("enabled", True))
+        )
+        items.append({
+            "name": ref,
+            "exists": exists,
+            "enabled": bool(prov.get("enabled", True)) if exists else False,
+            "deleted": bool(prov.get("deleted")) if exists else False,
+            "multimodal": bool(prov.get("multimodal")) if exists else False,
+            "valid": valid,
+        })
+        (applied if valid else dangling).append(ref)
+
+    return {
+        "configured": True,
+        "order": order,
+        "items": items,
+        "dangling": dangling,
+        "applied": applied,
+    }
+
+
+@router.get("/settings/chains", response_model=None)
+async def get_chains():
+    """三条模型链的完整视图(前端"模型链"面板数据源)。
+
+    - `dangling`: 悬空引用(不存在 / 已删除 / 已禁用)
+    - `applied`: 实际生效成员(与 registry.build_fallback_chain 过滤结果一致)
+    - `vision_capable`: 发图能力 —— 与系统提示的能力声明同源(看链不看字典)
+    """
+    from private_agent.models.chain_guard import CHAIN_KEYS
+
+    conn = await db.connect()
+    try:
+        cfg = await _load_cfg(conn)
+        chains = {
+            name: await _build_chain_view(conn, cfg, name) for name in CHAIN_KEYS
+        }
+    finally:
+        await conn.close()
+
+    vision_capable = False
+    try:
+        from private_agent.models.registry import build_fallback_chain
+
+        vision_capable = build_fallback_chain(cfg, "vision_chain").has_vision
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "chains": chains,
+        "vision_capable": vision_capable,
+        "any_dangling": any(c["dangling"] for c in chains.values()),
+    }
+
+
+@router.put("/settings/chains/{chain_name}", response_model=None)
+async def update_chain(chain_name: str, body: ChainUpdateRequest):
+    """设置某条链的顺序(自愈剔除无效项, 经 dropped 回报)。
+
+    `text_chain` / `vision_chain` 不自动追加成员(顺序完全由用户决定);
+    `fallback_chain` 仍会把未列出的 enabled provider 追加到尾部。
+    """
+    from private_agent.models.chain_guard import CHAIN_KEYS, save_chain
+
+    if chain_name not in CHAIN_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知的链名 '{chain_name}', 可选: {list(CHAIN_KEYS)}",
+        )
+
+    conn = await db.connect()
+    try:
+        cfg = await _load_cfg(conn)
+        chain, dropped = await _apply_chain_order(cfg, chain_name, body.chain)
+        await save_chain(conn, chain_name, chain)
+    finally:
+        await conn.close()
+    return {
+        "ok": True,
+        "chain_name": chain_name,
+        "chain": chain,
+        "dropped": dropped,
+    }
+
+
+@router.post("/settings/chains/repair", response_model=None)
+async def repair_chains():
+    """一键修复: 剔除三条链的悬空引用并写回(与启动期自愈同一逻辑)。
+
+    返回 `{dropped, emptied, checked, unconfigured}` —— `emptied` 非空表示
+    某条链被清空(如 vision_chain 清空 → 发图能力降级)。
+    """
+    from private_agent.models.chain_guard import audit_chains
+
+    conn = await db.connect()
+    try:
+        cfg = await _load_cfg(conn)
+        report = await audit_chains(conn, cfg)
+    finally:
+        await conn.close()
+    return {"ok": True, **report}
+
+
+class KeyRotateRequest(BaseModel):
+    """POST /settings/providers/{name}/rotate-key 请求体。"""
+    api_key: str
+    verify: bool = True  # 轮换后自动做一次连通性验证
+
+
+@router.post("/settings/providers/{name}/rotate-key", response_model=None)
+async def rotate_provider_key(name: str, body: KeyRotateRequest):
+    """密钥轮换(一等操作): 加密落库 + 进程内热更新 + 连通性验证 + 审计。
+
+    2026-09-29(P4-2): 模型迭代快、key 更迭频繁 —— 把"换 key"做成一步到位
+    的操作, 而不是散落在多处(改 `.env` / 改设置页 / 重启)。
+
+    语义:
+    - 明文只经本机回环或 HTTPS 传输, **不落库**(库里仅 AES-256-GCM 密文);
+    - 热更新 `PA_{NAME}_API_KEY` 环境变量 → 本进程适配器**即刻生效**
+      (adapter 由 factory 每次按当前 cfg 重建, 不缓存 key);
+    - `verify=True` 时用新 key 实调一次模型, 结果与时间写审计字段;
+    - 不记录明文, 只记 `key_rotated_at` / `last_test_ok` / `last_tested_at`。
+    """
+    import os
+    from datetime import datetime, timezone
+
+    key = (body.api_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="api_key 不能为空")
+
+    cfg = await _load_cfg()
+    providers = (cfg.get("models") or {}).get("providers", {})
+    if name not in providers or providers[name].get("deleted"):
+        raise HTTPException(status_code=404, detail=f"provider '{name}' not found")
+
+    master = _ensure_master_key()
+    from private_agent.config import secrets
+
+    encrypted = secrets.encrypt_api_key(key, master)
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = await db.connect()
+    try:
+        await _set_runtime(
+            conn, f"models.providers.{name}.api_key_encrypted", encrypted
+        )
+        await _set_runtime(conn, f"models.providers.{name}.key_rotated_at", now)
+    finally:
+        await conn.close()
+
+    # 热生效: 本进程适配器直接读环境变量(不缓存)
+    os.environ[f"PA_{name.upper()}_API_KEY"] = key
+
+    result: dict = {"ok": True, "provider": name, "rotated_at": now}
+    if not body.verify:
+        return result
+
+    test = await test_provider(name)
+    conn = await db.connect()
+    try:
+        await _set_runtime(
+            conn, f"models.providers.{name}.last_test_ok", bool(test.get("ok"))
+        )
+        await _set_runtime(
+            conn,
+            f"models.providers.{name}.last_tested_at",
+            datetime.now(timezone.utc).isoformat(),
+        )
+    finally:
+        await conn.close()
+    result["test"] = test
+    return result
 
 
 @router.post("/settings/providers/{name}/test", response_model=None)
@@ -6362,9 +6675,20 @@ async def _generate_chinese_metadata(
     except Exception:  # noqa: BLE001
         return None
     try:
-        chain = cfg.get("models", {}).get("fallback_chain") or []
-        provider = chain[0] if isinstance(chain, list) and chain else "deepseek-flash"
-        adapter = get_adapter(provider, cfg)
+        # 2026-09-29(P2 零硬编码) 修复两处缺陷:
+        # ① 路径错位: 原读 cfg["models"]["fallback_chain"], 而正确位置是
+        #    models.router.fallback_chain(config.yaml §3 + registry
+        #    .build_fallback_chain) —— 错位导致**恒为空**;
+        # ② 硬编码兜底: 恒空后落到硬编码 "deepseek-flash" → 换厂商/换模型后
+        #    该功能仍指向旧模型(静默走错 provider)。
+        # 现改走链解析: 自动过滤 disabled/deleted provider, 无可用 provider
+        # 时返回 None(调用方优雅降级), 不再设任何默认模型名。
+        from private_agent.models.registry import build_fallback_chain
+
+        adapters = getattr(build_fallback_chain(cfg), "_adapters", [])
+        if not adapters:
+            return None
+        adapter = adapters[0]
     except Exception:  # noqa: BLE001
         return None
     prompt = (

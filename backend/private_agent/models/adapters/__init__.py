@@ -74,10 +74,23 @@ class OpenAICompatibleAdapter(ModelAdapter):
         client: httpx.AsyncClient | None = None,
         provider_name: str | None = None,
         multimodal: bool = False,
+        chat_path: str = "/chat/completions",
+        extra_headers: dict[str, str] | None = None,
+        extra_body: dict[str, Any] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_name = model_name or self.default_model_name
+        # 2026-09-29(P3 灵活接入): 端点路径 / 额外请求头 / 额外请求体字段全部
+        # 可配置, **默认值与历史行为完全一致(零回归)**。用途:
+        #   chat_path     —— 非标准路径的兼容网关(私有部署/中转)
+        #   extra_headers —— 需要额外鉴权头的服务
+        #   extra_body    —— 厂商特有参数(如 top_k / thinking 等)
+        self.chat_path = chat_path or "/chat/completions"
+        if not self.chat_path.startswith("/"):
+            self.chat_path = "/" + self.chat_path
+        self.extra_headers = dict(extra_headers or {})
+        self.extra_body = dict(extra_body or {})
         # 动态注册的 provider 传入真实名(错误信息/降级记录用, 默认类属性)
         if provider_name:
             self.provider_name = provider_name
@@ -118,8 +131,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
             body["tools"] = tools
         if max_tokens:
             body["max_tokens"] = max_tokens
-        url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        # P3: 厂商特有字段(可覆盖同名键 —— 由用户在设置页显式配置, 自己负责)
+        body.update(self.extra_body)
+        url = f"{self.base_url}{self.chat_path}"
+        headers = {"Authorization": f"Bearer {self.api_key}", **self.extra_headers}
         # V1.5:httpx AsyncClient 长连接可能被上游服务端断开(keep-alive 超时),
         # 复用失效连接会报空消息 http error 且 httpx 不自动重连。
         # 首次 http error 时重建 client 重试一次,保证对话链路稳定。
@@ -187,8 +202,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
             body["tools"] = tools
         if max_tokens:
             body["max_tokens"] = max_tokens
-        url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        # P3: 与 chat() 对齐 —— 厂商特有字段 / 自定义路径 / 额外请求头
+        body.update(self.extra_body)
+        url = f"{self.base_url}{self.chat_path}"
+        headers = {"Authorization": f"Bearer {self.api_key}", **self.extra_headers}
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
