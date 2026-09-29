@@ -176,7 +176,14 @@ def _inject_image_urls(
 
     result: list[dict] = []
     skipped: list[str] = []
+    # 2026-09-29 修复(image_inject 误报): 仅扫描 role=user 消息 + 过滤占位符。
+    # 历史 tool/assistant 消息(如分析代码时带出的源码文档示例 "[已上传文件: name 路径: ...]")
+    # 曾被当成真实图片引用, name 捕获字面 "name" → 误报 "name(文件不存在)"。
     for msg in messages:
+        # 只处理本轮/历史 user 消息; tool/assistant/system 的路径文本不触发注入
+        if msg.get("role") != "user":
+            result.append(msg)
+            continue
         content = msg.get("content")
         if not isinstance(content, str) or "路径:" not in content:
             result.append(msg)
@@ -185,6 +192,9 @@ def _inject_image_urls(
         found = False
         for m in img_ref_re.finditer(content):
             _kind, name, raw_path = m.group(1), m.group(2), m.group(3).strip()
+            # 过滤占位符: name 为字面 "name"/空 时判定为非真实图片引用(反例防御)
+            if not name or name.strip().lower() in ("name", "<name>"):
+                continue
             if not raw_path.lower().endswith(_IMAGE_EXTS):
                 continue
             found = True
