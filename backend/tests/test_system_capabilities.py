@@ -113,7 +113,13 @@ def test_all_aspect():
 
 
 def test_channels_include_self_repair():
-    """channels 维度: 含自我修复链路指引(2026-08-13 蒋先生确认)。"""
+    """channels 维度: 含自我修复链路指引。
+
+    2026-09-29 修订: 原断言要求含"重新打包"(build-electron.bat) —— 那是**打包版
+    时代**的指引, 现已弃用打包版(日常走 dev 链路)。更要紧的是它指导模型让用户
+    "关闭 PA 并重新打包", 而重启正是打断自我改动流程的根源(蒋先生反馈: 改动开始后
+    就断连、无法判断原因)。现断言新语义: 三层影子验证 + 落盘即完成 + 不要求立即重启。
+    """
     async def _run() -> str:
         result = await _system_capabilities_handler({"aspect": "channels"})
         return result.output
@@ -121,8 +127,17 @@ def test_channels_include_self_repair():
     output = asyncio.run(_run())
     assert "自我修复链路" in output
     assert "file_write" in output
-    assert "重新打包" in output
     assert "最多改 2 次" in output
+    # 影子验证三层(改动后必须自证正确, 不得靠重启看结果)
+    assert "影子验证" in output
+    assert "py_compile" in output
+    assert "pytest" in output
+    # 不要求用户立即重启(重启会中断正在进行的对话)
+    assert "不要要求用户立即重启" in output
+    # 过时指引必须已移除(注意: "打包部署(仅用户手动执行 build-electron.bat)"
+    # 属"你不能做"的合法说明, 保留; 要移除的是"让用户关 PA 去重新打包"这条)
+    assert "关闭 PA 并重新打包" not in output
+    assert "必须等用户重新打包" not in output
 
 
 def test_unknown_aspect_falls_back_to_all():
