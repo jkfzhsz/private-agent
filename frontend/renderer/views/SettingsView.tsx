@@ -616,7 +616,6 @@ const SETTINGS_NAV_GROUPS: SettingsNavGroup[] = [
 
 export default function SettingsView({ sessionId = 1, theme, city = "武汉", setCity }: { sessionId?: number; theme?: "light" | "dark"; city?: string; setCity?: (v: string) => void }): JSX.Element {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [fallbackChain, setFallbackChain] = useState<string[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [protocol, setProtocol] = useState("");
   const [error, setError] = useState("");
@@ -641,7 +640,6 @@ export default function SettingsView({ sessionId = 1, theme, city = "武汉", se
       const provData = await provResp.json();
       const mcpData = await mcpResp.json();
       setProviders(provData.providers ?? []);
-      setFallbackChain(provData.fallback_chain ?? []);
       setMcpServers(mcpData.servers ?? []);
       setProtocol(mcpData.protocol_version ?? "");
       setError("");
@@ -684,13 +682,10 @@ export default function SettingsView({ sessionId = 1, theme, city = "武汉", se
           subtitle="可新增/编辑/删除模型(任意 OpenAI 兼容服务) · 编辑可配置参数上限(输入/输出/轮次)"
           count={providers.length}
         >
-          {/* 降级链编辑器: 可拖拽排序 / 增删 */}
+          {/* 模型链面板(P1-3, 2026-09-29): 三条链统一管理 —— 顺序调整、
+              悬空项高亮、一键修复、视觉能力提示(数据源 GET /settings/chains) */}
           {providers.length > 0 && (
-            <FallbackChainEditor
-              providers={providers}
-              chain={fallbackChain}
-              onUpdated={load}
-            />
+            <ModelChainsPanel providers={providers} onUpdated={load} />
           )}
           <div className="flex-col gap-8">
             {/* V1.4-8.2: 按 group 分组 + sort_order 排序渲染 */}
@@ -2424,64 +2419,112 @@ function ProviderRow({
 // 降级链编辑器: 拖拽排序 + 启用/禁用控制
 // ──────────────────────────────────────────────────────────────────────────────
 
-function FallbackChainEditor({
+// ──────────────────────────────────────────────────────────────────────────────
+// 模型链面板（P1-3, 2026-09-29）
+//
+// 三条链（text_chain / vision_chain / fallback_chain）统一可视化管理：
+// 顺序调整、悬空项高亮、一键修复、视觉能力提示。
+// 数据源 GET /settings/chains（后端计算 dangling 标注与 vision_capable）。
+//
+// 背景：2026-09-29 发图轮"所有模型调用失败"事故 —— vision_chain 指向已被
+// 禁用的 provider 却无任何入口可查可修，缺陷静默 3 周。本面板补齐该入口。
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface ChainItem {
+  name: string;
+  exists: boolean;
+  enabled: boolean;
+  deleted: boolean;
+  multimodal: boolean;
+  valid: boolean;
+}
+
+interface ChainView {
+  configured: boolean;
+  order: string[];
+  items: ChainItem[];
+  dangling: string[];
+  applied: string[];
+}
+
+interface ChainsResponse {
+  chains: Record<string, ChainView>;
+  vision_capable: boolean;
+  any_dangling: boolean;
+}
+
+const CHAIN_META: Record<string, { title: string; hint: string }> = {
+  text_chain: {
+    title: "文本链",
+    hint: "主对话按此顺序尝试。多模态模型建议放尾部 —— 仅发图轮按需启用，不会抢占主对话。",
+  },
+  vision_chain: {
+    title: "视觉链",
+    hint: "发图轮优先使用；为空时会回退降级链，仅当降级链也无多模态模型才失去图片识别。",
+  },
+  fallback_chain: {
+    title: "降级链",
+    hint: "以上两条链全部失败后的总兜底；新增模型会自动追加到尾部。",
+  },
+};
+
+function ModelChainsPanel({
   providers,
-  chain,
   onUpdated,
 }: {
   providers: ProviderInfo[];
-  chain: string[];
   onUpdated: () => void;
 }): JSX.Element {
-  const [editing, setEditing] = useState(false);
-  const [localChain, setLocalChain] = useState<string[]>(chain);
+  const [data, setData] = useState<ChainsResponse | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [localChain, setLocalChain] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // 同步外部更新
+  const load = useCallback(async (): Promise<void> => {
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/chains`);
+      const body = (await resp.json()) as ChainsResponse;
+      setData(body);
+      setError("");
+    } catch (e) {
+      setError(`模型链加载失败: ${String(e)}`);
+    }
+  }, []);
+
   useEffect(() => {
-    setLocalChain(chain);
-  }, [chain]);
+    void load();
+  }, [load]);
 
-  // 未在 chain 中但已启用的 provider
-  const available = providers
-    .filter((p) => p.enabled && !localChain.includes(p.name))
-    .map((p) => p.name);
-
-  const moveUp = (idx: number): void => {
-    if (idx === 0) return;
-    const next = [...localChain];
-    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
-    setLocalChain(next);
-  };
-
-  const moveDown = (idx: number): void => {
-    if (idx === localChain.length - 1) return;
-    const next = [...localChain];
-    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-    setLocalChain(next);
-  };
-
-  const remove = (name: string): void => {
-    setLocalChain(localChain.filter((n) => n !== name));
-  };
-
-  const add = (name: string): void => {
-    setLocalChain([...localChain, name]);
+  const startEdit = (name: string): void => {
+    setLocalChain(data?.chains[name]?.order ?? []);
+    setEditing(name);
+    setError("");
   };
 
   const save = async (): Promise<void> => {
+    if (!editing) return;
     setBusy(true);
     setError("");
     try {
-      const resp = await adminFetch(`${API_BASE}/settings/fallback-chain`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chain: localChain }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail ?? `HTTP ${resp.status}`);
-      setEditing(false);
+      const resp = await adminFetch(
+        `${API_BASE}/settings/chains/${encodeURIComponent(editing)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chain: localChain }),
+        },
+      );
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body.detail ?? `HTTP ${resp.status}`);
+      const dropped: string[] = Array.isArray(body.dropped) ? body.dropped : [];
+      toast.success(
+        dropped.length > 0
+          ? `已保存；同时剔除无效项: ${dropped.join("、")}`
+          : "已保存",
+      );
+      setEditing(null);
+      await load();
       onUpdated();
     } catch (err) {
       setError(`保存失败: ${String(err)}`);
@@ -2490,41 +2533,49 @@ function FallbackChainEditor({
     }
   };
 
-  const cancel = (): void => {
-    setLocalChain(chain);
-    setEditing(false);
+  const repair = async (): Promise<void> => {
+    setBusy(true);
     setError("");
+    try {
+      const resp = await adminFetch(`${API_BASE}/settings/chains/repair`, {
+        method: "POST",
+      });
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body.detail ?? `HTTP ${resp.status}`);
+      const entries = Object.entries(body.dropped ?? {}) as [string, string[]][];
+      if (entries.length === 0) {
+        toast.success("模型链检查完成：未发现悬空引用");
+      } else {
+        const detail = entries.map(([k, v]) => `${k}: ${v.join("、")}`).join("；");
+        toast.success(`已修复悬空引用 → ${detail}`);
+      }
+      const emptied: string[] = Array.isArray(body.emptied) ? body.emptied : [];
+      if (emptied.length > 0) {
+        toast.error(
+          `注意：${emptied.join("、")} 已清空，相关能力（如发图）将降级`,
+        );
+      }
+      await load();
+      onUpdated();
+    } catch (err) {
+      setError(`修复失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  if (!editing) {
+  const move = (idx: number, delta: number): void => {
+    const target = idx + delta;
+    if (target < 0 || target >= localChain.length) return;
+    const next = [...localChain];
+    [next[idx], next[target]] = [next[target], next[idx]];
+    setLocalChain(next);
+  };
+
+  if (!data) {
     return (
-      <div
-        style={{
-          display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
-          padding: "8px 12px", borderRadius: "var(--radius-sm)",
-          background: "var(--panel-bg)",
-        }}
-      >
-        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", flexShrink: 0 }}>
-          降级链
-        </span>
-        <div style={{ flex: 1, fontSize: 12, color: "var(--text-tertiary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {chain.length > 0
-            ? chain.map((name, i) => (
-                <span key={name}>
-                  {i > 0 && <span style={{ color: "var(--text-tertiary)", margin: "0 4px" }}>→</span>}
-                  <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>{name}</span>
-                </span>
-              ))
-            : "—（未配置）"}
-        </div>
-        <button
-          className="btn-ghost"
-          style={{ fontSize: 11, padding: "4px 10px", flexShrink: 0 }}
-          onClick={() => setEditing(true)}
-        >
-          编辑
-        </button>
+      <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 12 }}>
+        模型链加载中…
       </div>
     );
   }
@@ -2533,70 +2584,257 @@ function FallbackChainEditor({
     <div
       style={{
         marginBottom: 12, padding: "12px 14px", borderRadius: "var(--radius-sm)",
-        background: "var(--panel-bg)", display: "flex", flexDirection: "column", gap: 8,
+        background: "var(--panel-bg)", display: "flex", flexDirection: "column", gap: 10,
       }}
     >
-      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
-        降级链顺序（失败时按此顺序逐个尝试）
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", flex: 1 }}>
+          模型链
+        </span>
+        {data.any_dangling && (
+          <span style={{ fontSize: 11, color: "var(--danger-text)" }}>
+            存在悬空引用
+          </span>
+        )}
+        <button
+          className="btn-ghost"
+          style={{ fontSize: 11, padding: "4px 10px", flexShrink: 0 }}
+          onClick={() => void repair()}
+          disabled={busy}
+        >
+          检查并修复
+        </button>
       </div>
-      {localChain.length === 0 && (
-        <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: "8px 0" }}>
-          降级链为空，请从下方可用模型中选择
-        </div>
-      )}
-      {localChain.map((name, idx) => (
+
+      {!data.vision_capable && (
         <div
-          key={name}
           style={{
-            display: "flex", alignItems: "center", gap: 8,
+            fontSize: 11, color: "var(--text-tertiary)",
             padding: "6px 10px", borderRadius: 6,
-            background: "var(--panel-bg)",
-            border: "1px solid rgba(148,163,184,0.2)",
+            background: "rgba(148,163,184,0.10)",
           }}
         >
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)", width: 20, flexShrink: 0 }}>
-            {idx + 1}.
-          </span>
-          <span style={{ flex: 1, fontSize: 12, fontWeight: 500, color: "var(--text-secondary)" }}>
-            {name}
-          </span>
-          <button
-            className="btn-ghost"
-            style={{ fontSize: 11, padding: "2px 8px", minWidth: 28 }}
-            onClick={() => moveUp(idx)}
-            disabled={idx === 0}
-          >
-            ↑
-          </button>
-          <button
-            className="btn-ghost"
-            style={{ fontSize: 11, padding: "2px 8px", minWidth: 28 }}
-            onClick={() => moveDown(idx)}
-            disabled={idx === localChain.length - 1}
-          >
-            ↓
-          </button>
-          <button
-            className="btn-ghost"
-            style={{ fontSize: 11, padding: "2px 8px", minWidth: 28, color: "var(--danger-text)" }}
-            onClick={() => remove(name)}
-          >
-            ✕
-          </button>
+          图片识别能力：不可用（三条链均无多模态模型）—— 上传图片时助手会如实提示能力边界，不再静默失败。
         </div>
-      ))}
-      {available.length > 0 && (
-        <div style={{ marginTop: 4 }}>
+      )}
+
+      {["text_chain", "vision_chain", "fallback_chain"].map((name) => {
+        const view = data.chains[name];
+        const meta = CHAIN_META[name] ?? { title: name, hint: "" };
+        if (!view) return null;
+        const isEditing = editing === name;
+
+        return (
+          <div key={name} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span
+                style={{
+                  fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+                  width: 64, flexShrink: 0,
+                }}
+              >
+                {meta.title}
+              </span>
+              <div
+                style={{
+                  flex: 1, minWidth: 0, fontSize: 12,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}
+              >
+                {!view.configured ? (
+                  <span style={{ color: "var(--text-tertiary)" }}>
+                    —（未配置，回退降级链）
+                  </span>
+                ) : view.items.length === 0 ? (
+                  <span style={{ color: "var(--text-tertiary)" }}>—（空链）</span>
+                ) : (
+                  view.items.map((it, i) => (
+                    <span key={it.name}>
+                      {i > 0 && (
+                        <span style={{ color: "var(--text-tertiary)", margin: "0 4px" }}>→</span>
+                      )}
+                      <span
+                        style={{
+                          color: it.valid ? "var(--text-secondary)" : "var(--danger-text)",
+                          fontWeight: 500,
+                          textDecoration: it.valid ? "none" : "line-through",
+                        }}
+                        title={
+                          it.valid
+                            ? undefined
+                            : it.exists
+                              ? "该模型已禁用或已删除（悬空引用）"
+                              : "该模型不存在"
+                        }
+                      >
+                        {it.name}
+                      </span>
+                    </span>
+                  ))
+                )}
+              </div>
+              {!isEditing && (
+                <button
+                  className="btn-ghost"
+                  style={{ fontSize: 11, padding: "4px 10px", flexShrink: 0 }}
+                  onClick={() => startEdit(name)}
+                >
+                  编辑
+                </button>
+              )}
+            </div>
+
+            {!isEditing && (
+              <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginLeft: 72 }}>
+                {meta.hint}
+              </div>
+            )}
+
+            {isEditing && (
+              <ChainOrderEditor
+                chainName={name}
+                hint={meta.hint}
+                value={localChain}
+                providers={providers}
+                busy={busy}
+                error={error}
+                onChange={setLocalChain}
+                onMove={move}
+                onSave={() => void save()}
+                onCancel={() => {
+                  setEditing(null);
+                  setError("");
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ChainOrderEditor({
+  chainName,
+  hint,
+  value,
+  providers,
+  busy,
+  error,
+  onChange,
+  onMove,
+  onSave,
+  onCancel,
+}: {
+  chainName: string;
+  hint: string;
+  value: string[];
+  providers: ProviderInfo[];
+  busy: boolean;
+  error: string;
+  onChange: (v: string[]) => void;
+  onMove: (idx: number, delta: number) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}): JSX.Element {
+  // 视觉链只列多模态模型（与后端语义一致：非多模态入视觉链无意义）
+  const candidates = providers
+    .filter((p) => p.enabled && !value.includes(p.name))
+    .filter((p) => (chainName === "vision_chain" ? p.multimodal : true))
+    .map((p) => p.name);
+
+  const isInvalid = (name: string): boolean =>
+    !providers.some((p) => p.name === name && p.enabled);
+
+  return (
+    <div
+      style={{
+        marginLeft: 72, padding: "10px 12px", borderRadius: 6,
+        border: "1px solid rgba(148,163,184,0.2)",
+        display: "flex", flexDirection: "column", gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{hint}</div>
+
+      {value.length === 0 && (
+        <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+          当前为空 —— 从下方选择模型加入；视觉链留空时会自动回退降级链。
+        </div>
+      )}
+
+      {value.map((name, idx) => {
+        const bad = isInvalid(name);
+        return (
+          <div
+            key={name}
+            style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "6px 10px", borderRadius: 6,
+              border: `1px solid ${bad ? "var(--danger-text)" : "rgba(148,163,184,0.2)"}`,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 11, color: "var(--text-tertiary)", width: 20, flexShrink: 0,
+              }}
+            >
+              {idx + 1}.
+            </span>
+            <span
+              style={{
+                flex: 1, minWidth: 0, fontSize: 12, fontWeight: 500,
+                color: bad ? "var(--danger-text)" : "var(--text-secondary)",
+              }}
+            >
+              {name}
+              {bad && (
+                <span style={{ fontSize: 11, marginLeft: 6 }}>
+                  （无效，保存后自动剔除）
+                </span>
+              )}
+            </span>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 11, padding: "2px 8px", minWidth: 28 }}
+              onClick={() => onMove(idx, -1)}
+              disabled={idx === 0}
+            >
+              ↑
+            </button>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 11, padding: "2px 8px", minWidth: 28 }}
+              onClick={() => onMove(idx, 1)}
+              disabled={idx === value.length - 1}
+            >
+              ↓
+            </button>
+            <button
+              className="btn-ghost"
+              style={{
+                fontSize: 11, padding: "2px 8px", minWidth: 28,
+                color: "var(--danger-text)",
+              }}
+              onClick={() => onChange(value.filter((n) => n !== name))}
+            >
+              ✕
+            </button>
+          </div>
+        );
+      })}
+
+      {candidates.length > 0 && (
+        <div>
           <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 6 }}>
-            可用但未在链中:
+            加入链中:
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {available.map((name) => (
+            {candidates.map((name) => (
               <button
                 key={name}
                 className="btn-ghost"
                 style={{ fontSize: 11, padding: "3px 10px", borderStyle: "dashed" }}
-                onClick={() => add(name)}
+                onClick={() => onChange([...value, name])}
               >
                 + {name}
               </button>
@@ -2604,11 +2842,12 @@ function FallbackChainEditor({
           </div>
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
-        <button className="btn-primary" style={BTN_MD} onClick={() => void save()} disabled={busy}>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button className="btn-primary" style={BTN_MD} onClick={onSave} disabled={busy}>
           保存
         </button>
-        <button className="btn-ghost" style={BTN_SM} onClick={cancel} disabled={busy}>
+        <button className="btn-ghost" style={BTN_SM} onClick={onCancel} disabled={busy}>
           取消
         </button>
         {error && <span style={{ fontSize: 12, color: "var(--danger-text)" }}>{error}</span>}
