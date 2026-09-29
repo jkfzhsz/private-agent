@@ -793,8 +793,15 @@ async def _get_system_prompt(cfg, session_id: int, conn):
         vision_note = ""
         try:
             provs = (cfg.get("models") or {}).get("providers", {})
+            # 2026-09-29 修复(能力谎报): 原判定只看 multimodal, 不看 enabled ——
+            # 已禁用的 glm-vision(multimodal=true, enabled=false) 仍让系统提示
+            # 持续声明"你具备图片识别能力(已配置多模态模型)", 与实际装配不符,
+            # 是 AI 自我分析误判视觉能力、进而误导用户上传图片实测的直接原因。
+            # 与 registry.build_fallback_chain 的过滤语义对齐(以 enabled 为准)。
             if any(
-                isinstance(p, dict) and p.get("multimodal")
+                isinstance(p, dict)
+                and p.get("multimodal")
+                and p.get("enabled", True)
                 for p in provs.values()
             ):
                 vision_note = (

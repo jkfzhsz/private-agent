@@ -724,7 +724,16 @@ class ReactLoop:
                         },
                     )
                 # 0.5.1(2026-08-10 双链架构): 发图语境 → 自动切换多模态链
-                if self._vision_adapter is not None:
+                # 2026-09-29 修复(vision 空链): 原判定 `is not None` 无法识别
+                # "空链对象" —— build_fallback_chain 在链上 provider 全部
+                # enabled=false 时返回 FallbackChain([])(对象非 None), 判定
+                # 通过后模型链被替换为空链 → chat_stream 循环 0 次 →
+                # AllProvidersFailedError("all 0 providers failed: []")
+                # (09-17/09-23/09-29 共 7 次, 图片类上传 100% 失败)。
+                # 改为"存在且非空": 空链落入下方 else, 走 full_chain 的 vision
+                # 子集, 或给出"未配置多模态模型"的明确提示。
+                _vision_adapters = getattr(self._vision_adapter, "_adapters", None)
+                if _vision_adapters:
                     self._adapter = self._vision_adapter
                     # 0.5.2(2026-08-14 modlens 集成): 参数上限与实际模型绑定。
                     # provider_limits 按 text 链首选解析(如 deepseek-flash
@@ -748,9 +757,11 @@ class ReactLoop:
                     except Exception:  # noqa: BLE001 - 解析失败保持原值(仍可降级)
                         pass
                 else:
-                    # 兼容旧构造(无 vision_adapter): 会话锁定纯文本时发图,
-                    # 自动改用全 fallback 链的 vision 子集(不报错、不锁死,
-                    # 按任务语境选模型); 仅当全链也无多模态才提示。
+                    # 无可用 vision 链, 两种来源: ①兼容旧构造(_vision_adapter
+                    # 为 None); ②2026-09-29 起新增 —— vision 链存在但为空
+                    # (链上 provider 全被禁用, 见上方修复说明)。会话锁定纯文本
+                    # 时发图, 自动改用全 fallback 链的 vision 子集(不报错、不
+                    # 锁死, 按任务语境选模型); 仅当全链也无多模态才提示。
                     chain_has_vision = getattr(self._adapter, "has_vision", None)
                     if chain_has_vision is False:
                         full_chain = None
